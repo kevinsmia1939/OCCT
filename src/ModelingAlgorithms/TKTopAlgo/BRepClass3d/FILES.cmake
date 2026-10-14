@@ -15,6 +15,8 @@ set(OCCT_BRepClass3d_FILES
   BRepClass3d_SClassifier.hxx
   BRepClass3d_SolidClassifier.cxx
   BRepClass3d_SolidClassifier.hxx
+  BRepClass3d_SignedDistance.cxx
+  BRepClass3d_SignedDistance.hxx
   BRepClass3d_SolidExplorer.cxx
   BRepClass3d_SolidExplorer.hxx
 )
