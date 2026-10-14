@@ -49,6 +49,10 @@ BRepClass3d_SignedDistance::BRepClass3d_SignedDistance(const TopoDS_Shape& theSo
     throw Standard_DomainError("Signed distance solid has no boundary faces");
   }
   myBoundary = aBoundary;
+  // Retain the fixed operand's topology maps and bounding boxes between point
+  // queries. LoadS2 resets only the moving point operand and result state.
+  myDistance.SetDeflection(myTolerance);
+  myDistance.LoadS1(myBoundary);
 }
 
 double BRepClass3d_SignedDistance::Value(const gp_Pnt& thePoint)
@@ -57,14 +61,13 @@ double BRepClass3d_SignedDistance::Value(const gp_Pnt& thePoint)
   {
     throw Standard_DomainError("Signed distance point must be finite");
   }
-  BRepExtrema_DistShapeShape aDistance(myBoundary,
-                                       BRepBuilderAPI_MakeVertex(thePoint).Shape(),
-                                       myTolerance);
-  if (!aDistance.IsDone() || aDistance.NbSolution() == 0 || !std::isfinite(aDistance.Value()))
+  myDistance.LoadS2(BRepBuilderAPI_MakeVertex(thePoint).Shape());
+  myDistance.Perform();
+  if (!myDistance.IsDone() || myDistance.NbSolution() == 0 || !std::isfinite(myDistance.Value()))
   {
     throw Standard_Failure("Cannot resolve B-Rep boundary distance");
   }
-  const double aValue = aDistance.Value();
+  const double aValue = myDistance.Value();
   myClassifier.Perform(thePoint, myTolerance);
   const auto aState = myClassifier.State();
   if (aState == TopAbs_ON || aValue <= myTolerance)

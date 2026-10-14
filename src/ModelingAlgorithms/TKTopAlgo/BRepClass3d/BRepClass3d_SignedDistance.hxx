@@ -6,6 +6,7 @@
 #define _BRepClass3d_SignedDistance_HeaderFile
 
 #include <BRepClass3d_SolidClassifier.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
 #include <TopoDS_Shape.hxx>
 #include <gp_Pnt.hxx>
 
@@ -14,7 +15,7 @@
 //! This evaluator bridges a conventional B-Rep to field algorithms without
 //! changing its topology or claiming that arbitrary implicit faces are B-Reps.
 //! The input shape must not be mutated during the lifetime of the evaluator.
-//! Instances contain classification state and must not be shared across threads.
+//! Instances retain classification/distance state and must not be shared across threads.
 class BRepClass3d_SignedDistance
 {
 public:
@@ -32,6 +33,7 @@ public:
 private:
   TopoDS_Shape                myBoundary;
   BRepClass3d_SolidClassifier myClassifier;
+  BRepExtrema_DistShapeShape  myDistance;
   double                      myTolerance;
 };
 
