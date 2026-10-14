@@ -19,18 +19,18 @@ BRepClass3d_SignedDistance::BRepClass3d_SignedDistance(const TopoDS_Shape& theSo
 {
   if (!std::isfinite(theTolerance) || theTolerance <= 0.0)
   {
-    Standard_DomainError::Raise("Signed distance requires a finite positive tolerance");
+    throw Standard_DomainError("Signed distance requires a finite positive tolerance");
   }
   if (theSolid.IsNull() || theSolid.ShapeType() != TopAbs_SOLID
       || !BRepCheck_Analyzer(theSolid).IsValid())
   {
-    Standard_DomainError::Raise("Signed distance requires one valid B-Rep solid");
+    throw Standard_DomainError("Signed distance requires one valid B-Rep solid");
   }
   myClassifier.Load(theSolid);
   myClassifier.PerformInfinitePoint(myTolerance);
   if (myClassifier.State() != TopAbs_OUT)
   {
-    Standard_DomainError::Raise("Signed distance requires a finite outward-oriented solid");
+    throw Standard_DomainError("Signed distance requires a finite outward-oriented solid");
   }
 
   // DistShapeShape(solid, interior vertex) reports an inner solution at zero.
@@ -46,7 +46,7 @@ BRepClass3d_SignedDistance::BRepClass3d_SignedDistance(const TopoDS_Shape& theSo
   }
   if (!hasFaces)
   {
-    Standard_DomainError::Raise("Signed distance solid has no boundary faces");
+    throw Standard_DomainError("Signed distance solid has no boundary faces");
   }
   myBoundary = aBoundary;
 }
@@ -55,14 +55,14 @@ double BRepClass3d_SignedDistance::Value(const gp_Pnt& thePoint)
 {
   if (!std::isfinite(thePoint.X()) || !std::isfinite(thePoint.Y()) || !std::isfinite(thePoint.Z()))
   {
-    Standard_DomainError::Raise("Signed distance point must be finite");
+    throw Standard_DomainError("Signed distance point must be finite");
   }
   BRepExtrema_DistShapeShape aDistance(myBoundary,
                                        BRepBuilderAPI_MakeVertex(thePoint).Shape(),
                                        myTolerance);
   if (!aDistance.IsDone() || aDistance.NbSolution() == 0 || !std::isfinite(aDistance.Value()))
   {
-    Standard_Failure::Raise("Cannot resolve B-Rep boundary distance");
+    throw Standard_Failure("Cannot resolve B-Rep boundary distance");
   }
   const double aValue = aDistance.Value();
   myClassifier.Perform(thePoint, myTolerance);
@@ -79,6 +79,5 @@ double BRepClass3d_SignedDistance::Value(const gp_Pnt& thePoint)
   {
     return aValue;
   }
-  Standard_Failure::Raise("Cannot classify B-Rep signed distance point");
-  return 0.0;
+  throw Standard_Failure("Cannot classify B-Rep signed distance point");
 }
