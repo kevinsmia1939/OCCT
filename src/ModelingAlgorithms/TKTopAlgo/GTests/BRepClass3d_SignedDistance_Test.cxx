@@ -16,7 +16,7 @@ TEST(BRepClass3d_SignedDistanceTest, InteriorIsNotZero)
 
 TEST(BRepClass3d_SignedDistanceTest, RejectsInvalidInput)
 {
-  EXPECT_THROW(BRepClass3d_SignedDistance(TopoDS_Shape()), Standard_Failure);
+  EXPECT_THROW((void)BRepClass3d_SignedDistance(TopoDS_Shape()), Standard_Failure);
   const auto aBox = BRepPrimAPI_MakeBox(2.0, 2.0, 2.0).Shape();
   EXPECT_THROW(BRepClass3d_SignedDistance(aBox, 0.0), Standard_Failure);
   EXPECT_THROW(BRepClass3d_SignedDistance(aBox.Reversed()), Standard_Failure);
