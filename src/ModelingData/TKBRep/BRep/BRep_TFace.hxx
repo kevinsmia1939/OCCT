@@ -23,6 +23,7 @@
 #include <TopLoc_Location.hxx>
 #include <Standard_Real.hxx>
 #include <TopoDS_TFace.hxx>
+#include <Standard_NotImplemented.hxx>
 class Geom_Surface;
 class TopoDS_TShape;
 
@@ -56,10 +57,25 @@ public:
   Standard_EXPORT BRep_TFace();
 
   //! Returns face surface.
-  const occ::handle<Geom_Surface>& Surface() const { return mySurface; }
+  //! Throws Standard_NotImplemented for native field-backed faces (no UV map).
+  const occ::handle<Geom_Surface>& Surface() const
+  {
+    if (IsImplicit())
+      throw Standard_NotImplemented(
+        "Native implicit face has no UV Geom_Surface; use BRep_ImplicitTool");
+    return mySurface;
+  }
 
   //! Sets surface for this face.
-  void Surface(const occ::handle<Geom_Surface>& theSurface) { mySurface = theSurface; }
+  void Surface(const occ::handle<Geom_Surface>& theSurface)
+  {
+    if (IsImplicit())
+      throw Standard_NotImplemented("Cannot replace native implicit geometry with a UV surface");
+    mySurface = theSurface;
+  }
+
+  //! Experimental field-backed derived representation (no base object layout change).
+  Standard_EXPORT bool IsImplicit() const;
 
   //! Returns the face location.
   const TopLoc_Location& Location() const { return myLocation; }
@@ -78,7 +94,12 @@ public:
   bool NaturalRestriction() const { return myNaturalRestriction; }
 
   //! Sets the flag that is TRUE if the boundary of this face is known to be the parametric space.
-  void NaturalRestriction(const bool theRestriction) { myNaturalRestriction = theRestriction; }
+  void NaturalRestriction(const bool theRestriction)
+  {
+    if (theRestriction && IsImplicit())
+      throw Standard_NotImplemented("Implicit domain is not a natural UV restriction");
+    myNaturalRestriction = theRestriction;
+  }
 
   //! Returns the triangulation of this face according to the mesh purpose.
   //! @param[in] thePurpose a mesh purpose to find appropriate triangulation (NONE by default).

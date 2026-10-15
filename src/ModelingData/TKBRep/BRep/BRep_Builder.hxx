@@ -33,6 +33,7 @@ class Geom_Curve;
 class Poly_Polygon3D;
 class Poly_PolygonOnTriangulation;
 class Geom2d_Curve;
+class Geom_ImplicitField;
 class gp_Pnt2d;
 class Poly_Polygon2D;
 class TopoDS_Vertex;
@@ -61,6 +62,15 @@ public:
 
   //! Makes an undefined Face.
   void MakeFace(TopoDS_Face& F) const;
+
+  //! Experimental field-backed face. Domain is query support, not trimming/caps.
+  //! Tolerance has model-length units, NOT field-value units. No UV surface.
+  Standard_EXPORT void MakeImplicitFace(TopoDS_Face&                           theFace,
+                                        const occ::handle<Geom_ImplicitField>& theField,
+                                        const gp_Pnt&                          theMinimum,
+                                        const gp_Pnt&                          theMaximum,
+                                        const TopLoc_Location&                 theLocation,
+                                        double                                 theTolerance) const;
 
   //! Makes a Face with a surface.
   Standard_EXPORT void MakeFace(TopoDS_Face&                     F,

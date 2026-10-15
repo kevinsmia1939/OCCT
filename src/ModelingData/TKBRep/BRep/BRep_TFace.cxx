@@ -15,6 +15,7 @@
 // commercial license or contractual agreement.
 
 #include <BRep_TFace.hxx>
+#include <BRep_TImplicitFace.hxx>
 #include <Geom_Surface.hxx>
 #include <Poly_Triangulation.hxx>
 #include <Standard_Type.hxx>
@@ -22,6 +23,11 @@
 #include <TopoDS_Shape.hxx>
 
 IMPLEMENT_STANDARD_RTTIEXT(BRep_TFace, TopoDS_TFace)
+
+bool BRep_TFace::IsImplicit() const
+{
+  return IsKind(STANDARD_TYPE(BRep_TImplicitFace));
+}
 
 //=================================================================================================
 

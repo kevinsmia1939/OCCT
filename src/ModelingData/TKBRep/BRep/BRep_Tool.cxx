@@ -15,6 +15,8 @@
 // commercial license or contractual agreement.
 
 #include <BRep_Curve3D.hxx>
+#include <BRep_TImplicitFace.hxx>
+#include <Standard_TypeMismatch.hxx>
 #include <BRep_CurveOnClosedSurface.hxx>
 #include <BRep_CurveOnSurface.hxx>
 #include <BRep_CurveRepresentation.hxx>
@@ -106,6 +108,21 @@ bool isValidTrimRange(const occ::handle<Geom_Curve>& theCurve,
 // purpose  : Returns the geometric surface of the face. Returns
 //            in <L> the location for the surface.
 //=================================================================================================
+
+bool BRep_Tool::IsImplicit(const TopoDS_Face& f)
+{
+  return !f.IsNull() && f.TShape()->IsKind(STANDARD_TYPE(BRep_TImplicitFace));
+}
+
+const occ::handle<Geom_ImplicitField>& BRep_Tool::ImplicitGeometry(const TopoDS_Face& f,
+                                                                   TopLoc_Location&   l)
+{
+  if (!IsImplicit(f))
+    throw Standard_TypeMismatch("Face does not carry native implicit geometry");
+  const auto* data = static_cast<const BRep_TImplicitFace*>(f.TShape().get());
+  l                = f.Location() * data->Location();
+  return data->Field();
+}
 
 const occ::handle<Geom_Surface>& BRep_Tool::Surface(const TopoDS_Face& F, TopLoc_Location& L)
 {
@@ -258,6 +275,13 @@ occ::handle<Geom_Curve> BRep_Tool::Curve(const TopoDS_Edge& E, double& First, do
 //=================================================================================================
 bool BRep_Tool::IsGeometric(const TopoDS_Face& F)
 {
+  return IsImplicit(F) || HasParametricSurface(F);
+}
+
+bool BRep_Tool::HasParametricSurface(const TopoDS_Face& F)
+{
+  if (IsImplicit(F))
+    return false;
   const BRep_TFace*                TF = static_cast<const BRep_TFace*>(F.TShape().get());
   const occ::handle<Geom_Surface>& S  = TF->Surface();
   return !S.IsNull();

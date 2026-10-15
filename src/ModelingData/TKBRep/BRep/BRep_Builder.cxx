@@ -15,6 +15,8 @@
 // commercial license or contractual agreement.
 
 #include <BRep_Builder.hxx>
+#include <BRep_TImplicitFace.hxx>
+#include <cmath>
 #include <BRep_Curve3D.hxx>
 #include <BRep_CurveOn2Surfaces.hxx>
 #include <BRep_CurveOnClosedSurface.hxx>
@@ -497,6 +499,20 @@ static void UpdatePoints(NCollection_List<occ::handle<BRep_PointRepresentation>>
 
 //=================================================================================================
 
+void BRep_Builder::MakeImplicitFace(TopoDS_Face&                           f,
+                                    const occ::handle<Geom_ImplicitField>& field,
+                                    const gp_Pnt&                          low,
+                                    const gp_Pnt&                          high,
+                                    const TopLoc_Location&                 location,
+                                    double                                 tolerance) const
+{
+  if (!f.IsNull() && f.Locked())
+    throw TopoDS_LockedShape("BRep_Builder::MakeImplicitFace");
+  occ::handle<BRep_TImplicitFace> data = new BRep_TImplicitFace(field, low, high, tolerance);
+  data->Location(location);
+  MakeShape(f, data);
+}
+
 void BRep_Builder::MakeFace(TopoDS_Face&                     F,
                             const occ::handle<Geom_Surface>& S,
                             const double                     Tol) const
@@ -597,6 +613,8 @@ void BRep_Builder::UpdateFace(const TopoDS_Face&                     theFace,
 void BRep_Builder::UpdateFace(const TopoDS_Face& F, const double Tol) const
 {
   const occ::handle<BRep_TFace>& TF = *((occ::handle<BRep_TFace>*)&F.TShape());
+  if (TF->IsImplicit() && (!std::isfinite(Tol) || Tol <= 0))
+    throw Standard_DomainError("Implicit face geometric tolerance must be positive finite");
   if (TF->Locked())
   {
     throw TopoDS_LockedShape("BRep_Builder::UpdateFace");

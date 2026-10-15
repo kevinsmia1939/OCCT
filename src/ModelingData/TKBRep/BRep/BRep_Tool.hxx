@@ -38,6 +38,7 @@ class TopoDS_Face;
 class TopLoc_Location;
 class TopoDS_Edge;
 class TopoDS_Vertex;
+class Geom_ImplicitField;
 
 //! Provides class methods to access to the geometry
 //! of BRep shapes.
@@ -45,6 +46,14 @@ class BRep_Tool
 {
 public:
   DEFINE_STANDARD_ALLOC
+
+  //! Native field-backed representation. Null faces return false.
+  Standard_EXPORT static bool IsImplicit(const TopoDS_Face& theFace);
+
+  //! Access field and combined face/geometry location; rejects conventional faces.
+  Standard_EXPORT static const occ::handle<Geom_ImplicitField>& ImplicitGeometry(
+    const TopoDS_Face& theFace,
+    TopLoc_Location&   theLocation);
 
   //! If S is Shell, returns True if it has no free boundaries (edges).
   //! If S is Wire, returns True if it has no free ends (vertices).
@@ -55,6 +64,7 @@ public:
 
   //! Returns the geometric surface of the face. Returns
   //! in <L> the location for the surface.
+  //! Native implicit faces raise Standard_NotImplemented; use ImplicitGeometry.
   Standard_EXPORT static const occ::handle<Geom_Surface>& Surface(const TopoDS_Face& F,
                                                                   TopLoc_Location&   L);
 
@@ -89,8 +99,12 @@ public:
   //! Returns the NaturalRestriction flag of the face.
   Standard_EXPORT static bool NaturalRestriction(const TopoDS_Face& F);
 
-  //! Returns True if <F> has a surface, false otherwise.
+  //! Returns True if <F> has parametric or native implicit geometry.
+  //! This does not imply that UV-based algorithms support the face.
   Standard_EXPORT static bool IsGeometric(const TopoDS_Face& F);
+
+  //! Returns True only for a face with a Geom_Surface (not an implicit field).
+  Standard_EXPORT static bool HasParametricSurface(const TopoDS_Face& F);
 
   //! Returns True if <E> is a 3d curve or a curve on surface.
   Standard_EXPORT static bool IsGeometric(const TopoDS_Edge& E);
