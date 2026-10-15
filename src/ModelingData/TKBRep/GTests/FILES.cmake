@@ -2,6 +2,7 @@
 set(OCCT_TKBRep_GTests_FILES_LOCATION "${CMAKE_CURRENT_LIST_DIR}")
 
 set(OCCT_TKBRep_GTests_FILES
+  BRep_ImplicitPlaneSection_Test.cxx
   BRep_ImplicitSphereOps_Test.cxx
   BRep_ImplicitFace_Test.cxx
   BRep_Tool_Test.cxx

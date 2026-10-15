@@ -5,6 +5,7 @@
 #include <BRep_ImplicitTool.hxx>
 #include <BRep_TImplicitFace.hxx>
 #include <BRep_TImplicitSpherePatch.hxx>
+#include <BRep_TImplicitPlanePatch.hxx>
 #include <BRep_Tool.hxx>
 #include <Standard_DomainError.hxx>
 #include <Standard_TypeMismatch.hxx>
@@ -18,7 +19,9 @@ const BRep_TImplicitFace& faceData(const TopoDS_Face& f)
   if (!BRep_Tool::IsImplicit(f))
     throw Standard_TypeMismatch("BRep_ImplicitTool requires a native implicit face");
   const auto& data = *static_cast<const BRep_TImplicitFace*>(f.TShape().get());
-  if (dynamic_cast<const BRep_TImplicitSpherePatch*>(&data) && !data.Location().IsIdentity())
+  if ((dynamic_cast<const BRep_TImplicitSpherePatch*>(&data)
+       || dynamic_cast<const BRep_TImplicitPlanePatch*>(&data))
+      && !data.Location().IsIdentity())
     throw Standard_DomainError(
       "Patch geometry location must remain identity; move its face instance");
   return data;
@@ -110,6 +113,9 @@ bool BRep_ImplicitTool::IsInDomain(const TopoDS_Face& f, const gp_Pnt& p)
         || local.Coord(axis) > data.Maximum().Coord(axis))
       return false;
   if (const auto* patch = dynamic_cast<const BRep_TImplicitSpherePatch*>(&data))
+    return gp_Vec(patch->Plane().Location(), local).Dot(gp_Vec(patch->Plane().Axis().Direction()))
+           <= 0;
+  if (const auto* patch = dynamic_cast<const BRep_TImplicitPlanePatch*>(&data))
     return gp_Vec(patch->Plane().Location(), local).Dot(gp_Vec(patch->Plane().Axis().Direction()))
            <= 0;
   return true;
