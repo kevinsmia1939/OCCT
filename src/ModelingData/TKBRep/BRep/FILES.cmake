@@ -2,6 +2,9 @@
 set(OCCT_BRep_FILES_LOCATION "${CMAKE_CURRENT_LIST_DIR}")
 
 set(OCCT_BRep_FILES
+  BRep_TImplicitSpherePatch.hxx
+  BRep_ImplicitSphereOps.hxx
+  BRep_ImplicitSphereOps.cxx
   BRep_ImplicitIO.hxx
   BRep_ImplicitIO.cxx
   BRep_TImplicitFace.hxx

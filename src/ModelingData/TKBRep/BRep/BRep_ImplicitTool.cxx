@@ -4,6 +4,7 @@
 
 #include <BRep_ImplicitTool.hxx>
 #include <BRep_TImplicitFace.hxx>
+#include <BRep_TImplicitSpherePatch.hxx>
 #include <BRep_Tool.hxx>
 #include <Standard_DomainError.hxx>
 #include <Standard_TypeMismatch.hxx>
@@ -16,7 +17,11 @@ const BRep_TImplicitFace& faceData(const TopoDS_Face& f)
 {
   if (!BRep_Tool::IsImplicit(f))
     throw Standard_TypeMismatch("BRep_ImplicitTool requires a native implicit face");
-  return *static_cast<const BRep_TImplicitFace*>(f.TShape().get());
+  const auto& data = *static_cast<const BRep_TImplicitFace*>(f.TShape().get());
+  if (dynamic_cast<const BRep_TImplicitSpherePatch*>(&data) && !data.Location().IsIdentity())
+    throw Standard_DomainError(
+      "Patch geometry location must remain identity; move its face instance");
+  return data;
 }
 
 double checked(double v)
@@ -104,6 +109,9 @@ bool BRep_ImplicitTool::IsInDomain(const TopoDS_Face& f, const gp_Pnt& p)
     if (local.Coord(axis) < data.Minimum().Coord(axis)
         || local.Coord(axis) > data.Maximum().Coord(axis))
       return false;
+  if (const auto* patch = dynamic_cast<const BRep_TImplicitSpherePatch*>(&data))
+    return gp_Vec(patch->Plane().Location(), local).Dot(gp_Vec(patch->Plane().Axis().Direction()))
+           <= 0;
   return true;
 }
 
@@ -158,6 +166,8 @@ std::vector<BRep_ImplicitTool::RayHit> BRep_ImplicitTool::IntersectRay(const Top
     if (!hits.empty() && t - hits.back().Distance <= tolerance)
       return;
     gp_Pnt p = point(t);
+    if (!IsInDomain(f, p))
+      return;
     hits.push_back({t, p, std::abs(Value(f, p)), width});
   };
   double previous = minimum, previousValue = Value(f, point(previous));

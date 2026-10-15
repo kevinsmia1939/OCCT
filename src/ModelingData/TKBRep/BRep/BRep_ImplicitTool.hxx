@@ -12,7 +12,8 @@
 
 //! Field-aware queries on experimental native implicit faces.
 //! Points/directions/distances are in the placed face frame, not field-local UV.
-//! Does NOT implement trimming, BOP, generic meshing, validation or exchange.
+//! Honors the explicit sphere-plane patch trim predicate in domain/ray queries.
+//! Does NOT implement general trimming, BOP, generic meshing or validation.
 class BRep_ImplicitTool
 {
 public:

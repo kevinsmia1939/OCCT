@@ -114,7 +114,7 @@ void writeTransform(std::ostream& out, const TopLoc_Location& location)
 void BRep_ImplicitIO::Write(const TopoDS_Face& face, Standard_OStream& stream)
 {
   const auto data = occ::down_cast<BRep_TImplicitFace>(face.TShape());
-  if (data.IsNull() || TopoDS_Iterator(face).More())
+  if (data.IsNull() || typeid(*data) != typeid(BRep_TImplicitFace) || TopoDS_Iterator(face).More())
     throw Standard_NotImplemented("BRep_ImplicitIO: requires a childless native implicit face");
 
   std::ostringstream out;

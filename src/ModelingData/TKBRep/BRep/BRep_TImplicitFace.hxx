@@ -10,7 +10,7 @@
 
 //! Experimental native field-backed face storage, without a fake UV surface.
 //! The finite domain clips queries; it is NOT sewn trimming topology or caps.
-//! Only the explicit BRep_ImplicitTool operations are supported at this stage.
+//! Only explicit implicit-aware consumers are supported (not generic UV code).
 class BRep_TImplicitFace : public BRep_TFace
 {
 public:
