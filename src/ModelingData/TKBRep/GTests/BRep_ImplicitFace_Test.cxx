@@ -6,6 +6,7 @@
 #include <BRep_Tool.hxx>
 #include <BRep_TImplicitFace.hxx>
 #include <BRep_ImplicitTool.hxx>
+#include <BRep_ImplicitIO.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepTools.hxx>
 #include <BinTools.hxx>
@@ -18,6 +19,8 @@
 #include <Standard_DomainError.hxx>
 #include <Standard_TypeMismatch.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Wire.hxx>
+#include <TopoDS_LockedShape.hxx>
 #include <gp_Ax1.hxx>
 #include <gtest/gtest.h>
 #include <cmath>
@@ -46,6 +49,205 @@ TopoDS_Face sphereFace(const gp_Pnt& low = gp_Pnt(-3, -3, -3), const gp_Pnt& hig
   return face;
 }
 } // namespace
+
+TEST(BRep_ImplicitFace, PersistenceRoundTrip)
+{
+  for (int primitive = 0; primitive < 2; ++primitive)
+    for (int orientation = 0; orientation < 4; ++orientation)
+    {
+      occ::handle<Geom_ImplicitField> field;
+      if (primitive == 0)
+        field = new Geom_ImplicitSphere(gp_Pnt(0.31, -0.23, 0.57), 2.123456789012345);
+      else
+        field = new Geom_ImplicitGyroid(3.123456789012345, -0.2718281828459);
+      gp_Trsf geometry;
+      geometry.SetTranslation(gp_Vec(1.125, 2.25, -3.5));
+      gp_Trsf instance;
+      instance.SetRotation(gp_Ax1(gp_Pnt(1, 2, 3), gp_Dir(1, 2, 3)), 0.731);
+      gp_Trsf scale;
+      scale.SetScale(gp_Pnt(0, 0, 0), -1.25);
+      instance.Multiply(scale);
+      TopoDS_Face source;
+      BRep_Builder().MakeImplicitFace(source,
+                                      field,
+                                      gp_Pnt(-4, -5, -6),
+                                      gp_Pnt(7, 8, 9),
+                                      TopLoc_Location(geometry),
+                                      0.1);
+      source.Location(TopLoc_Location(instance), false);
+      source.Orientation(TopAbs_Orientation(orientation));
+      BRep_Builder().UpdateFace(source, new Poly_Triangulation(3, 1, false));
+      std::ostringstream out;
+      BRep_ImplicitIO::Write(source, out);
+      std::istringstream in(out.str());
+      TopoDS_Face        restored;
+      BRep_ImplicitIO::Read(in, restored);
+      EXPECT_EQ(restored.Orientation(), source.Orientation());
+      const auto* data = static_cast<const BRep_TImplicitFace*>(restored.TShape().get());
+      EXPECT_DOUBLE_EQ(data->Tolerance(), 0.1);
+      EXPECT_DOUBLE_EQ(data->Minimum().Y(), -5);
+      EXPECT_DOUBLE_EQ(data->Maximum().Z(), 9);
+      TopLoc_Location location;
+      EXPECT_TRUE(BRep_Tool::Triangulation(restored, location).IsNull());
+      EXPECT_EQ(typeid(*data->Field()), typeid(*field));
+      for (int r = 1; r <= 3; ++r)
+        for (int c = 1; c <= 4; ++c)
+        {
+          EXPECT_NEAR(data->Location().Transformation().Value(r, c), geometry.Value(r, c), 1.e-14);
+          EXPECT_NEAR(restored.Location().Transformation().Value(r, c),
+                      instance.Value(r, c),
+                      1.e-14);
+        }
+      for (const gp_Pnt p : {gp_Pnt(0.123, 0.456, 0.789), gp_Pnt(-1, 2, -3)})
+      {
+        EXPECT_NEAR(BRep_ImplicitTool::Value(source, p),
+                    BRep_ImplicitTool::Value(restored, p),
+                    1.e-13);
+        EXPECT_NEAR(
+          (BRep_ImplicitTool::Gradient(source, p) - BRep_ImplicitTool::Gradient(restored, p))
+            .Magnitude(),
+          0,
+          1.e-12);
+      }
+      std::ostringstream again;
+      BRep_ImplicitIO::Write(restored, again);
+      TopoDS_Face        twice;
+      std::istringstream second(again.str());
+      EXPECT_NO_THROW(BRep_ImplicitIO::Read(second, twice));
+    }
+}
+
+TEST(BRep_ImplicitFace, PersistenceRejectsWithoutDataLoss)
+{
+  TopoDS_Face        face = sphereFace();
+  std::ostringstream out;
+  BRep_ImplicitIO::Write(face, out);
+  const std::string valid     = out.str();
+  auto              badRecord = [&](const std::string& record) {
+    TopoDS_Face        target = face;
+    std::istringstream in(record);
+    EXPECT_THROW(BRep_ImplicitIO::Read(in, target), Standard_Failure);
+    EXPECT_TRUE(target.IsEqual(face));
+  };
+  for (size_t end = 0; end < valid.find("END") + 3; ++end)
+    badRecord(valid.substr(0, end));
+  badRecord(valid + "unexpected");
+  badRecord(std::string(65537, ' '));
+  auto replace = [&](const std::string& from, const std::string& to) {
+    std::string changed = valid;
+    changed.replace(changed.find(from), from.size(), to);
+    badRecord(changed);
+  };
+  replace("FACE 1", "FACE 2");
+  replace("SPHERE", "CUSTOM");
+  replace("TOLERANCE 0.1", "TOLERANCE -0.1");
+  replace("TOLERANCE 0.1", "TOLERANCE nan");
+  replace("ORIENTATION 0", "ORIENTATION 4");
+  replace("GEOMETRY_LOCATION\n1 0 0 0", "GEOMETRY_LOCATION\n1 0.2 0 0");
+  replace("GEOMETRY_LOCATION\n1 0 0 0", "GEOMETRY_LOCATION\n2 0 0 0");
+  replace("GEOMETRY_LOCATION\n1 0 0 0", "GEOMETRY_LOCATION\n0 0 0 0");
+
+  TopoDS_Face locked = sphereFace();
+  locked.Locked(true);
+  std::istringstream in(valid);
+  EXPECT_THROW(BRep_ImplicitIO::Read(in, locked), TopoDS_LockedShape);
+  EXPECT_EQ(in.tellg(), std::streampos(0));
+
+  auto unsupported = [&](const TopoDS_Face& source) {
+    std::ostringstream stream;
+    stream << "unchanged";
+    EXPECT_THROW(BRep_ImplicitIO::Write(source, stream), Standard_NotImplemented);
+    EXPECT_EQ(stream.str(), "unchanged");
+  };
+  unsupported(TopoDS_Face());
+  TopoDS_Face  custom;
+  BRep_Builder builder;
+  builder.MakeImplicitFace(custom,
+                           new PlaneField,
+                           gp_Pnt(-1, -1, -1),
+                           gp_Pnt(1, 1, 1),
+                           TopLoc_Location(),
+                           0.1);
+  unsupported(custom);
+
+  // A derived primitive may replace its equation: do not serialize its base.
+  class DifferentSphere : public Geom_ImplicitSphere
+  {
+  public:
+    DifferentSphere()
+        : Geom_ImplicitSphere(gp_Pnt(), 2)
+    {
+    }
+
+    double Value(const gp_Pnt&) const override { return 1; }
+  };
+
+  builder.MakeImplicitFace(custom,
+                           new DifferentSphere,
+                           gp_Pnt(-1, -1, -1),
+                           gp_Pnt(1, 1, 1),
+                           TopLoc_Location(),
+                           0.1);
+  unsupported(custom);
+  TopoDS_Wire wire;
+  builder.MakeWire(wire);
+  builder.Add(face, wire);
+  unsupported(face);
+  TopoDS_Face conventional;
+  builder.MakeFace(conventional, new Geom_Plane(gp_Pnt(), gp_Dir(0, 0, 1)), 0.1);
+  unsupported(conventional);
+}
+
+TEST(BRep_ImplicitFace, PersistenceStreamAndTolerancePolicy)
+{
+  // The wire format must not inherit the caller's decimal locale.
+  class CommaDecimal : public std::numpunct<char>
+  {
+    char do_decimal_point() const override { return ','; }
+  };
+
+  TopoDS_Face        source = sphereFace();
+  std::ostringstream out;
+  out.imbue(std::locale(std::locale::classic(), new CommaDecimal));
+  BRep_ImplicitIO::Write(source, out);
+  EXPECT_NE(out.str().find("TOLERANCE 0.10000000000000001"), std::string::npos);
+  std::istringstream in(out.str());
+  in.imbue(out.getloc());
+  TopoDS_Face restored;
+  BRep_ImplicitIO::Read(in, restored);
+  const auto hits =
+    BRep_ImplicitTool::IntersectRay(restored, gp_Pnt(-5, .31, .27), gp_Vec(1, 0, 0), 0, 10, 11);
+  ASSERT_EQ(hits.size(), 2u);
+  const double radiusX = std::sqrt(4 - .31 * .31 - .27 * .27);
+  EXPECT_LE(std::abs(hits[0].Distance - (5 - radiusX)), .05);
+  EXPECT_LE(std::abs(hits[1].Distance - (5 + radiusX)), .05);
+  for (const auto& hit : hits)
+    EXPECT_LE(hit.BracketWidth, .1);
+
+  std::ostringstream failedOut;
+  failedOut.setstate(std::ios::badbit);
+  EXPECT_THROW(BRep_ImplicitIO::Write(source, failedOut), Standard_DomainError);
+  std::istringstream failedIn(out.str());
+  failedIn.setstate(std::ios::badbit);
+  EXPECT_THROW(BRep_ImplicitIO::Read(failedIn, restored), Standard_DomainError);
+  EXPECT_TRUE(BRep_Tool::IsImplicit(restored));
+
+  // Persist the stored tolerance, not BRep_Tool's conventional precision floor.
+  source     = sphereFace();
+  auto* data = static_cast<BRep_TImplicitFace*>(source.TShape().get());
+  data->Tolerance(1.e-10);
+  std::ostringstream tiny;
+  BRep_ImplicitIO::Write(source, tiny);
+  std::istringstream tinyIn(tiny.str());
+  BRep_ImplicitIO::Read(tinyIn, restored);
+  EXPECT_DOUBLE_EQ(static_cast<const BRep_TImplicitFace*>(restored.TShape().get())->Tolerance(),
+                   1.e-10);
+  data->Tolerance(-1);
+  std::ostringstream unchanged;
+  unchanged << "sentinel";
+  EXPECT_THROW(BRep_ImplicitIO::Write(source, unchanged), Standard_DomainError);
+  EXPECT_EQ(unchanged.str(), "sentinel");
+}
 
 TEST(BRep_ImplicitFace, NativeRepresentationAndLegacyRejection)
 {

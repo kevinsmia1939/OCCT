@@ -2,6 +2,8 @@
 set(OCCT_BRep_FILES_LOCATION "${CMAKE_CURRENT_LIST_DIR}")
 
 set(OCCT_BRep_FILES
+  BRep_ImplicitIO.hxx
+  BRep_ImplicitIO.cxx
   BRep_TImplicitFace.hxx
   BRep_TImplicitFace.cxx
   BRep_ImplicitTool.hxx
