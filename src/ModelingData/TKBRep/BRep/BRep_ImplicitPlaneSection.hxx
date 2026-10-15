@@ -29,8 +29,8 @@ public:
 
   struct Result
   {
-    bool               Resolved        = false; //!< ALL cells passed empty/regular-arc bounds.
-    int                Resolution      = 0;
+    bool               Resolved   = false; //!< ALL cells passed empty/regular-arc bounds.
+    int                Resolution = 0; //!< May be a non-dyadic fallback grid, within MaximumCells.
     int                UnresolvedCells = 0, PotentialCriticalCells = 0, AmbiguousCells = 0;
     int                GraphDefects    = 0; //!< Branching/interior-ended fragment vertices.
     double             GeometricBound  = 0; //!< Max accepted cell diagonal; partial if unresolved.

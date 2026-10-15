@@ -16,6 +16,8 @@
 #include <Standard_DomainError.hxx>
 #include <gtest/gtest.h>
 #include <sstream>
+#include <cmath>
+#include <array>
 
 namespace
 {
@@ -25,7 +27,7 @@ TopoDS_Face field(double iso = 1.45)
   BRep_Builder().MakeImplicitFace(face,
                                   new Geom_ImplicitGyroid(10, iso),
                                   gp_Pnt(-5, -5, -5),
-                                  gp_Pnt(6, 6, 6),
+                                  gp_Pnt(16, 16, 6),
                                   TopLoc_Location(),
                                   .1);
   return face;
@@ -93,7 +95,8 @@ TEST(BRepClass3d_ImplicitBox, CommonAndDirectionalCutShareOppositeSeamsAndCapPCu
 TEST(BRepClass3d_ImplicitBox, UnsupportedInputsRejectRatherThanReturnPartialBoundary)
 {
   using Ops = BRepClass3d_ImplicitBox;
-  EXPECT_THROW(Ops::Build(field(0), box(), Ops::Operation::Common), Standard_NotImplemented);
+  EXPECT_THROW(Ops::Build(field(0), BRepPrimAPI_MakeBox(3, 3, 3).Shape(), Ops::Operation::Common),
+               Standard_NotImplemented); // A corner is exactly on F=0.
   EXPECT_THROW(Ops::Build(field(), BRepPrimAPI_MakeCylinder(1, 2).Shape(), Ops::Operation::Common),
                Standard_NotImplemented);
   EXPECT_THROW(Ops::Build(field(), box(), Ops::Operation::Common, .1, 4), Standard_NotImplemented);
@@ -105,6 +108,79 @@ TEST(BRepClass3d_ImplicitBox, UnsupportedInputsRejectRatherThanReturnPartialBoun
   EXPECT_THROW(
     Ops::Build(field(), box().Moved(TopLoc_Location(translation)), Ops::Operation::Common),
     Standard_NotImplemented);
+}
+
+TEST(BRepClass3d_ImplicitBox, OpenContoursJoinAcrossFacesWithAnalyticEdgeReference)
+{
+  using Ops = BRepClass3d_ImplicitBox;
+  const gp_Pnt low(-3.83, -4.07, -2.67), high(4.17, 3.93, 3.37);
+  const auto   operand = BRepPrimAPI_MakeBox(low, high).Shape();
+  // Independent harmonic solutions along each box edge: A sin(k*t) +
+  // B cos(k*t) + C = 0. This does not use the kernel root solver/gradients.
+  const double        pi = std::acos(-1.), k = 2 * pi / 10;
+  std::vector<gp_Pnt> reference;
+  for (int axis = 0; axis < 3; ++axis)
+    for (int bits = 0; bits < 8; ++bits)
+    {
+      if (bits & (1 << axis))
+        continue;
+      gp_Pnt       p(bits & 1 ? high.X() : low.X(),
+                     bits & 2 ? high.Y() : low.Y(),
+                     bits & 4 ? high.Z() : low.Z());
+      const int    next = (axis + 1) % 3, prev = (axis + 2) % 3;
+      const double a = std::cos(k * p.Coord(next + 1));
+      const double b = std::sin(k * p.Coord(prev + 1));
+      const double c = std::sin(k * p.Coord(next + 1)) * std::cos(k * p.Coord(prev + 1));
+      const double r = std::hypot(a, b);
+      if (std::abs(c) >= r)
+        continue;
+      const double phase = std::atan2(b, a), angle = std::asin(-c / r);
+      for (double base : {angle, pi - angle})
+        for (int n = -3; n <= 3; ++n)
+        {
+          const double coordinate = (base - phase + 2 * pi * n) / k;
+          if (coordinate <= low.Coord(axis + 1) || coordinate >= high.Coord(axis + 1))
+            continue;
+          p.SetCoord(axis + 1, coordinate);
+          reference.push_back(p);
+        }
+    }
+  ASSERT_GT(reference.size(), 4u);
+  for (auto operation : {Ops::Operation::Common, Ops::Operation::BoxMinusField})
+  {
+    const auto result = Ops::Build(field(0), operand, operation);
+    EXPECT_EQ(result.BoxEdgeRootCount, int(reference.size()));
+    EXPECT_LE(result.GeometricBound, .1);
+    std::vector<int> matches(reference.size(), 0);
+    int              open = 0;
+    for (const auto& section : result.Sections)
+    {
+      EXPECT_TRUE(section.Resolved);
+      for (const auto& curve : section.Curves)
+      {
+        if (curve.Closed)
+          continue;
+        ++open;
+        for (const auto& point : {curve.Points.front(), curve.Points.back()})
+        {
+          size_t nearest = 0;
+          for (size_t i = 1; i < reference.size(); ++i)
+            if (point.Distance(reference[i]) < point.Distance(reference[nearest]))
+              nearest = i;
+          EXPECT_LE(point.Distance(reference[nearest]), .1 / 256);
+          ++matches[nearest];
+        }
+      }
+    }
+    EXPECT_GT(open, 0);
+    for (int count : matches)
+      EXPECT_EQ(count, 2);
+    for (size_t i = 0; i + 1 < result.Faces.size(); ++i)
+      EXPECT_TRUE(BRepCheck_Analyzer(result.Faces[i]).IsValid());
+    const auto implicit = result.Faces.back();
+    for (TopoDS_Iterator it(implicit); it.More(); it.Next())
+      EXPECT_TRUE(it.Value().Closed());
+  }
 }
 
 TEST(BRepClass3d_ImplicitBox, TranslatedBoxAndNoSeamCases)
@@ -121,4 +197,50 @@ TEST(BRepClass3d_ImplicitBox, TranslatedBoxAndNoSeamCases)
   const auto fullBox = Ops::Build(field(3), box(), Ops::Operation::Common);
   EXPECT_EQ(fullBox.SeamCount, 0);
   EXPECT_EQ(fullBox.Faces.size(), 7u); // Six caps plus possibly empty native face.
+}
+
+TEST(BRepClass3d_ImplicitBox, MultipleClosedLoopsCreateHolesOrSeparateRetainedCaps)
+{
+  using Ops = BRepClass3d_ImplicitBox;
+  const auto operand =
+    BRepPrimAPI_MakeBox(gp_Pnt(-.31, -.37, 1.25), gp_Pnt(12.93, 2.91, 4)).Shape();
+  const auto common = Ops::Build(field(), operand, Ops::Operation::Common);
+  const auto cut    = Ops::Build(field(), operand, Ops::Operation::BoxMinusField);
+  EXPECT_EQ(common.BoxEdgeRootCount, 0);
+  EXPECT_EQ(common.SeamCount, 2);
+  EXPECT_EQ(cut.SeamCount, 2);
+  EXPECT_EQ(common.Faces.size(), 7u);
+  EXPECT_EQ(cut.Faces.size(), 3u);
+  bool holes = false;
+  for (size_t i = 0; i + 1 < common.Faces.size(); ++i)
+  {
+    int wires = 0;
+    for (TopoDS_Iterator it(common.Faces[i]); it.More(); it.Next())
+      ++wires;
+    holes |= wires == 3;
+  }
+  EXPECT_TRUE(holes);
+}
+
+TEST(BRepClass3d_ImplicitBox, LevelChangesAndPlacedSourceRemainExplicit)
+{
+  using Ops = BRepClass3d_ImplicitBox;
+  const auto operand =
+    BRepPrimAPI_MakeBox(gp_Pnt(-3.83, -4.07, -2.67), gp_Pnt(4.17, 3.93, 3.37)).Shape();
+  for (double iso : {-.21, .21})
+    for (auto operation : {Ops::Operation::Common, Ops::Operation::BoxMinusField})
+    {
+      const auto result = Ops::Build(field(iso), operand, operation);
+      EXPECT_GT(result.BoxEdgeRootCount, 0);
+      EXPECT_LE(result.GeometricBound, .1);
+    }
+  gp_Trsf moved;
+  moved.SetTranslation(gp_Vec(.1, 0, 0));
+  EXPECT_THROW(Ops::Build(TopoDS::Face(field().Moved(TopLoc_Location(moved))),
+                          operand,
+                          Ops::Operation::Common),
+               Standard_NotImplemented);
+  // A plane through an isolated maximum does not become an empty-success
+  // section merely because the new Taylor/harmonic exclusions are available.
+  EXPECT_THROW(Ops::Build(field(1.5), box(), Ops::Operation::Common), Standard_NotImplemented);
 }

@@ -23,14 +23,16 @@ public:
     std::vector<int>         Sources; //!< -1 = implicit, otherwise input box face traversal index.
     std::vector<BRep_ImplicitPlaneSection::Result> Sections;
     int                                            SeamCount = 0;
-    double GeometricBound = 0; //!< Seam bound ONLY, not a surface/solid certificate.
+    int    BoxEdgeRootCount = 0; //!< Shared roots, each used by two adjacent face contours.
+    double GeometricBound   = 0; //!< Seam bound ONLY, not a surface/solid certificate.
   };
 
   //! F<=0 inside; Common is box intersect field, BoxMinusField retains F>=0.
   //! Exact gyroid, childless identity-placed forward native face; a valid,
   //! forward, axis-aligned conventional box solid wholly inside its domain.
-  //! All box edges must be certifiably away from F=0. Each planar face may
-  //! contain at most one resolved closed contour (no edge-crossing/nesting).
+  //! Transverse box-edge roots are isolated once and shared across faces.
+  //! Resolved open/closed contours form multiple/nested planar cap regions.
+  //! Tangencies, grid/corner degeneracies and unresolved topology reject.
   //! Seams are shared degree-1 B-splines, with matching planar p-curves.
   //! Returns a boundary compound, NEVER a TopoDS_Solid. Standard UV-based
   //! BRepCheck/BOP/meshing/serialization must not consume the hybrid compound.

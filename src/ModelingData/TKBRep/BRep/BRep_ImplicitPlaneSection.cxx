@@ -41,6 +41,7 @@ struct Edge
 BRep_ImplicitPlaneSection::Result pass(const TopoDS_Face&                         face,
                                        const BRep_ImplicitPlaneSection::Settings& settings,
                                        int                                        n,
+                                       const Geom_ImplicitGyroid&                 field,
                                        double                                     lipschitz,
                                        double                                     hessian,
                                        double                                     fieldReserve,
@@ -55,6 +56,9 @@ BRep_ImplicitPlaneSection::Result pass(const TopoDS_Face&                       
   const double        dv       = (settings.VMaximum - settings.VMinimum) / n;
   const double        diagonal = std::hypot(du, dv);
   const gp_Vec        u(settings.Frame.XDirection()), v(settings.Frame.YDirection());
+  const auto          data       = occ::down_cast<BRep_TImplicitFace>(face.TShape());
+  const auto          inverse    = (face.Location() * data->Location()).Transformation().Inverted();
+  const double        waveNumber = 2 * std::acos(-1.) / field.Period();
   std::vector<gp_Pnt> grid(width * width);
   std::vector<double> values(width * width);
   for (int j = 0; j <= n; ++j)
@@ -85,17 +89,56 @@ BRep_ImplicitPlaneSection::Result pass(const TopoDS_Face&                       
       edgeCache.emplace(key, answer);
       return answer;
     }
-    const double derivative = BRep_ImplicitTool::Gradient(face, mid).Dot(delta / length);
-    const bool   monotone   = std::abs(derivative) > hessian * length * .5 + gradientReserve;
+    const double derivative     = BRep_ImplicitTool::Gradient(face, mid).Dot(delta / length);
+    const bool   monotone       = std::abs(derivative) > hessian * length * .5 + gradientReserve;
+    bool         harmonicUnique = false, harmonicEmpty = false;
+    const auto   localDelta  = delta.Transformed(inverse);
+    int          varyingAxis = -1, components = 0;
+    for (int axis = 1; axis <= 3; ++axis)
+      if (localDelta.Coord(axis) != 0)
+      {
+        varyingAxis = axis;
+        ++components;
+      }
+    if (components == 1 && waveNumber * localDelta.Magnitude() < std::acos(-1.))
+    {
+      // On a field-coordinate axis the gyroid is exactly A sin(theta) +
+      // B cos(theta) + C. An interval shorter than pi has at most two roots,
+      // so opposite endpoint signs imply exactly one transverse root even
+      // if the derivative changes sign elsewhere in that interval.
+      harmonicUnique = opposite(fa, fb);
+      if (!harmonicUnique)
+      {
+        const auto   p = grid[a].Transformed(inverse), q = grid[b].Transformed(inverse);
+        const int    next = varyingAxis % 3 + 1, prev = (varyingAxis + 1) % 3 + 1;
+        const double A = std::cos(waveNumber * p.Coord(next));
+        const double B = std::sin(waveNumber * p.Coord(prev));
+        const double C = std::sin(waveNumber * p.Coord(next)) * std::cos(waveNumber * p.Coord(prev))
+                         - field.IsoValue();
+        const double pi = std::acos(-1.), base = std::atan2(A, B);
+        const double low  = waveNumber * std::min(p.Coord(varyingAxis), q.Coord(varyingAxis));
+        const double high = waveNumber * std::max(p.Coord(varyingAxis), q.Coord(varyingAxis));
+        harmonicEmpty     = true;
+        for (int index = int(std::ceil((low - base) / pi));
+             index <= int(std::floor((high - base) / pi));
+             ++index)
+        {
+          const double theta = base + index * pi;
+          const double value = A * std::sin(theta) + B * std::cos(theta) + C;
+          if (std::abs(value) <= 4 * fieldReserve || opposite(value, fa))
+            harmonicEmpty = false;
+        }
+      }
+    }
     if (std::abs(fa) <= fieldReserve || std::abs(fb) <= fieldReserve)
       answer.State = 2; // Grid-aligned zero/near-zero: do not guess its connectivity.
     else if (!opposite(fa, fb)
-             && (monotone
+             && (monotone || harmonicEmpty
                  || std::abs(BRep_ImplicitTool::Value(face, mid))
                       > (std::abs(derivative) + gradientReserve) * length * .5
                           + hessian * length * length * .125 + fieldReserve))
       answer.State = 0;
-    else if (!monotone || !opposite(fa, fb))
+    else if ((!monotone && !harmonicUnique) || !opposite(fa, fb))
       answer.State = 2;
     else
     {
@@ -147,7 +190,16 @@ BRep_ImplicitPlaneSection::Result pass(const TopoDS_Face&                       
       const double                f = BRep_ImplicitTool::Value(face, center);
       if (std::abs(f) > lipschitz * diagonal * .5 + fieldReserve)
         continue;
-      const auto   g           = BRep_ImplicitTool::Gradient(face, center);
+      const auto g = BRep_ImplicitTool::Gradient(face, center);
+      // Taylor exclusion uses the in-plane gradient and the existing global
+      // Hessian operator bound. Unlike L*r alone it can certify empty cells
+      // near a stationary point whose field value is bounded away from zero.
+      // Never infer emptiness merely from equal signs at the corners.
+      const double radius     = diagonal * .5;
+      const double localBound = (std::hypot(g.Dot(u), g.Dot(v)) + gradientReserve) * radius
+                                + hessian * radius * radius * .5 + fieldReserve;
+      if (std::abs(f) > localBound)
+        continue;
       const double uncertainty = hessian * diagonal * .5 + gradientReserve;
       const bool   regular = std::abs(g.Dot(u)) > uncertainty || std::abs(g.Dot(v)) > uncertainty;
       std::array<size_t, 4> roots;
@@ -288,10 +340,38 @@ BRep_ImplicitPlaneSection::Result BRep_ImplicitPlaneSection::Trace(const TopoDS_
   Result result;
   for (int n = settings.MinimumCells; n <= settings.MaximumCells; n *= 2)
   {
-    result =
-      pass(face, settings, n, lipschitz, hessian, fieldReserve, gradientReserve, coordinateReserve);
+    result = pass(face,
+                  settings,
+                  n,
+                  *field,
+                  lipschitz,
+                  hessian,
+                  fieldReserve,
+                  gradientReserve,
+                  coordinateReserve);
     if (result.Resolved)
-      break;
+      return result;
+  }
+  // A dyadic sequence can repeatedly place a regular arc almost tangent to a
+  // grid edge. Try bounded alternative uniform grids, with identical acceptance
+  // proofs and no increase of the per-axis budget. Never perturb the geometry
+  // or reinterpret unresolved cells as empty to force a successful result.
+  for (int numerator : {6, 5, 7})
+  {
+    const int n = settings.MaximumCells * numerator / 8;
+    if (n < settings.MinimumCells)
+      continue;
+    auto candidate = pass(face,
+                          settings,
+                          n,
+                          *field,
+                          lipschitz,
+                          hessian,
+                          fieldReserve,
+                          gradientReserve,
+                          coordinateReserve);
+    if (candidate.Resolved)
+      return candidate;
   }
   return result;
 }
