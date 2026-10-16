@@ -6,6 +6,14 @@
 #include <BRep_Tool.hxx>
 #include <BRep_ImplicitTool.hxx>
 #include <BRep_ImplicitIO.hxx>
+#include <BRep_TImplicitFace.hxx>
+#include <Geom_BSplineCurve.hxx>
+#include <Geom2d_BSplineCurve.hxx>
+#include <BRepAdaptor_Surface.hxx>
+#include <ElSLib.hxx>
+#include <TopExp.hxx>
+#include <TopoDS_Edge.hxx>
+#include <TopoDS_Wire.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepCheck_Analyzer.hxx>
@@ -532,4 +540,202 @@ TEST(BRepClass3d_ImplicitBox, RegularityDerivativeBoundsScaleWithModelLength)
   }
   const auto conventional = TopoDS::Face(TopExp_Explorer(box(), TopAbs_FACE).Current());
   EXPECT_THROW(Ops::CheckRegularity(conventional), Standard_NotImplemented);
+}
+
+TEST(BRepClass3d_ImplicitBox, StoredTrimGraphCorrespondenceBothOperationsAndRoundtrip)
+{
+  using Ops = BRepClass3d_ImplicitBox;
+  const auto open =
+    BRepPrimAPI_MakeBox(gp_Pnt(-3.83, -4.07, -2.67), gp_Pnt(4.17, 3.93, 3.37)).Shape();
+  for (bool crossing : {false, true})
+    for (auto op : {Ops::Operation::Common, Ops::Operation::BoxMinusField})
+    {
+      const auto source = Ops::Build(field(crossing ? 0 : 1.45), crossing ? open : box(), op);
+      std::ostringstream record;
+      BRepClass3d_ImplicitBoxIO::Write(source, record);
+      const auto report = Ops::CheckCorrespondence(source);
+      std::cout << "correspondence " << crossing << " " << int(op)
+                << " resolved=" << report.Resolved << " reason=" << report.Reason
+                << " matched=" << report.MatchedEdges << " bound=" << report.CurveDeviationBound
+                << " alignment=" << report.MinimumTangentAlignment << std::endl;
+      EXPECT_TRUE(report.Resolved);
+      EXPECT_TRUE(report.RegularityResolved);
+      EXPECT_GT(report.MatchedVertices, 0);
+      EXPECT_EQ(report.MatchedCaps, int(source.Faces.size()) - 1);
+      EXPECT_GT(report.MatchedWires, 0);
+      EXPECT_GT(report.MinimumTangentAlignment, 0);
+      EXPECT_LE(report.ReferenceSeamBound + report.CurveDeviationBound, .1);
+      Ops::Boundary      loaded;
+      std::istringstream input(record.str());
+      BRepClass3d_ImplicitBoxIO::Read(input, loaded);
+      EXPECT_FALSE(loaded.SeamBoundVerified);
+      EXPECT_TRUE(Ops::CheckCorrespondence(loaded).Resolved);
+      EXPECT_FALSE(loaded.SeamBoundVerified);
+      if (loaded.Faces.size() > 2)
+      {
+        std::swap(loaded.Faces[0], loaded.Faces[1]);
+        std::swap(loaded.Sources[0], loaded.Sources[1]);
+        BRep_Builder builder;
+        builder.MakeCompound(loaded.Shape);
+        for (const auto& face : loaded.Faces)
+          builder.Add(loaded.Shape, face);
+        EXPECT_TRUE(Ops::CheckCorrespondence(loaded).Resolved);
+      }
+      std::ostringstream after;
+      BRepClass3d_ImplicitBoxIO::Write(source, after);
+      EXPECT_EQ(record.str(), after.str());
+    }
+}
+
+TEST(BRepClass3d_ImplicitBox, CorrespondenceRefusesChangedMathForgedBoundsAndLimits)
+{
+  using Ops   = BRepClass3d_ImplicitBox;
+  auto source = Ops::Build(field(), box(), Ops::Operation::Common);
+  EXPECT_FALSE(Ops::CheckCorrespondence(source, 4).Resolved);
+  EXPECT_FALSE(Ops::CheckCorrespondence(source, 512, 1).Resolved);
+  EXPECT_THROW(Ops::CheckCorrespondence(source, 3), Standard_DomainError);
+  EXPECT_THROW(Ops::CheckCorrespondence(source, 512, 0), Standard_DomainError);
+  const auto   old  = source.Faces.back();
+  const auto   data = occ::down_cast<BRep_TImplicitFace>(old.TShape());
+  TopoDS_Face  changed;
+  BRep_Builder builder;
+  builder.MakeImplicitFace(changed,
+                           new Geom_ImplicitGyroid(10, 1.46),
+                           data->Minimum(),
+                           data->Maximum(),
+                           TopLoc_Location(),
+                           .1);
+  for (TopoDS_Iterator wire(old); wire.More(); wire.Next())
+    builder.Add(changed, wire.Value());
+  source.Faces.back() = changed;
+  builder.MakeCompound(source.Shape);
+  for (const auto& face : source.Faces)
+    builder.Add(source.Shape, face);
+  source.GeometricBound    = 0;
+  source.SeamBoundVerified = true;
+  const auto report        = Ops::CheckCorrespondence(source);
+  EXPECT_TRUE(report.RegularityResolved);
+  EXPECT_FALSE(report.Resolved);
+  EXPECT_FALSE(report.Reason.empty());
+}
+
+TEST(BRepClass3d_ImplicitBox, CorrespondenceAcceptsResamplingAndCyclicWireStarts)
+{
+  using Ops = BRepClass3d_ImplicitBox;
+  auto source =
+    Ops::Build(field(0),
+               BRepPrimAPI_MakeBox(gp_Pnt(-3.83, -4.07, -2.67), gp_Pnt(4.17, 3.93, 3.37)).Shape(),
+               Ops::Operation::Common);
+  BRep_Builder builder;
+  auto         edge = TopoDS::Edge(
+    TopExp_Explorer(source.Faces.back(), TopAbs_EDGE).Current().Oriented(TopAbs_FORWARD));
+  TopLoc_Location location;
+  double          first, last;
+  const auto old = occ::down_cast<Geom_BSplineCurve>(BRep_Tool::Curve(edge, location, first, last));
+  std::vector<gp_Pnt> points{old->Pole(1), gp_Pnt((old->Pole(1).XYZ() + old->Pole(2).XYZ()) * .5)};
+  for (int i = 2; i <= old->NbPoles(); ++i)
+    points.push_back(old->Pole(i));
+  const int                  count = int(points.size());
+  NCollection_Array1<gp_Pnt> poles(1, count);
+  NCollection_Array1<double> knots(1, count);
+  NCollection_Array1<int>    mults(1, count);
+  for (int i = 1; i <= count; ++i)
+  {
+    poles(i) = points[size_t(i - 1)];
+    knots(i) = i - 1;
+    mults(i) = i == 1 || i == count ? 2 : 1;
+  }
+  builder.UpdateEdge(edge, new Geom_BSplineCurve(poles, knots, mults, 1), .1);
+  builder.Range(edge, 0, count - 1);
+  TopoDS_Vertex a, b;
+  TopExp::Vertices(edge, a, b);
+  builder.UpdateVertex(TopoDS::Vertex(a.Oriented(TopAbs_FORWARD)),
+                       0,
+                       edge,
+                       BRep_Tool::Tolerance(a));
+  builder.UpdateVertex(TopoDS::Vertex(b.Oriented(TopAbs_REVERSED)),
+                       count - 1,
+                       edge,
+                       BRep_Tool::Tolerance(b));
+  for (size_t i = 0; i + 1 < source.Faces.size(); ++i)
+  {
+    bool used = false;
+    for (TopExp_Explorer e(source.Faces[i], TopAbs_EDGE); e.More(); e.Next())
+      used |= e.Current().IsSame(edge);
+    if (!used)
+      continue;
+    const auto                   plane = BRepAdaptor_Surface(source.Faces[i]).Plane();
+    NCollection_Array1<gp_Pnt2d> uv(1, count);
+    for (int p = 1; p <= count; ++p)
+    {
+      double u, v;
+      ElSLib::Parameters(plane, points[size_t(p - 1)], u, v);
+      uv(p).SetCoord(u, v);
+    }
+    builder.UpdateEdge(edge, new Geom2d_BSplineCurve(uv, knots, mults, 1), source.Faces[i], .1);
+    builder.Range(edge, source.Faces[i], 0, count - 1);
+  }
+  builder.SameRange(edge, true);
+  builder.SameParameter(edge, true);
+  const auto report = Ops::CheckCorrespondence(source);
+  EXPECT_TRUE(report.Resolved) << report.Reason;
+
+  const auto  original = source.Faces.back();
+  const auto  data     = occ::down_cast<BRep_TImplicitFace>(original.TShape());
+  TopoDS_Face changed;
+  builder.MakeImplicitFace(changed,
+                           data->Field(),
+                           data->Minimum(),
+                           data->Maximum(),
+                           TopLoc_Location(),
+                           .1);
+  for (TopoDS_Iterator wire(original); wire.More(); wire.Next())
+  {
+    std::vector<TopoDS_Shape> edges;
+    for (TopoDS_Iterator e(wire.Value()); e.More(); e.Next())
+      edges.push_back(e.Value());
+    if (edges.size() > 1)
+      std::rotate(edges.begin(), edges.begin() + 1, edges.end());
+    TopoDS_Wire rotated;
+    builder.MakeWire(rotated);
+    for (const auto& e : edges)
+      builder.Add(rotated, e);
+    builder.Add(changed, rotated);
+  }
+  source.Faces.back() = changed;
+  builder.MakeCompound(source.Shape);
+  for (const auto& face : source.Faces)
+    builder.Add(source.Shape, face);
+  const auto rotated = Ops::CheckCorrespondence(source);
+  EXPECT_TRUE(rotated.Resolved) << rotated.Reason;
+}
+
+TEST(BRepClass3d_ImplicitBox, CorrespondenceChecksMultipleRegionsAndCapParameterGeometry)
+{
+  using Ops       = BRepClass3d_ImplicitBox;
+  const auto wide = BRepPrimAPI_MakeBox(gp_Pnt(-.31, -.37, 1.25), gp_Pnt(12.93, 2.91, 4)).Shape();
+  for (auto operation : {Ops::Operation::Common, Ops::Operation::BoxMinusField})
+  {
+    const auto source = Ops::Build(field(), wide, operation);
+    const auto report = Ops::CheckCorrespondence(source);
+    EXPECT_TRUE(report.Resolved) << report.Reason;
+    EXPECT_EQ(report.MatchedWires, 2);
+  }
+  auto       bad  = Ops::Build(field(), box(), Ops::Operation::BoxMinusField);
+  const auto cap  = bad.Faces.front();
+  const auto edge = TopoDS::Edge(TopExp_Explorer(cap, TopAbs_EDGE).Current());
+  double     first, last;
+  const auto original =
+    occ::down_cast<Geom2d_BSplineCurve>(BRep_Tool::CurveOnSurface(edge, cap, first, last));
+  auto changed = occ::down_cast<Geom2d_BSplineCurve>(original->Copy());
+  auto point   = changed->Pole(2);
+  point.SetX(point.X() + 1.e-6);
+  changed->SetPole(2, point);
+  BRep_Builder().UpdateEdge(edge, changed, cap, .1);
+  // This small interior p-curve deviation is within conventional edge tolerance,
+  // but must NOT inherit the tighter fresh-trace correspondence certificate.
+  ASSERT_TRUE(BRepCheck_Analyzer(cap).IsValid());
+  const auto report = Ops::CheckCorrespondence(bad);
+  EXPECT_FALSE(report.Resolved);
+  EXPECT_EQ(report.Reason, "cap_curve_parameter_mismatch");
 }

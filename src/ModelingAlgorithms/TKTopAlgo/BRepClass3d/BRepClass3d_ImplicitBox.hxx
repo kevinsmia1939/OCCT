@@ -6,6 +6,7 @@
 #include <TopoDS_Compound.hxx>
 #include <vector>
 #include <array>
+#include <string>
 
 //! Experimental hybrid boundary constructor, NOT generic BOP or a solid validator.
 class BRepClass3d_ImplicitBox
@@ -58,6 +59,24 @@ public:
     int    UnresolvedDimension = -1;
     gp_Pnt UnresolvedMinimum, UnresolvedMaximum;
   };
+
+  struct Correspondence
+  {
+    bool        Resolved = false, RegularityResolved = false;
+    size_t      Comparisons = 0, SampleTests = 0;
+    int         MatchedEdges = 0, MatchedVertices = 0, MatchedCaps = 0, MatchedWires = 0;
+    double      MatchingTolerance = 0, CurveDeviationBound = 0, ReferenceSeamBound = 0;
+    double      MinimumTangentAlignment = 0, CapParameterDeviationBound = 0;
+    std::string Reason;
+  };
+
+  //! Re-trace a PRIVATE canonical box graph; match edge geometry, shared
+  //! vertices, cap grouping and directed cyclic wires bijectively. Source
+  //! graph/provenance never replaced. This is graph correspondence, NOT
+  //! a surface isotopy/reach or native-solid validation certificate.
+  Standard_EXPORT static Correspondence CheckCorrespondence(const Boundary&,
+                                                            int    theMaximumCells       = 512,
+                                                            size_t theMaximumComparisons = 2000000);
 
   //! Mesh-independent, whole-domain regularity of an identity-placed native
   //! gyroid's box region. Projected gradients are bounded away from zero in

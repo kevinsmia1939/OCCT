@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Kavin Teenakul
 // SPDX-License-Identifier: LGPL-2.1-only WITH OCCT-exception-1.0
 #include <BRepClass3d_ImplicitBox.hxx>
+#include <BRepClass3d_ImplicitBoxIO.hxx>
 #include <BRep_TImplicitFace.hxx>
 #include <BRep_ImplicitTool.hxx>
 #include <BRep_Builder.hxx>
@@ -27,12 +28,15 @@
 #include <cmath>
 #include <limits>
 #include <map>
+#include <set>
 #include <sstream>
 #include <typeinfo>
 
 namespace
 {
-using Map = NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher>;
+using Map       = NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher>;
+using Boundary  = BRepClass3d_ImplicitBox::Boundary;
+using Operation = BRepClass3d_ImplicitBox::Operation;
 
 void require(bool condition, const char* message)
 {
@@ -481,6 +485,40 @@ void pcurve(const Arc& arc, const TopoDS_Face& cap, const gp_Pln& plane, double 
   builder.SameRange(arc.Edge, true);
   builder.SameParameter(arc.Edge, true);
 }
+
+Side canonicalSide(int           axis,
+                   int           sign,
+                   int           source,
+                   const gp_Pnt& low,
+                   const gp_Pnt& high,
+                   double        tolerance,
+                   int           maximumCells)
+{
+  gp_Pnt origin(0, 0, 0);
+  origin.SetCoord(axis + 1, sign > 0 ? high.Coord(axis + 1) : low.Coord(axis + 1));
+  Side side;
+  side.Axis           = axis;
+  side.Sign           = sign;
+  side.Source         = source;
+  side.Settings.Frame = gp_Ax2(origin, gp_Dir(unit(axis, sign)), gp_Dir(unit((axis + 1) % 3)));
+  side.Plane          = gp_Pln(side.Settings.Frame);
+  const int u = (axis + 1) % 3, v = (axis + 2) % 3;
+  side.Settings.UMinimum          = low.Coord(u + 1);
+  side.Settings.UMaximum          = high.Coord(u + 1);
+  side.Settings.VMinimum          = sign > 0 ? low.Coord(v + 1) : -high.Coord(v + 1);
+  side.Settings.VMaximum          = sign > 0 ? high.Coord(v + 1) : -low.Coord(v + 1);
+  side.Settings.DistanceTolerance = tolerance * .75;
+  side.Settings.MaximumCells      = maximumCells;
+  return side;
+}
+
+Boundary construct(const TopoDS_Face&,
+                   const gp_Pnt&,
+                   const gp_Pnt&,
+                   std::vector<Side>,
+                   Operation,
+                   double,
+                   double);
 } // namespace
 
 BRepClass3d_ImplicitBox::Boundary BRepClass3d_ImplicitBox::Build(const TopoDS_Face&  fieldFace,
@@ -607,26 +645,23 @@ BRepClass3d_ImplicitBox::Boundary BRepClass3d_ImplicitBox::Build(const TopoDS_Fa
     for (TopoDS_Iterator it(face); it.More(); it.Next())
       ++count;
     require(count == 1, "Box faces with holes are unsupported");
-    gp_Pnt origin(0, 0, 0);
-    origin.SetCoord(axis + 1, coordinate);
-    Side side;
-    side.Axis           = axis;
-    side.Sign           = sign;
-    side.Source         = source++;
-    side.Settings.Frame = gp_Ax2(origin, gp_Dir(unit(axis, sign)), gp_Dir(unit((axis + 1) % 3)));
-    side.Plane          = gp_Pln(side.Settings.Frame);
-    const int u = (axis + 1) % 3, v = (axis + 2) % 3;
-    side.Settings.UMinimum = low.Coord(u + 1);
-    side.Settings.UMaximum = high.Coord(u + 1);
-    side.Settings.VMinimum = sign > 0 ? low.Coord(v + 1) : -high.Coord(v + 1);
-    side.Settings.VMaximum = sign > 0 ? high.Coord(v + 1) : -low.Coord(v + 1);
-    // Reserve tolerance for replacing independent face-endpoint brackets by
-    // the canonical box-edge root, never distance-welding unrelated vertices.
-    side.Settings.DistanceTolerance = tolerance * .75;
-    side.Settings.MaximumCells      = maximumCells;
-    sides.push_back(side);
+    sides.push_back(canonicalSide(axis, sign, source++, low, high, tolerance, maximumCells));
   }
 
+  return construct(fieldFace, low, high, std::move(sides), operation, tolerance, reserve);
+}
+
+namespace
+{
+Boundary construct(const TopoDS_Face& fieldFace,
+                   const gp_Pnt&      low,
+                   const gp_Pnt&      high,
+                   std::vector<Side>  sides,
+                   Operation          operation,
+                   double             tolerance,
+                   double             reserve)
+{
+  const auto   data = occ::down_cast<BRep_TImplicitFace>(fieldFace.TShape());
   BRep_Builder builder;
   Boundary     result;
   builder.MakeCompound(result.Shape);
@@ -835,4 +870,400 @@ BRepClass3d_ImplicitBox::Boundary BRepClass3d_ImplicitBox::Build(const TopoDS_Fa
     require(uses[i] == 2 && balance[i] == 0, "Unpaired or inconsistently oriented hybrid edge");
   result.SeamBoundVerified = true;
   return result;
+}
+
+struct CurveRecord
+{
+  std::vector<gp_Pnt>      Points;
+  std::vector<long double> Knots;
+};
+
+CurveRecord curveRecord(std::vector<gp_Pnt> points)
+{
+  CurveRecord result;
+  for (const auto& p : points)
+    if (result.Points.empty() || p.Distance(result.Points.back()) > 0)
+      result.Points.push_back(p);
+  require(result.Points.size() >= 2, "Collapsed correspondence curve");
+  result.Knots.push_back(0);
+  for (size_t i = 1; i < result.Points.size(); ++i)
+  {
+    const auto&       a      = result.Points[i - 1];
+    const auto&       b      = result.Points[i];
+    const long double length = std::hypot(static_cast<long double>(b.X()) - a.X(),
+                                          static_cast<long double>(b.Y()) - a.Y(),
+                                          static_cast<long double>(b.Z()) - a.Z());
+    const long double next   = result.Knots.back() + length;
+    require(std::isfinite(next) && next > result.Knots.back(),
+            "Correspondence parameter precision exhausted");
+    result.Knots.push_back(next);
+  }
+  const auto total = result.Knots.back();
+  for (auto& t : result.Knots)
+    t /= total;
+  result.Knots.back() = 1;
+  for (size_t i = 1; i < result.Knots.size(); ++i)
+    require(result.Knots[i] > result.Knots[i - 1], "Correspondence parameter collapsed");
+  return result;
+}
+
+gp_Pnt at(const CurveRecord& curve, long double t, size_t& segment)
+{
+  while (segment + 2 < curve.Knots.size() && t > curve.Knots[segment + 1])
+    ++segment;
+  const long double u =
+    std::clamp((t - curve.Knots[segment]) / (curve.Knots[segment + 1] - curve.Knots[segment]),
+               0.L,
+               1.L);
+  gp_Pnt p;
+  for (int axis = 1; axis <= 3; ++axis)
+    p.SetCoord(axis,
+               double((1 - u) * curve.Points[segment].Coord(axis)
+                      + u * curve.Points[segment + 1].Coord(axis)));
+  return p;
+}
+
+double curveBound(const CurveRecord&                       a,
+                  const CurveRecord&                       b,
+                  double                                   reserve,
+                  BRepClass3d_ImplicitBox::Correspondence& report)
+{
+  if (report.SampleTests + a.Points.size() + b.Points.size() > 8000000)
+    throw Standard_NotImplemented("Correspondence sample budget exhausted");
+  size_t i = 0, j = 0, sa = 0, sb = 0;
+  double bound = 0;
+  while (i < a.Knots.size() || j < b.Knots.size())
+  {
+    const long double t = j == b.Knots.size()        ? a.Knots[i++]
+                          : i == a.Knots.size()      ? b.Knots[j++]
+                          : a.Knots[i] <= b.Knots[j] ? a.Knots[i++]
+                                                     : b.Knots[j++];
+    ++report.SampleTests;
+    bound = std::max(bound, at(a, t, sa).Distance(at(b, t, sb)) + reserve);
+  }
+  return bound;
+}
+
+std::vector<CurveRecord> curves(const Map& edges)
+{
+  std::vector<CurveRecord> result;
+  for (const auto& shape : edges)
+  {
+    TopLoc_Location location;
+    double          first, last;
+    const auto      curve = occ::down_cast<Geom_BSplineCurve>(
+      BRep_Tool::Curve(TopoDS::Edge(shape), location, first, last));
+    require(!curve.IsNull() && location.IsIdentity(), "Unsupported correspondence curve");
+    std::vector<gp_Pnt> points;
+    for (int pole = 1; pole <= curve->NbPoles(); ++pole)
+      points.push_back(curve->Pole(pole));
+    result.push_back(curveRecord(std::move(points)));
+  }
+  return result;
+}
+
+using WireKey = std::vector<int>;
+using FaceKey = std::pair<int, std::vector<WireKey>>;
+
+std::vector<WireKey> wires(const TopoDS_Face&      face,
+                           const Map&              edges,
+                           const std::vector<int>& mapping,
+                           const std::vector<int>& directions)
+{
+  std::vector<WireKey> result;
+  for (TopoDS_Iterator wire(face); wire.More(); wire.Next())
+  {
+    WireKey key;
+    for (TopoDS_Iterator edge(wire.Value()); edge.More(); edge.Next())
+    {
+      const int id = edges.FindIndex(edge.Value()) - 1;
+      require(id >= 0 && mapping[size_t(id)] >= 0, "Incomplete correspondence edge map");
+      key.push_back((mapping[size_t(id)] + 1) * directions[size_t(id)]
+                    * (edge.Value().Orientation() == TopAbs_FORWARD ? 1 : -1));
+    }
+    require(!key.empty(), "Empty correspondence wire");
+    std::rotate(key.begin(), std::min_element(key.begin(), key.end()), key.end());
+    result.push_back(std::move(key));
+  }
+  std::sort(result.begin(), result.end());
+  return result;
+}
+
+std::vector<FaceKey> caps(const Boundary&         boundary,
+                          const Map&              edges,
+                          const std::vector<int>& mapping,
+                          const std::vector<int>& directions)
+{
+  std::vector<FaceKey> result;
+  for (size_t i = 0; i + 1 < boundary.Faces.size(); ++i)
+  {
+    const auto normal = BRepAdaptor_Surface(boundary.Faces[i]).Plane().Axis().Direction();
+    int        axis   = 0;
+    for (int j = 1; j <= 3; ++j)
+      if (std::abs(normal.Coord(j)) > std::abs(normal.Coord(axis + 1)))
+        axis = j - 1;
+    const int side = 2 * axis + int(normal.Coord(axis + 1) > 0);
+    result.push_back({side, wires(boundary.Faces[i], edges, mapping, directions)});
+  }
+  std::sort(result.begin(), result.end());
+  return result;
+}
+} // namespace
+
+BRepClass3d_ImplicitBox::Correspondence BRepClass3d_ImplicitBox::CheckCorrespondence(
+  const Boundary& source,
+  int             maximumCells,
+  size_t          maximumComparisons)
+{
+  if (maximumCells < 4 || maximumCells > 512 || (maximumCells & (maximumCells - 1))
+      || !maximumComparisons || maximumComparisons > 10000000)
+    throw Standard_DomainError("Invalid trim correspondence settings");
+  // Validate/private-copy the supported graph, without touching source caches.
+  std::ostringstream record;
+  BRepClass3d_ImplicitBoxIO::Write(source, record);
+  std::istringstream input(record.str());
+  Boundary           copy;
+  BRepClass3d_ImplicitBoxIO::Read(input, copy);
+  Correspondence report;
+  const auto&    original   = copy.Faces.back();
+  report.RegularityResolved = CheckRegularity(original).Resolved;
+  if (!report.RegularityResolved)
+  {
+    report.Reason = "field_box_regularity_unresolved";
+    return report;
+  }
+  const auto   data = occ::down_cast<BRep_TImplicitFace>(original.TShape());
+  const auto   low = data->Minimum(), high = data->Maximum();
+  const double tolerance = data->Tolerance();
+  double       magnitude = 1;
+  for (int axis = 1; axis <= 3; ++axis)
+    magnitude = std::max({magnitude, std::abs(low.Coord(axis)), std::abs(high.Coord(axis))});
+  const double reserve     = 8192 * std::numeric_limits<double>::epsilon() * magnitude;
+  report.MatchingTolerance = std::max(reserve * 16, tolerance / 1048576);
+  try
+  {
+    TopoDS_Face bare;
+    BRep_Builder().MakeImplicitFace(bare, data->Field(), low, high, TopLoc_Location(), tolerance);
+    std::vector<Side> sides;
+    for (int axis = 0; axis < 3; ++axis)
+      for (int sign : {-1, 1})
+        sides.push_back(
+          canonicalSide(axis, sign, 2 * axis + int(sign > 0), low, high, tolerance, maximumCells));
+    const auto reference = construct(
+      bare,
+      low,
+      high,
+      std::move(sides),
+      original.Orientation() == TopAbs_FORWARD ? Operation::Common : Operation::BoxMinusField,
+      tolerance,
+      512 * std::numeric_limits<double>::epsilon() * magnitude);
+    report.ReferenceSeamBound = reference.GeometricBound;
+    Map aEdges, bEdges, aVertices, bVertices, aNative, bNative;
+    TopExp::MapShapes(copy.Shape, TopAbs_EDGE, aEdges);
+    TopExp::MapShapes(reference.Shape, TopAbs_EDGE, bEdges);
+    TopExp::MapShapes(copy.Shape, TopAbs_VERTEX, aVertices);
+    TopExp::MapShapes(reference.Shape, TopAbs_VERTEX, bVertices);
+    TopExp::MapShapes(original, TopAbs_EDGE, aNative);
+    TopExp::MapShapes(reference.Faces.back(), TopAbs_EDGE, bNative);
+    if (aEdges.Extent() != bEdges.Extent() || aVertices.Extent() != bVertices.Extent()
+        || copy.Faces.size() != reference.Faces.size() || copy.SeamCount != reference.SeamCount
+        || copy.BoxEdgeRootCount != reference.BoxEdgeRootCount)
+    {
+      report.Reason = "reference_graph_counts_differ";
+      return report;
+    }
+    const auto       ac = curves(aEdges), bc = curves(bEdges);
+    std::vector<int> mapping(ac.size(), -1), directions(ac.size(), 0), inverse(bc.size(), -1);
+    std::vector<int> vertexMap(size_t(aVertices.Extent()), -1),
+      vertexInverse(size_t(bVertices.Extent()), -1);
+    for (size_t i = 0; i < ac.size(); ++i)
+    {
+      for (size_t j = 0; j < bc.size(); ++j)
+      {
+        if (report.Comparisons >= maximumComparisons)
+        {
+          report.Reason = "comparison_budget_exhausted";
+          return report;
+        }
+        ++report.Comparisons;
+        if (aNative.Contains(aEdges(int(i) + 1)) != bNative.Contains(bEdges(int(j) + 1)))
+          continue;
+        for (int direction : {1, -1})
+        {
+          if (ac[i].Points.front().Distance(direction > 0 ? bc[j].Points.front()
+                                                          : bc[j].Points.back())
+                > report.MatchingTolerance
+              || ac[i].Points.back().Distance(direction > 0 ? bc[j].Points.back()
+                                                            : bc[j].Points.front())
+                   > report.MatchingTolerance)
+            continue;
+          auto candidate = bc[j];
+          if (direction < 0)
+          {
+            auto p = candidate.Points;
+            std::reverse(p.begin(), p.end());
+            candidate = curveRecord(std::move(p));
+          }
+          const double bound = curveBound(ac[i], candidate, reserve, report);
+          if (bound > report.MatchingTolerance)
+            continue;
+          if (mapping[i] >= 0 || inverse[j] >= 0)
+          {
+            report.Reason = "ambiguous_or_nonbijective_curve_match";
+            return report;
+          }
+          mapping[i]                 = int(j);
+          directions[i]              = direction;
+          report.CurveDeviationBound = std::max(report.CurveDeviationBound, bound);
+        }
+      }
+      if (mapping[i] < 0)
+      {
+        report.Reason = "stored_curve_has_no_reference_match";
+        return report;
+      }
+      const size_t j = size_t(mapping[i]);
+      inverse[j]     = int(i);
+      TopoDS_Vertex av[2], bv[2];
+      TopExp::Vertices(TopoDS::Edge(aEdges(int(i) + 1)), av[0], av[1]);
+      TopExp::Vertices(TopoDS::Edge(bEdges(int(j) + 1)), bv[0], bv[1]);
+      if (directions[i] < 0)
+        std::swap(bv[0], bv[1]);
+      for (int endpoint = 0; endpoint < 2; ++endpoint)
+      {
+        const int a = aVertices.FindIndex(av[endpoint]) - 1,
+                  b = bVertices.FindIndex(bv[endpoint]) - 1;
+        if (a < 0 || b < 0 || (vertexMap[size_t(a)] >= 0 && vertexMap[size_t(a)] != b)
+            || (vertexInverse[size_t(b)] >= 0 && vertexInverse[size_t(b)] != a)
+            || BRep_Tool::Pnt(av[endpoint]).Distance(BRep_Tool::Pnt(bv[endpoint]))
+                 > report.MatchingTolerance)
+        {
+          report.Reason = "shared_vertex_correspondence_differ";
+          return report;
+        }
+        vertexMap[size_t(a)]     = b;
+        vertexInverse[size_t(b)] = a;
+      }
+      ++report.MatchedEdges;
+    }
+    for (int vertex : vertexMap)
+      if (vertex >= 0)
+        ++report.MatchedVertices;
+    if (report.MatchedVertices != aVertices.Extent())
+    {
+      report.Reason = "incomplete_vertex_bijection";
+      return report;
+    }
+    std::vector<int> identity(bc.size()), forward(bc.size(), 1);
+    for (size_t i = 0; i < identity.size(); ++i)
+      identity[i] = int(i);
+    if (caps(copy, aEdges, mapping, directions) != caps(reference, bEdges, identity, forward))
+    {
+      report.Reason = "cap_grouping_or_directed_wires_differ";
+      return report;
+    }
+    const auto aw = wires(original, aEdges, mapping, directions);
+    if (aw != wires(reference.Faces.back(), bEdges, identity, forward))
+    {
+      report.Reason = "implicit_directed_wires_differ";
+      return report;
+    }
+    report.MatchedCaps  = int(copy.Faces.size()) - 1;
+    report.MatchedWires = int(aw.size());
+    // Parameter-by-parameter agreement is needed too: matching 3D edges alone
+    // cannot establish consistency with a planar cap's p-curve direction.
+    for (size_t cap = 0; cap + 1 < copy.Faces.size(); ++cap)
+    {
+      const auto& face  = copy.Faces[cap];
+      const auto  plane = BRepAdaptor_Surface(face).Plane();
+      for (TopExp_Explorer use(face, TopAbs_EDGE); use.More(); use.Next())
+      {
+        const auto      edge = TopoDS::Edge(use.Current());
+        TopLoc_Location location;
+        double          first, last, pfirst, plast;
+        const auto      curve =
+          occ::down_cast<Geom_BSplineCurve>(BRep_Tool::Curve(edge, location, first, last));
+        const auto uv =
+          occ::down_cast<Geom2d_BSplineCurve>(BRep_Tool::CurveOnSurface(edge, face, pfirst, plast));
+        if (uv.IsNull() || typeid(*uv) != typeid(Geom2d_BSplineCurve) || uv->Degree() != 1
+            || uv->IsRational() || uv->IsPeriodic() || uv->NbPoles() != curve->NbPoles()
+            || uv->NbKnots() != curve->NbKnots() || pfirst != first || plast != last)
+        {
+          report.Reason = "unsupported_cap_parameterization";
+          return report;
+        }
+        if (report.SampleTests + size_t(uv->NbPoles()) > 8000000)
+        {
+          report.Reason = "cap_parameter_budget_exhausted";
+          return report;
+        }
+        for (int pole = 1; pole <= uv->NbPoles(); ++pole)
+        {
+          ++report.SampleTests;
+          if (uv->Knot(pole) != curve->Knot(pole)
+              || uv->Multiplicity(pole) != curve->Multiplicity(pole))
+          {
+            report.Reason = "cap_parameter_knots_differ";
+            return report;
+          }
+          const auto   p = uv->Pole(pole);
+          const double error =
+            ElSLib::Value(p.X(), p.Y(), plane).Distance(curve->Pole(pole)) + reserve;
+          if (!(error <= report.MatchingTolerance))
+          {
+            report.Reason = "cap_curve_parameter_mismatch";
+            return report;
+          }
+          report.CapParameterDeviationBound = std::max(report.CapParameterDeviationBound, error);
+        }
+      }
+    }
+    if (report.ReferenceSeamBound + report.CurveDeviationBound + report.CapParameterDeviationBound
+        > tolerance)
+    {
+      report.Reason = "combined_seam_budget_exhausted";
+      return report;
+    }
+    const auto&  field = *static_cast<const Geom_ImplicitGyroid*>(data->Field().get());
+    const double h     = 4 * std::pow(2 * std::acos(-1.) / field.Period(), 2);
+    const double gReserve =
+      h * reserve + 1024 * std::numeric_limits<double>::epsilon() * field.LipschitzBound();
+    for (size_t cap = 0; cap + 1 < copy.Faces.size(); ++cap)
+    {
+      const gp_Vec normal(BRepAdaptor_Surface(copy.Faces[cap]).Plane().Axis().Direction());
+      for (TopExp_Explorer edge(copy.Faces[cap], TopAbs_EDGE); edge.More(); edge.Next())
+      {
+        if (!aNative.Contains(edge.Current()))
+          continue;
+        const int   id     = aEdges.FindIndex(edge.Current()) - 1;
+        const auto& points = ac[size_t(id)].Points;
+        for (size_t p = 1; p < points.size(); ++p)
+        {
+          gp_Vec       tangent(points[p - 1], points[p]);
+          const double length = tangent.Magnitude();
+          if (edge.Current().Orientation() == TopAbs_REVERSED)
+            tangent.Reverse();
+          const gp_Pnt mid((points[p - 1].XYZ() + points[p].XYZ()) * .5);
+          const double lower = (tangent / length).Dot(normal.Crossed(field.Gradient(mid)))
+                                 * (original.Orientation() == TopAbs_FORWARD ? 1 : -1)
+                               - h * length * .5 - gReserve;
+          if (!(lower > 0))
+          {
+            report.Reason = "seam_tangent_alignment_unresolved";
+            return report;
+          }
+          report.MinimumTangentAlignment = report.MinimumTangentAlignment == 0
+                                             ? lower
+                                             : std::min(report.MinimumTangentAlignment, lower);
+        }
+      }
+    }
+    report.Resolved = true;
+    report.Reason   = "matched";
+  }
+  catch (const Standard_NotImplemented& error)
+  {
+    report.Reason = error.what();
+  }
+  return report;
 }
