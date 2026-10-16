@@ -27,6 +27,37 @@ public:
     double GeometricBound   = 0; //!< Seam bound ONLY, not a surface/solid certificate.
   };
 
+  enum class PointState
+  {
+    Inside,
+    Outside,
+    NearBoundary,
+    Unresolved
+  };
+
+  struct PointClassification
+  {
+    PointState State              = PointState::Unresolved;
+    double     DistanceLowerBound = 0; //!< Model length, NOT field residual/distance approximation.
+    bool       HasBoundaryWitness = false;
+    gp_Pnt WitnessFirst, WitnessLast; //!< A cap point or root bracket containing a boundary point.
+    double WitnessDistanceUpperBound = 0;
+    double WitnessBracketWidth       = 0;
+  };
+
+  //! Classify the authoritative mathematical region of an unchanged Build
+  //! result, not a mesh, approximate cap polygon, or UV-based solid classifier.
+  //! Inside/Outside require a conservative boundary-distance lower bound >
+  //! the requested model-length tolerance. NearBoundary requires a cap point
+  //! or sign bracket wholly inside that tolerance ball AND the box domain.
+  //! Otherwise returns Unresolved, including critical/ambiguous queries.
+  //! Ordinary floating-point bounds/reserves, not directed interval arithmetic.
+  //! This does not validate boundary topology, prove nonemptiness/components,
+  //! or turn the boundary compound into a TopoDS_Solid.
+  Standard_EXPORT static PointClassification Classify(const Boundary& theBoundary,
+                                                      const gp_Pnt&   thePoint,
+                                                      double          theDistanceTolerance = 0.1);
+
   //! F<=0 inside; Common is box intersect field, BoxMinusField retains F>=0.
   //! Exact gyroid, childless identity-placed forward native face; a valid,
   //! forward, axis-aligned conventional box solid wholly inside its domain.

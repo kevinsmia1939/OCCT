@@ -258,6 +258,193 @@ std::vector<Loop> assemble(const std::vector<Use>& uses,
   return result;
 }
 
+} // namespace
+
+BRepClass3d_ImplicitBox::PointClassification BRepClass3d_ImplicitBox::Classify(
+  const Boundary& boundary,
+  const gp_Pnt&   point,
+  double          tolerance)
+{
+  if (!std::isfinite(tolerance) || tolerance <= 0)
+    throw Standard_DomainError("Classification distance tolerance must be finite and positive");
+  require(!boundary.Faces.empty(), "Classification requires a constructed native mixed boundary");
+  const auto& face = boundary.Faces.back();
+  const auto  data = occ::down_cast<BRep_TImplicitFace>(face.TShape());
+  require(!data.IsNull() && typeid(*data) == typeid(BRep_TImplicitFace)
+            && typeid(*data->Field()) == typeid(Geom_ImplicitGyroid) && face.Location().IsIdentity()
+            && data->Location().IsIdentity()
+            && (face.Orientation() == TopAbs_FORWARD || face.Orientation() == TopAbs_REVERSED),
+          "Classification requires an unchanged identity-placed mixed gyroid/box boundary");
+  const auto&  field = *static_cast<const Geom_ImplicitGyroid*>(data->Field().get());
+  const auto   low = data->Minimum(), high = data->Maximum();
+  double       magnitude = 1;
+  const double k         = 2 * std::acos(-1.) / field.Period();
+  for (int axis = 1; axis <= 3; ++axis)
+  {
+    if (!std::isfinite(point.Coord(axis)) || !std::isfinite(k * point.Coord(axis))
+        || std::abs(k * point.Coord(axis)) >= 1.e6)
+      throw Standard_DomainError(
+        "Classification coordinate exceeds the finite trigonometric precision policy");
+    magnitude = std::max({magnitude,
+                          std::abs(point.Coord(axis)),
+                          std::abs(low.Coord(axis)),
+                          std::abs(high.Coord(axis))});
+  }
+  const double coordinateReserve = 512 * std::numeric_limits<double>::epsilon() * magnitude;
+  if (tolerance <= 4096 * coordinateReserve)
+    throw Standard_DomainError("Classification tolerance below coordinate precision policy");
+  const double lipschitz = field.LipschitzBound();
+  const double fieldReserve =
+    512 * std::numeric_limits<double>::epsilon() * (1 + std::abs(field.IsoValue()))
+    + lipschitz * coordinateReserve;
+  const double value    = field.Value(point);
+  const auto   gradient = field.Gradient(point);
+  const double norm = std::hypot(gradient.X(), gradient.Y(), gradient.Z()), hessian = 4 * k * k;
+  require(std::isfinite(norm) && std::isfinite(hessian) && hessian > 0,
+          "Unrepresentable classification derivative bounds");
+  const bool negative          = face.Orientation() == TopAbs_FORWARD;
+  const bool retained          = (value < 0) == negative;
+  const bool signResolved      = std::abs(value) > fieldReserve;
+  gp_Pnt     clipped           = point;
+  double     boxInsideDistance = std::numeric_limits<double>::infinity();
+  bool       insideBox         = true;
+  for (int axis = 1; axis <= 3; ++axis)
+  {
+    clipped.SetCoord(axis, std::clamp(point.Coord(axis), low.Coord(axis), high.Coord(axis)));
+    insideBox &= point.Coord(axis) >= low.Coord(axis) && point.Coord(axis) <= high.Coord(axis);
+    boxInsideDistance = std::min({boxInsideDistance,
+                                  point.Coord(axis) - low.Coord(axis),
+                                  high.Coord(axis) - point.Coord(axis)});
+  }
+  PointClassification result;
+  const auto          distance = [](const gp_Pnt& a, const gp_Pnt& b) {
+    return std::hypot(a.X() - b.X(), a.Y() - b.Y(), a.Z() - b.Z());
+  };
+  const double margin = std::max(0., std::abs(value) - fieldReserve);
+  const double gradientReserve =
+    hessian * coordinateReserve + 512 * std::numeric_limits<double>::epsilon() * lipschitz;
+  const double derivative = norm + gradientReserve;
+  // Solve margin = |grad|*r + H*r^2/2 without subtractive cancellation.
+  // This is another conservative distance lower bound, useful near stationary
+  // points; it is NOT an approximation to signed distance.
+  const double taylorDistance =
+    margin == 0
+      ? 0
+      : 2 * margin / (derivative + std::hypot(derivative, std::sqrt(2 * hessian * margin)));
+  const double fieldDistance =
+    std::max(0., std::max(margin / lipschitz, taylorDistance) - coordinateReserve);
+  const double boxOutsideDistance = std::max(0., distance(point, clipped) - coordinateReserve);
+  // The region is the intersection of the box and one field-sign region.
+  // Inside: distance to either possible boundary is at least their minimum.
+  // Outside: each violated constraint gives a lower bound; take the maximum.
+  if (insideBox && signResolved && retained)
+    result.DistanceLowerBound =
+      std::max(0., std::min(boxInsideDistance - coordinateReserve, fieldDistance));
+  else
+    result.DistanceLowerBound =
+      std::max(boxOutsideDistance, signResolved && !retained ? fieldDistance : 0.);
+  if (result.DistanceLowerBound > tolerance + coordinateReserve)
+  {
+    result.State = insideBox && retained && signResolved ? PointState::Inside : PointState::Outside;
+    return result;
+  }
+  // A retained point on a box side is an actual boundary witness even when a
+  // gyroid root is absent nearby. Test all six clipped orthogonal cap points.
+  for (int axis = 1; axis <= 3; ++axis)
+    for (double coordinate : {low.Coord(axis), high.Coord(axis)})
+    {
+      auto witness = clipped;
+      witness.SetCoord(axis, coordinate);
+      const double witnessDistance = distance(point, witness) + coordinateReserve;
+      if (witnessDistance > tolerance)
+        continue;
+      const double f = field.Value(witness);
+      if (std::abs(f) <= fieldReserve || ((f < 0) != negative))
+        continue;
+      result.State              = PointState::NearBoundary;
+      result.HasBoundaryWitness = true;
+      result.WitnessFirst = result.WitnessLast = witness;
+      result.WitnessDistanceUpperBound         = witnessDistance;
+      return result;
+    }
+  // Search along the local gradient, clipping the entire search segment to
+  // the box. A sign bracket proves existence by continuity, not proximity
+  // inferred from a dimensionless residual or a Newton convergence flag.
+  auto direction = gradient;
+  if (!std::isfinite(norm) || norm <= gradientReserve)
+    return result;
+  direction /= norm;
+  double first = -(tolerance - 4 * coordinateReserve), last = -first;
+  for (int axis = 1; axis <= 3; ++axis)
+  {
+    const double component = direction.Coord(axis);
+    if (component == 0)
+    {
+      if (point.Coord(axis) < low.Coord(axis) || point.Coord(axis) > high.Coord(axis))
+        return result;
+      continue;
+    }
+    const double a = (low.Coord(axis) - point.Coord(axis)) / component;
+    const double b = (high.Coord(axis) - point.Coord(axis)) / component;
+    first          = std::max(first, std::min(a, b));
+    last           = std::min(last, std::max(a, b));
+  }
+  // Shrink away from box clipping roundoff rather than evaluating outside it.
+  first += 2 * coordinateReserve;
+  last -= 2 * coordinateReserve;
+  if (first >= last)
+    return result;
+  auto   at = [&](double t) { return point.Translated(direction * t); };
+  double fa = field.Value(at(first)), fb = field.Value(at(last));
+  if (std::abs(fa) <= fieldReserve || std::abs(fb) <= fieldReserve
+      || std::signbit(fa) == std::signbit(fb))
+    return result;
+  for (int iteration = 0; iteration < 100 && last - first > tolerance / 256; ++iteration)
+  {
+    const double mid = first + (last - first) * .5;
+    if (mid == first || mid == last)
+      break;
+    const double fm = field.Value(at(mid));
+    // Keep a valid bracket when the midpoint's sign is within roundoff.
+    // Test quarter points; never collapse an uncertain midpoint to an exact root.
+    if (std::abs(fm) <= fieldReserve)
+    {
+      const double a = first + (mid - first) * .5, b = mid + (last - mid) * .5;
+      const double va = field.Value(at(a)), vb = field.Value(at(b));
+      if (std::abs(va) <= fieldReserve || std::abs(vb) <= fieldReserve
+          || std::signbit(va) == std::signbit(vb))
+        break;
+      first = a;
+      last  = b;
+      fa    = va;
+    }
+    else if (std::signbit(fa) != std::signbit(fm))
+      last = mid;
+    else
+    {
+      first = mid;
+      fa    = fm;
+    }
+  }
+  const auto a = at(first), b = at(last);
+  for (int axis = 1; axis <= 3; ++axis)
+    if (a.Coord(axis) < low.Coord(axis) || a.Coord(axis) > high.Coord(axis)
+        || b.Coord(axis) < low.Coord(axis) || b.Coord(axis) > high.Coord(axis))
+      return result;
+  const double upper = std::max(distance(point, a), distance(point, b)) + coordinateReserve;
+  if (upper > tolerance || distance(a, b) > tolerance / 256)
+    return result;
+  result.State                     = PointState::NearBoundary;
+  result.HasBoundaryWitness        = true;
+  result.WitnessFirst              = a;
+  result.WitnessLast               = b;
+  result.WitnessBracketWidth       = distance(a, b);
+  result.WitnessDistanceUpperBound = upper;
+  return result;
+}
+
+namespace
+{
 bool contains(const Loop& loop, const gp_Pnt2d& point)
 {
   bool inside = false;

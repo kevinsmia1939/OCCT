@@ -18,6 +18,7 @@
 #include <sstream>
 #include <cmath>
 #include <array>
+#include <limits>
 
 namespace
 {
@@ -243,4 +244,88 @@ TEST(BRepClass3d_ImplicitBox, LevelChangesAndPlacedSourceRemainExplicit)
   // A plane through an isolated maximum does not become an empty-success
   // section merely because the new Taylor/harmonic exclusions are available.
   EXPECT_THROW(Ops::Build(field(1.5), box(), Ops::Operation::Common), Standard_NotImplemented);
+}
+
+TEST(BRepClass3d_ImplicitBox, ClassifierUsesRegionAndPhysicalDistanceNotFieldResidual)
+{
+  using Ops         = BRepClass3d_ImplicitBox;
+  const auto common = Ops::Build(field(), box(), Ops::Operation::Common);
+  const auto cut    = Ops::Build(field(), box(), Ops::Operation::BoxMinusField);
+  for (const auto& point : {gp_Pnt(0, 0, 2), gp_Pnt(1.25, 1.25, 1.5)})
+  {
+    const bool negative = point.X() == 0;
+    const auto a = Ops::Classify(common, point), b = Ops::Classify(cut, point);
+    EXPECT_EQ(a.State, negative ? Ops::PointState::Inside : Ops::PointState::Outside);
+    EXPECT_EQ(b.State, negative ? Ops::PointState::Outside : Ops::PointState::Inside);
+    EXPECT_GT(a.DistanceLowerBound, .1);
+    EXPECT_GT(b.DistanceLowerBound, .1);
+  }
+  // F at the stationary maximum is only .05, dimensionless, yet the nearest
+  // field boundary is more than .1 mm away. Taylor exclusion proves Outside.
+  const auto peak = Ops::Classify(common, gp_Pnt(1.25, 1.25, 1.25));
+  EXPECT_EQ(peak.State, Ops::PointState::Outside);
+  EXPECT_GT(peak.DistanceLowerBound, .1);
+  for (double x : {-.30, -.33})
+  {
+    const gp_Pnt point(x, 0, 2);
+    const auto   a = Ops::Classify(common, point);
+    EXPECT_EQ(a.State, Ops::PointState::NearBoundary);
+    EXPECT_TRUE(a.HasBoundaryWitness);
+    EXPECT_NEAR(a.WitnessFirst.X(), -.31, 1.e-14);
+    EXPECT_LE(a.WitnessDistanceUpperBound, .1);
+    EXPECT_EQ(Ops::Classify(cut, point).State, Ops::PointState::Outside);
+  }
+  EXPECT_EQ(Ops::Classify(common, gp_Pnt(30, 20, 10)).State, Ops::PointState::Outside);
+  EXPECT_THROW(Ops::Classify(common, gp_Pnt(0, 0, 0), 0), Standard_DomainError);
+  EXPECT_THROW(Ops::Classify(common, gp_Pnt(std::numeric_limits<double>::infinity(), 0, 0)),
+               Standard_DomainError);
+  EXPECT_THROW(Ops::Classify(Ops::Boundary(), gp_Pnt(0, 0, 0)), Standard_NotImplemented);
+}
+
+TEST(BRepClass3d_ImplicitBox, NearFieldBoundaryHasClippedSignBracketAndCriticalCaseStaysUnresolved)
+{
+  using Ops = BRepClass3d_ImplicitBox;
+  const auto operand =
+    BRepPrimAPI_MakeBox(gp_Pnt(-3.83, -4.07, -2.67), gp_Pnt(4.17, 3.93, 3.37)).Shape();
+  const auto zero  = Ops::Build(field(0), operand, Ops::Operation::Common);
+  const auto query = Ops::Classify(zero, gp_Pnt(0, 0, 0));
+  EXPECT_EQ(query.State, Ops::PointState::NearBoundary);
+  EXPECT_TRUE(query.HasBoundaryWitness);
+  EXPECT_LE(query.WitnessBracketWidth, .1 / 256);
+  EXPECT_LE(query.WitnessDistanceUpperBound, .1);
+  const auto& face = zero.Faces.back();
+  EXPECT_LT(BRep_ImplicitTool::Value(face, query.WitnessFirst)
+              * BRep_ImplicitTool::Value(face, query.WitnessLast),
+            0);
+  for (const auto& point : {query.WitnessFirst, query.WitnessLast})
+    EXPECT_TRUE(BRep_ImplicitTool::IsInDomain(face, point));
+  // A coarse tolerance ball intersects a boundary but the stationary gradient
+  // offers no root bracket and no cap witness: fail explicitly, never guess ON.
+  const auto common   = Ops::Build(field(), box(), Ops::Operation::Common);
+  const auto critical = Ops::Classify(common, gp_Pnt(1.25, 1.25, 1.25), .4);
+  EXPECT_EQ(critical.State, Ops::PointState::Unresolved);
+  EXPECT_FALSE(critical.HasBoundaryWitness);
+}
+
+TEST(BRepClass3d_ImplicitBox, ClassifierLengthToleranceScalesIndependentlyOfFieldUnits)
+{
+  using Ops = BRepClass3d_ImplicitBox;
+  TopoDS_Face small;
+  BRep_Builder().MakeImplicitFace(small,
+                                  new Geom_ImplicitGyroid(1, 1.45),
+                                  gp_Pnt(-.5, -.5, -.5),
+                                  gp_Pnt(.6, .6, .6),
+                                  TopLoc_Location(),
+                                  .01);
+  const auto smallBox =
+    BRepPrimAPI_MakeBox(gp_Pnt(-.031, -.037, .125), gp_Pnt(.293, .291, .4)).Shape();
+  const auto   a = Ops::Build(field(), box(), Ops::Operation::BoxMinusField);
+  const auto   b = Ops::Build(small, smallBox, Ops::Operation::BoxMinusField, .01);
+  const gp_Pnt p(1.25, 1.25, 1.5), q(.125, .125, .15);
+  EXPECT_NEAR(BRep_ImplicitTool::Value(a.Faces.back(), p),
+              BRep_ImplicitTool::Value(b.Faces.back(), q),
+              1.e-14);
+  EXPECT_EQ(Ops::Classify(a, p, .1).State, Ops::PointState::Inside);
+  EXPECT_EQ(Ops::Classify(b, q, .1).State, Ops::PointState::NearBoundary);
+  EXPECT_EQ(Ops::Classify(b, q, .01).State, Ops::PointState::Inside);
 }
