@@ -32,6 +32,18 @@
 
 namespace
 {
+TopoDS_Face topologyField(const gp_Pnt& low, const gp_Pnt& high, double iso, double scale = 1)
+{
+  TopoDS_Face face;
+  BRep_Builder().MakeImplicitFace(face,
+                                  new Geom_ImplicitGyroid(10 * scale, iso),
+                                  low,
+                                  high,
+                                  TopLoc_Location(),
+                                  .1 * scale);
+  return face;
+}
+
 TopoDS_Face field(double iso = 1.45)
 {
   TopoDS_Face face;
@@ -49,6 +61,139 @@ TopoDS_Shape box()
   return BRepPrimAPI_MakeBox(gp_Pnt(-.31, -.37, 1.25), gp_Pnt(2.93, 2.91, 4)).Shape();
 }
 } // namespace
+
+TEST(BRepClass3d_ImplicitBox, WholeBoxHomotopyReferenceAndBoundaryTopology)
+{
+  for (double iso : {1.45, 0.0})
+  {
+    const auto face   = topologyField(gp_Pnt(-.31, -.37, 1.25), gp_Pnt(2.93, 2.91, 4), iso);
+    const auto result = BRepClass3d_ImplicitBox::CheckTopology(face, 32, 16);
+    ASSERT_TRUE(result.HomotopyResolved)
+      << iso << " " << result.Reason << " dim " << result.UnresolvedDimension << " at "
+      << result.UnresolvedMinimum.X() << "," << result.UnresolvedMinimum.Y() << ","
+      << result.UnresolvedMinimum.Z();
+    ASSERT_TRUE(result.ReferenceManifold) << result.Reason;
+    EXPECT_FALSE(result.Nodes.empty());
+    EXPECT_FALSE(result.Triangles.empty());
+    EXPECT_FALSE(result.BoundaryLoops.empty());
+    EXPECT_EQ(result.ComponentEuler, std::vector<int>({1}));
+    EXPECT_EQ(result.BoundaryLoops.size(), 1u);
+    EXPECT_GT(result.MinimumHomotopyDerivative, 0);
+    for (size_t dimension = 0; dimension < 4; ++dimension)
+      EXPECT_GT(result.Visited[dimension], 0u);
+    auto reversed = face;
+    reversed.Reverse();
+    const auto other = BRepClass3d_ImplicitBox::CheckTopology(reversed, 32, 16);
+    ASSERT_TRUE(other.HomotopyResolved);
+    ASSERT_TRUE(other.ReferenceManifold);
+    EXPECT_EQ(other.ComponentEuler, result.ComponentEuler);
+    EXPECT_EQ(other.Nodes.size(), result.Nodes.size());
+    EXPECT_EQ(other.Triangles.size(), result.Triangles.size());
+    for (size_t i = 0; i < result.Triangles.size(); ++i)
+    {
+      EXPECT_EQ(other.Triangles[i][0], result.Triangles[i][0]);
+      EXPECT_EQ(other.Triangles[i][1], result.Triangles[i][2]);
+      EXPECT_EQ(other.Triangles[i][2], result.Triangles[i][1]);
+    }
+  }
+}
+
+TEST(BRepClass3d_ImplicitBox, WholeBoxHomotopyDetectsHiddenComponentsAndLimits)
+{
+  const auto hidden = topologyField(gp_Pnt(.3, .3, .3), gp_Pnt(2.3, 2.3, 2.3), 1.4999);
+  // All resolution-four nodal samples are negative, but the exact central
+  // maximum is positive: accepting signs/incidence alone would lose a sphere.
+  for (int z = 0; z <= 4; ++z)
+    for (int y = 0; y <= 4; ++y)
+      for (int x = 0; x <= 4; ++x)
+        EXPECT_LT(
+          Geom_ImplicitGyroid(10, 1.4999).Value(gp_Pnt(.3 + .5 * x, .3 + .5 * y, .3 + .5 * z)),
+          0);
+  EXPECT_GT(Geom_ImplicitGyroid(10, 1.4999).Value(gp_Pnt(1.25, 1.25, 1.25)), 0);
+  const auto missing = BRepClass3d_ImplicitBox::CheckTopology(hidden, 4);
+  EXPECT_FALSE(missing.HomotopyResolved);
+  EXPECT_FALSE(missing.ReferenceManifold);
+  const auto face    = topologyField(gp_Pnt(-.31, -.37, 1.25), gp_Pnt(2.93, 2.91, 4), 1.45);
+  const auto limited = BRepClass3d_ImplicitBox::CheckTopology(face, 16, 10, 1);
+  EXPECT_FALSE(limited.HomotopyResolved);
+  EXPECT_EQ(limited.Reason, "homotopy_cell_budget_exhausted");
+  const auto nodal = topologyField(gp_Pnt(0, 0, 0), gp_Pnt(2, 2, 2), 0);
+  const auto zero  = BRepClass3d_ImplicitBox::CheckTopology(nodal);
+  EXPECT_FALSE(zero.HomotopyResolved);
+  EXPECT_EQ(zero.Reason, "reference_vertex_sign_unresolved");
+  EXPECT_THROW(BRepClass3d_ImplicitBox::CheckTopology(face, 3), Standard_DomainError);
+  EXPECT_THROW(BRepClass3d_ImplicitBox::CheckTopology(face, 16, -1), Standard_DomainError);
+  EXPECT_THROW(BRepClass3d_ImplicitBox::CheckTopology(face, 16, 10, 0), Standard_DomainError);
+}
+
+TEST(BRepClass3d_ImplicitBox, WholeBoxHomotopyClosedSphereAndEmptyReference)
+{
+  for (int resolution : {16, 32})
+  {
+    const auto sphere = topologyField(gp_Pnt(.3, .3, .3), gp_Pnt(2.3, 2.3, 2.3), 1.45);
+    const auto result = BRepClass3d_ImplicitBox::CheckTopology(sphere, resolution);
+    ASSERT_TRUE(result.HomotopyResolved) << result.Reason << " " << result.UnresolvedDimension;
+    ASSERT_TRUE(result.ReferenceManifold);
+    EXPECT_EQ(result.ComponentEuler, std::vector<int>({2}));
+    EXPECT_TRUE(result.BoundaryLoops.empty());
+  }
+  const auto empty  = topologyField(gp_Pnt(.3, .3, .3), gp_Pnt(2.3, 2.3, 2.3), 2);
+  const auto result = BRepClass3d_ImplicitBox::CheckTopology(empty, 4);
+  ASSERT_TRUE(result.HomotopyResolved) << result.Reason;
+  EXPECT_TRUE(result.ReferenceManifold);
+  EXPECT_TRUE(result.Nodes.empty());
+  EXPECT_TRUE(result.ComponentEuler.empty());
+}
+
+TEST(BRepClass3d_ImplicitBox, WholeBoxHomotopyScalingAndSnapshotImmutability)
+{
+  const auto source =
+    BRepClass3d_ImplicitBox::Build(field(), box(), BRepClass3d_ImplicitBox::Operation::Common);
+  std::ostringstream before;
+  BRepClass3d_ImplicitBoxIO::Write(source, before);
+  const auto baseline = BRepClass3d_ImplicitBox::CheckTopology(source.Faces.back());
+  ASSERT_TRUE(baseline.HomotopyResolved) << baseline.Reason;
+  ASSERT_TRUE(baseline.ReferenceManifold);
+  std::ostringstream after;
+  BRepClass3d_ImplicitBoxIO::Write(source, after);
+  EXPECT_EQ(before.str(), after.str());
+  for (double scale : {.1, 10.0})
+  {
+    const gp_Pnt low(-.31 * scale, -.37 * scale, 1.25 * scale),
+      high(2.93 * scale, 2.91 * scale, 4 * scale);
+    const auto face  = topologyField(low, high, 1.45, scale);
+    const auto other = BRepClass3d_ImplicitBox::CheckTopology(face);
+    ASSERT_TRUE(other.HomotopyResolved) << scale << " " << other.Reason;
+    ASSERT_TRUE(other.ReferenceManifold);
+    EXPECT_EQ(other.ComponentEuler, baseline.ComponentEuler);
+    EXPECT_EQ(other.BoundaryLoops.size(), baseline.BoundaryLoops.size());
+    EXPECT_NEAR(other.MaximumSimplexDiameter, baseline.MaximumSimplexDiameter * scale, 1.e-12);
+  }
+  auto    moved = source.Faces.back();
+  gp_Trsf transform;
+  transform.SetTranslation(gp_Vec(1, 0, 0));
+  moved.Location(TopLoc_Location(transform));
+  EXPECT_THROW(BRepClass3d_ImplicitBox::CheckTopology(moved), Standard_NotImplemented);
+  EXPECT_THROW(BRepClass3d_ImplicitBox::CheckTopology(TopoDS_Face()), Standard_NotImplemented);
+}
+
+TEST(BRepClass3d_ImplicitBox, WholeBoxHomotopyRefusesCriticalBoxStrata)
+{
+  const double k = 2 * std::acos(-1.) / 10, x = .4 / k, y = .6 / k;
+  const double z   = std::atan2(std::cos(.4), std::sin(.6)) / k;
+  const double iso = std::sin(.4) * std::cos(.6) + std::hypot(std::sin(.6), std::cos(.4));
+  for (const auto& face :
+       {topologyField(gp_Pnt(.7, .8, .9), gp_Pnt(1.8, 1.9, 2), 1.5),
+        topologyField(gp_Pnt(-.5, 2, 1.8), gp_Pnt(.5, 3, 2.5), 1),
+        topologyField(gp_Pnt(x, y, z - .05), gp_Pnt(x + .05, y + .05, z + .05), iso),
+        topologyField(gp_Pnt(0, 0, 0), gp_Pnt(.2, .3, .4), 0)})
+  {
+    const auto result = BRepClass3d_ImplicitBox::CheckTopology(face);
+    EXPECT_FALSE(result.HomotopyResolved);
+    EXPECT_FALSE(result.ReferenceManifold);
+    EXPECT_FALSE(result.Reason.empty());
+  }
+}
 
 TEST(BRepClass3d_ImplicitBox, CommonAndDirectionalCutShareOppositeSeamsAndCapPCurves)
 {

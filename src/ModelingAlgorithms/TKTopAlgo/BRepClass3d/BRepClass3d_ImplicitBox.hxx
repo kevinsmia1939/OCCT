@@ -70,6 +70,33 @@ public:
     std::string Reason;
   };
 
+  struct TopologyWitness
+  {
+    bool HomotopyResolved = false, ReferenceManifold = false;
+    std::string Reason;
+    std::array<size_t, 4> Visited{}, Excluded{}, Transverse{};
+    double MinimumHomotopyDerivative = 0, MaximumSimplexDiameter = 0;
+    int Resolution = 0, UnresolvedDimension = -1;
+    gp_Pnt UnresolvedMinimum, UnresolvedMaximum;
+    // Transient nodal-linear reference ONLY, not native topology or a .1mm mesh.
+    std::vector<gp_Pnt> Nodes;
+    std::vector<std::array<int, 3>> Triangles;
+    std::vector<std::vector<int>> BoundaryLoops;
+    std::vector<int> ComponentEuler;
+  };
+
+  //! Check the whole BOX zero set against a common Freudenthal nodal-linear
+  //! reference. On tetrahedra and true box-boundary strata, exclude homotopy
+  //! zeros or prove grad(L).projected-grad(F)>0 for (1-t)F+tL. The continuous
+  //! field-gradient direction increases every incident linear piece, including
+  //! across internal simplex boundaries. Engineering reserves,
+  //! NOT directed intervals. The reference is not the stored trim graph or
+  //! preview mesh; no native-shell/solid validation or accuracy claim follows.
+  Standard_EXPORT static TopologyWitness CheckTopology(const TopoDS_Face&,
+                                                       int theResolution = 32,
+                                                       int theMaximumDepth = 16,
+                                                       size_t theMaximumCells = 4000000);
+
   //! Re-trace a PRIVATE canonical box graph; match edge geometry, shared
   //! vertices, cap grouping and directed cyclic wires bijectively. Source
   //! graph/provenance never replaced. This is graph correspondence, NOT
