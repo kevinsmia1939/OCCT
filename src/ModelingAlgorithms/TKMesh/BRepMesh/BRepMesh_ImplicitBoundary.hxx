@@ -20,6 +20,25 @@ public:
 
   struct Result;
 
+  struct Coverage
+  {
+    bool   Resolved = false; //!< Both directed proximity bounds, NOT topology/solid validity.
+    double BoundaryToMeshBound = 0, MeshToBoundaryBound = 0;
+    size_t SpatialCells = 0, TrianglePatches = 0;
+    gp_Pnt UnresolvedMinimum, UnresolvedMaximum;
+    int    UnresolvedTriangle = -1;
+  };
+
+  //! Adaptive whole-box/face coverage and triangle-to-CLIPPED-region witnesses.
+  //! Ignores input metadata flags. Numerical reserves, NOT directed intervals,
+  //! topology equivalence, contact checks or native-solid validation.
+  Standard_EXPORT static Coverage CheckCoverage(const BRepClass3d_ImplicitBox::Boundary&,
+                                                const Result&,
+                                                double theTolerance      = 0.1,
+                                                int    theMaximumDepth   = 14,
+                                                size_t theMaximumCells   = 2000000,
+                                                size_t theMaximumPatches = 1000000);
+
   struct MeshAudit
   {
     enum class State

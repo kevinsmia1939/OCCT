@@ -6,6 +6,7 @@ set(OCCT_BRepMesh_FILES
   BRepMesh_ImplicitBoundary.cxx
   BRepMesh_ImplicitBoundarySurface.cxx
   BRepMesh_ImplicitBoundaryAudit.cxx
+  BRepMesh_ImplicitBoundaryCoverage.cxx
   BRepMesh_BaseMeshAlgo.cxx
   BRepMesh_BaseMeshAlgo.hxx
   BRepMesh_ConstrainedBaseMeshAlgo.hxx

@@ -28,6 +28,39 @@ namespace
 {
 using Ops = BRepClass3d_ImplicitBox;
 
+double referenceMeshDistance(const gp_Pnt&                            p,
+                             const BRepMesh_ImplicitBoundary::Result& mesh,
+                             bool                                     caps)
+{
+  double     best     = std::numeric_limits<double>::infinity();
+  const auto triangle = [&](const std::array<int, 3>& t) {
+    gp_Pnt v[3] = {mesh.Nodes[size_t(t[0])], mesh.Nodes[size_t(t[1])], mesh.Nodes[size_t(t[2])]};
+    auto   n    = gp_Vec(v[0], v[1]).Crossed(gp_Vec(v[0], v[2]));
+    if (!(n.Magnitude() > 0))
+      return;
+    n.Normalize();
+    const double height = gp_Vec(v[0], p).Dot(n);
+    const gp_Pnt q      = p.Translated(n * (-height));
+    bool         inside = true;
+    for (int i = 0; i < 3; ++i)
+    {
+      const gp_Vec edge(v[i], v[(i + 1) % 3]);
+      inside &= edge.Crossed(gp_Vec(v[i], q)).Dot(n) >= -1.e-12;
+      const double u = std::clamp(gp_Vec(v[i], p).Dot(edge) / edge.SquareMagnitude(), 0., 1.);
+      best           = std::min(best, p.Distance(v[i].Translated(edge * u)));
+    }
+    if (inside)
+      best = std::min(best, std::abs(height));
+  };
+  if (caps)
+    for (const auto& t : mesh.CapTriangles)
+      triangle(t.Nodes);
+  else
+    for (const auto& t : mesh.ImplicitTriangles)
+      triangle(t);
+  return best;
+}
+
 TEST(BRepMesh_ImplicitBoundary, ExactTriangleAuditRejectsImproperContactsAndHandlesAdjacency)
 {
   using Mesher = BRepMesh_ImplicitBoundary;
@@ -392,4 +425,123 @@ TEST(BRepMesh_ImplicitBoundary, SurfaceMultipleLoopsAndTranslatedPhysicalScale)
     EXPECT_TRUE(mesh.MeshClosed);
     EXPECT_LE(mesh.FieldDistanceBound, .1);
   }
+}
+
+TEST(BRepMesh_ImplicitBoundary, ClippedCoverageBothDirectionsAndBooleanOperations)
+{
+  for (bool crossing : {false, true})
+    for (auto operation : {Ops::Operation::Common, Ops::Operation::BoxMinusField})
+    {
+      const auto source = boundary(crossing, operation);
+      const auto mesh   = BRepMesh_ImplicitBoundary::Tessellate(source);
+      const auto report = BRepMesh_ImplicitBoundary::CheckCoverage(source, mesh);
+      std::cout << "coverage " << crossing << " " << int(operation)
+                << " resolved=" << report.Resolved << " bounds=" << report.BoundaryToMeshBound
+                << "," << report.MeshToBoundaryBound << " cells=" << report.SpatialCells
+                << " patches=" << report.TrianglePatches
+                << " triangle=" << report.UnresolvedTriangle
+                << " box=" << report.UnresolvedMinimum.X() << "," << report.UnresolvedMinimum.Y()
+                << "," << report.UnresolvedMinimum.Z() << std::endl;
+      EXPECT_TRUE(report.Resolved);
+      EXPECT_GT(report.BoundaryToMeshBound, 0);
+      EXPECT_LE(report.BoundaryToMeshBound, .1);
+      EXPECT_LE(report.MeshToBoundaryBound, .1);
+      // Independent harmonic z roots and raw-equation cap samples, not the
+      // production octree, BVH or classifier witness implementation.
+      const auto   data = occ::down_cast<BRep_TImplicitFace>(source.Faces.back().TShape());
+      const auto   low = data->Minimum(), high = data->Maximum();
+      const double k = 2 * std::acos(-1.) / 10, iso = crossing ? 0 : 1.45;
+      int          roots = 0;
+      for (int i = 1; i < 6; ++i)
+        for (int j = 1; j < 6; ++j)
+        {
+          const double x = low.X() + (high.X() - low.X()) * (double(i) / 6);
+          const double y = low.Y() + (high.Y() - low.Y()) * (double(j) / 6);
+          const double a = std::sin(k * y), b = std::cos(k * x),
+                       d = iso - std::sin(k * x) * std::cos(k * y);
+          if (std::abs(d) >= std::hypot(a, b))
+            continue;
+          const double angle = std::asin(d / std::hypot(a, b)), phase = std::atan2(a, b);
+          for (double branch : {angle, std::acos(-1.) - angle})
+            for (int turn = -2; turn <= 2; ++turn)
+            {
+              const double z = (branch - phase + 2 * std::acos(-1.) * turn) / k;
+              if (z < low.Z() || z > high.Z())
+                continue;
+              ++roots;
+              EXPECT_LE(referenceMeshDistance(gp_Pnt(x, y, z), mesh, false),
+                        report.BoundaryToMeshBound + 1.e-8);
+            }
+        }
+      EXPECT_GT(roots, 0);
+      for (int side = 0; side < 6; ++side)
+        for (int i = 1; i < 4; ++i)
+          for (int j = 1; j < 4; ++j)
+          {
+            const int axis = side / 2 + 1, u = axis % 3 + 1, v = u % 3 + 1;
+            gp_Pnt    p;
+            p.SetCoord(axis, side % 2 ? high.Coord(axis) : low.Coord(axis));
+            p.SetCoord(u, low.Coord(u) + (high.Coord(u) - low.Coord(u)) * (double(i) / 4));
+            p.SetCoord(v, low.Coord(v) + (high.Coord(v) - low.Coord(v)) * (double(j) / 4));
+            const double value = std::sin(k * p.X()) * std::cos(k * p.Y())
+                                 + std::sin(k * p.Y()) * std::cos(k * p.Z())
+                                 + std::sin(k * p.Z()) * std::cos(k * p.X()) - iso;
+            if ((operation == Ops::Operation::Common ? value : -value) < -1.e-8)
+              EXPECT_LE(referenceMeshDistance(p, mesh, true), report.BoundaryToMeshBound + 1.e-8);
+          }
+    }
+}
+
+TEST(BRepMesh_ImplicitBoundary, CoverageRefusesMissingGeometryAndExhaustedBudgets)
+{
+  const auto source = boundary(false, Ops::Operation::Common);
+  auto       mesh   = BRepMesh_ImplicitBoundary::Tessellate(source);
+  EXPECT_FALSE(BRepMesh_ImplicitBoundary::CheckCoverage(source, mesh, .1, 1).Resolved);
+  EXPECT_FALSE(BRepMesh_ImplicitBoundary::CheckCoverage(source, mesh, .1, 14, 1).Resolved);
+  EXPECT_FALSE(BRepMesh_ImplicitBoundary::CheckCoverage(source, mesh, .1, 14, 2000000, 1).Resolved);
+  EXPECT_THROW(BRepMesh_ImplicitBoundary::CheckCoverage(source, mesh, 0), Standard_DomainError);
+  EXPECT_THROW(BRepMesh_ImplicitBoundary::CheckCoverage(source, mesh, .1, 21),
+               Standard_DomainError);
+  mesh.SurfaceCoverageVerified = true; // cannot bypass geometry by forging metadata
+  mesh.ImplicitTriangles.clear();
+  EXPECT_FALSE(BRepMesh_ImplicitBoundary::CheckCoverage(source, mesh).Resolved);
+  mesh = BRepMesh_ImplicitBoundary::Tessellate(source);
+  mesh.CapTriangles.clear();
+  EXPECT_FALSE(BRepMesh_ImplicitBoundary::CheckCoverage(source, mesh).Resolved);
+}
+
+TEST(BRepMesh_ImplicitBoundary, CoverageRejectsOneMissingComponentAndExtraneousInteriorTriangles)
+{
+  TopoDS_Face field;
+  BRep_Builder().MakeImplicitFace(field,
+                                  new Geom_ImplicitGyroid(10, 1.45),
+                                  gp_Pnt(-5, -5, -5),
+                                  gp_Pnt(16, 16, 6),
+                                  TopLoc_Location(),
+                                  .1);
+  const auto box    = BRepPrimAPI_MakeBox(gp_Pnt(-.31, -.37, 1.25), gp_Pnt(12.93, 2.91, 4)).Shape();
+  const auto source = Ops::Build(field, box, Ops::Operation::Common);
+  auto       mesh   = BRepMesh_ImplicitBoundary::Tessellate(source);
+  ASSERT_TRUE(BRepMesh_ImplicitBoundary::CheckCoverage(source, mesh).Resolved);
+  const auto count = mesh.ImplicitTriangles.size();
+  mesh.ImplicitTriangles.erase(
+    std::remove_if(mesh.ImplicitTriangles.begin(),
+                   mesh.ImplicitTriangles.end(),
+                   [&](const auto& t) { return mesh.Nodes[size_t(t[0])].X() > 5; }),
+    mesh.ImplicitTriangles.end());
+  ASSERT_FALSE(mesh.ImplicitTriangles.empty());
+  ASSERT_LT(mesh.ImplicitTriangles.size(), count);
+  EXPECT_FALSE(BRepMesh_ImplicitBoundary::CheckCoverage(source, mesh).Resolved);
+
+  const auto small = boundary(false, Ops::Operation::Common);
+  mesh             = BRepMesh_ImplicitBoundary::Tessellate(small);
+  const int index  = int(mesh.Nodes.size());
+  mesh.Nodes.insert(mesh.Nodes.end(), {gp_Pnt(0, 0, 2), gp_Pnt(.01, 0, 2), gp_Pnt(0, .01, 2)});
+  mesh.ImplicitTriangles.push_back({index, index + 1, index + 2});
+  const auto bad = BRepMesh_ImplicitBoundary::CheckCoverage(small, mesh);
+  EXPECT_FALSE(bad.Resolved);
+  EXPECT_EQ(bad.UnresolvedTriangle,
+            int(mesh.CapTriangles.size() + mesh.ImplicitTriangles.size() - 1));
+  mesh.ImplicitTriangles.back()[0] = -1;
+  EXPECT_THROW(BRepMesh_ImplicitBoundary::CheckCoverage(small, mesh), Standard_DomainError);
 }
