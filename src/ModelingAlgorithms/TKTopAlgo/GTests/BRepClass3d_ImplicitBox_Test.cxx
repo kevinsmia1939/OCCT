@@ -426,3 +426,110 @@ TEST(BRepClass3d_ImplicitBox, TopologyIORejectsMalformedRecordsAtomicallyAndOmit
   EXPECT_THROW(BRepClass3d_ImplicitBoxIO::Read(locked, source), Standard_DomainError);
   source.Shape.Locked(false);
 }
+
+TEST(BRepClass3d_ImplicitBox, WholeBoxStratifiedRegularityBothOperationsAndStoredTopology)
+{
+  using Ops = BRepClass3d_ImplicitBox;
+  const auto open =
+    BRepPrimAPI_MakeBox(gp_Pnt(-3.83, -4.07, -2.67), gp_Pnt(4.17, 3.93, 3.37)).Shape();
+  for (bool crossing : {false, true})
+    for (auto op : {Ops::Operation::Common, Ops::Operation::BoxMinusField})
+    {
+      const auto source = Ops::Build(field(crossing ? 0 : 1.45), crossing ? open : box(), op);
+      std::ostringstream record;
+      BRepClass3d_ImplicitBoxIO::Write(source, record);
+      const auto report = Ops::CheckRegularity(source.Faces.back());
+      std::cout << "regularity " << crossing << " " << int(op) << " resolved=" << report.Resolved
+                << " dimension=" << report.UnresolvedDimension << " visited=" << report.Visited[3]
+                << " bounds=" << report.MinimumDerivative[3] << "," << report.MinimumDerivative[2]
+                << "," << report.MinimumDerivative[1] << std::endl;
+      EXPECT_TRUE(report.Resolved);
+      EXPECT_EQ(report.UnresolvedDimension, -1);
+      for (bool complete : report.Complete)
+        EXPECT_TRUE(complete);
+      EXPECT_EQ(report.Visited[0], 8u);
+      EXPECT_EQ(report.Excluded[0], 8u);
+      EXPECT_GT(report.MinimumDerivative[3], 0);
+      EXPECT_GT(report.MinimumDerivative[2], 0);
+      if (crossing)
+        EXPECT_GT(report.MinimumDerivative[1], 0);
+      EXPECT_FALSE(Ops::CheckRegularity(source.Faces.back(), 14, 1).Resolved);
+      Ops::Boundary      loaded;
+      std::istringstream input(record.str());
+      BRepClass3d_ImplicitBoxIO::Read(input, loaded);
+      EXPECT_FALSE(loaded.SeamBoundVerified);
+      EXPECT_TRUE(Ops::CheckRegularity(loaded.Faces.back()).Resolved);
+      std::ostringstream after;
+      BRepClass3d_ImplicitBoxIO::Write(source, after);
+      EXPECT_EQ(record.str(), after.str());
+    }
+}
+
+TEST(BRepClass3d_ImplicitBox, RegularityRefusesVolumeFaceEdgeAndCornerCriticalCases)
+{
+  using Ops       = BRepClass3d_ImplicitBox;
+  const auto make = [](double iso, const gp_Pnt& low, const gp_Pnt& high) {
+    TopoDS_Face face;
+    BRep_Builder()
+      .MakeImplicitFace(face, new Geom_ImplicitGyroid(10, iso), low, high, TopLoc_Location(), .001);
+    return face;
+  };
+  const auto critical = make(1.5, gp_Pnt(.7, .8, .9), gp_Pnt(1.8, 1.9, 2.0));
+  const auto volume   = Ops::CheckRegularity(critical);
+  EXPECT_FALSE(volume.Resolved);
+  EXPECT_EQ(volume.UnresolvedDimension, 3);
+  const auto tangent = make(1, gp_Pnt(-.5, 2, 1.8), gp_Pnt(.5, 3, 2.5));
+  const auto face    = Ops::CheckRegularity(tangent);
+  EXPECT_FALSE(face.Resolved);
+  EXPECT_TRUE(face.Complete[3]);
+  EXPECT_EQ(face.UnresolvedDimension, 2);
+  const double k = 2 * std::acos(-1.) / 10, x = .4 / k, y = .6 / k;
+  const double z         = std::atan2(std::cos(.4), std::sin(.6)) / k;
+  const double iso       = std::sin(.4) * std::cos(.6) + std::hypot(std::sin(.6), std::cos(.4));
+  const auto   edgeField = make(iso, gp_Pnt(x, y, z - .05), gp_Pnt(x + .05, y + .05, z + .05));
+  const auto   edge      = Ops::CheckRegularity(edgeField);
+  EXPECT_FALSE(edge.Resolved);
+  EXPECT_TRUE(edge.Complete[3]);
+  EXPECT_TRUE(edge.Complete[2]);
+  EXPECT_EQ(edge.UnresolvedDimension, 1);
+  const auto corner = Ops::CheckRegularity(make(0, gp_Pnt(0, 0, 0), gp_Pnt(.2, .3, .4)));
+  EXPECT_FALSE(corner.Resolved);
+  EXPECT_TRUE(corner.Complete[3]);
+  EXPECT_TRUE(corner.Complete[2]);
+  EXPECT_TRUE(corner.Complete[1]);
+  EXPECT_EQ(corner.UnresolvedDimension, 0);
+  EXPECT_THROW(Ops::CheckRegularity(critical, 0), Standard_DomainError);
+  EXPECT_THROW(Ops::CheckRegularity(critical, 14, 0), Standard_DomainError);
+}
+
+TEST(BRepClass3d_ImplicitBox, RegularityDerivativeBoundsScaleWithModelLength)
+{
+  using Ops       = BRepClass3d_ImplicitBox;
+  const auto make = [](double scale, bool translated) {
+    const gp_Vec shift = translated ? gp_Vec(20 * scale, -10 * scale, 30 * scale) : gp_Vec(0, 0, 0);
+    TopoDS_Face  face;
+    BRep_Builder().MakeImplicitFace(
+      face,
+      new Geom_ImplicitGyroid(10 * scale, 1.45),
+      gp_Pnt(-.31 * scale, -.37 * scale, 1.25 * scale).Translated(shift),
+      gp_Pnt(2.93 * scale, 2.91 * scale, 4 * scale).Translated(shift),
+      TopLoc_Location(),
+      .001);
+    return face;
+  };
+  const auto original = Ops::CheckRegularity(make(1, false));
+  ASSERT_TRUE(original.Resolved);
+  for (double scale : {.5, 2.})
+  {
+    const auto report = Ops::CheckRegularity(make(scale, false));
+    EXPECT_TRUE(report.Resolved);
+    for (int dimension = 1; dimension <= 3; ++dimension)
+      EXPECT_NEAR(report.MinimumDerivative[size_t(dimension)] * scale,
+                  original.MinimumDerivative[size_t(dimension)],
+                  1.e-10);
+    EXPECT_NEAR(report.HessianBound * scale * scale, original.HessianBound, 1.e-12);
+    EXPECT_TRUE(Ops::CheckRegularity(make(scale, true)).Resolved);
+  }
+  const auto conventional = TopoDS::Face(TopExp_Explorer(box(), TopAbs_FACE).Current());
+  EXPECT_THROW(Ops::CheckRegularity(conventional), Standard_NotImplemented);
+}

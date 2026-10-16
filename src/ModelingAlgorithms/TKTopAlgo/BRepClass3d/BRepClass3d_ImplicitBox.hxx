@@ -5,6 +5,7 @@
 #include <BRep_ImplicitPlaneSection.hxx>
 #include <TopoDS_Compound.hxx>
 #include <vector>
+#include <array>
 
 //! Experimental hybrid boundary constructor, NOT generic BOP or a solid validator.
 class BRepClass3d_ImplicitBox
@@ -45,6 +46,27 @@ public:
     double WitnessDistanceUpperBound = 0;
     double WitnessBracketWidth       = 0;
   };
+
+  struct Regularity
+  {
+    bool Resolved = false; //!< Numerical regularity/transversality only, NOT solid validity.
+    std::array<bool, 4>   Complete{}; //!< Dimensions 0=corners, 1=edges, 2=faces, 3=volume.
+    std::array<size_t, 4> Visited{}, Excluded{}, RegularCells{};
+    std::array<double, 4>
+           MinimumDerivative{};     //!< F/model-length; 0 if no accepted potential-zero cell.
+    double HessianBound        = 0; //!< Global operator bound, F/model-length^2.
+    int    UnresolvedDimension = -1;
+    gp_Pnt UnresolvedMinimum, UnresolvedMaximum;
+  };
+
+  //! Mesh-independent, whole-domain regularity of an identity-placed native
+  //! gyroid's box region. Projected gradients are bounded away from zero in
+  //! every possible-zero volume/face/edge cell; corners must exclude zero.
+  //! Ignores stored trim wires: NOT trim correspondence or topology equivalence.
+  //! Engineering floating reserves, NOT directed intervals. Limits unresolved.
+  Standard_EXPORT static Regularity CheckRegularity(const TopoDS_Face& theField,
+                                                    int                theMaximumDepth = 14,
+                                                    size_t             theMaximumCells = 2000000);
 
   //! Classify the authoritative mathematical region of an unchanged Build or
   //! structurally restored result, not a mesh, approximate cap polygon, or
