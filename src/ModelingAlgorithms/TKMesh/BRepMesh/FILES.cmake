@@ -4,6 +4,7 @@ set(OCCT_BRepMesh_FILES_LOCATION "${CMAKE_CURRENT_LIST_DIR}")
 set(OCCT_BRepMesh_FILES
   BRepMesh_ImplicitBoundary.hxx
   BRepMesh_ImplicitBoundary.cxx
+  BRepMesh_ImplicitBoundarySurface.cxx
   BRepMesh_BaseMeshAlgo.cxx
   BRepMesh_BaseMeshAlgo.hxx
   BRepMesh_ConstrainedBaseMeshAlgo.hxx

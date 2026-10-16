@@ -6,9 +6,9 @@
 #include <array>
 #include <vector>
 
-//! Shared boundary constraints for a FUTURE native implicit surface mesher.
-//! Only conventional planar caps are triangulated. Never sends an implicit
-//! face through the UV-based mesher and never claims a complete mesh/solid.
+//! Shared cap constraints and an experimental trim-conforming field mesher.
+//! Never sends an implicit face through the UV-based mesher. A candidate
+//! mesh is NOT evidence of surface coverage, embeddedness or a native solid.
 class BRepMesh_ImplicitBoundary
 {
 public:
@@ -26,8 +26,13 @@ public:
     std::vector<std::vector<int>> Wires; //!< Effective implicit orientation; repeated closing node.
     double SeamGeometricBound  = 0;      //!< Input provenance ONLY, not a surface mesh bound.
     bool   SeamBoundVerified   = false; //!< Preserves input tracing provenance, never re-certifies.
-    bool   NativeSurfaceMeshed = false; //!< Preparation only, always false.
+    bool   NativeSurfaceMeshed = false; //!< True for a Tessellate candidate, not Prepare.
     bool   SolidValidated      = false; //!< Never a solid validator.
+    std::vector<std::array<int, 3>> ImplicitTriangles; //!< Transient field-surface candidate.
+    bool   MeshClosed = false; //!< Paired edges/cyclic vertex links, NOT solid validation.
+    bool   SurfaceCoverageVerified = false; //!< Sampling can miss components; always false.
+    double FieldDistanceBound      = 0;     //!< Triangle-to-UNTRIMMED-field bound only.
+    int    Cells                   = 0;     //!< Accepted longest-axis grid resolution.
   };
 
   //! Mesh a validated private topology snapshot, preserving source caches.
@@ -41,5 +46,17 @@ public:
                                         double theCapDeflection    = 0.1,
                                         int    theMaximumNodes     = 200000,
                                         int    theMaximumTriangles = 400000);
+
+  //! Experimental trim-conforming candidate: uniform tetrahedral extraction
+  //! with a constrained collar attached to the exact stored trim samples.
+  //! Checks paired/opposite mesh incidence and a triangle-wide one-sided
+  //! distance bound to the UNTRIMMED gyroid. Does NOT certify coverage,
+  //! embeddedness, clipped-field Hausdorff error or native-solid validity.
+  //! Ambiguous loops, collars, critical fields and exhausted limits reject.
+  Standard_EXPORT static Result Tessellate(const BRepClass3d_ImplicitBox::Boundary&,
+                                           double theTolerance        = 0.1,
+                                           int    theMaximumCells     = 256,
+                                           int    theMaximumNodes     = 200000,
+                                           int    theMaximumTriangles = 400000);
 };
 #endif

@@ -8,6 +8,7 @@
 #include <BRepAdaptor_Surface.hxx>
 #include <Geom_ImplicitGyroid.hxx>
 #include <Geom_BSplineCurve.hxx>
+#include <BRep_TImplicitFace.hxx>
 #include <Poly_Triangulation.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Edge.hxx>
@@ -159,4 +160,129 @@ TEST(BRepMesh_ImplicitBoundary, PrivatePreparationPreservesCachesAndRejectsBudge
   const auto prepared = BRepMesh_ImplicitBoundary::Prepare(restored);
   EXPECT_FALSE(prepared.SeamBoundVerified);
   EXPECT_DOUBLE_EQ(prepared.SeamGeometricBound, source.GeometricBound);
+}
+
+TEST(BRepMesh_ImplicitBoundary, TrimConformingSurfaceCandidateBothOperationsAndOpenContours)
+{
+  for (bool crossing : {false, true})
+    for (auto operation : {Ops::Operation::Common, Ops::Operation::BoxMinusField})
+    {
+      const auto source   = boundary(crossing, operation);
+      const auto mesh     = BRepMesh_ImplicitBoundary::Tessellate(source);
+      const auto prepared = BRepMesh_ImplicitBoundary::Prepare(source);
+      ASSERT_GE(mesh.Nodes.size(), prepared.Nodes.size());
+      EXPECT_EQ(mesh.Seams, prepared.Seams);
+      EXPECT_EQ(mesh.Wires, prepared.Wires);
+      for (size_t i = 0; i < prepared.Nodes.size(); ++i)
+        EXPECT_DOUBLE_EQ(mesh.Nodes[i].Distance(prepared.Nodes[i]), 0);
+      EXPECT_TRUE(mesh.NativeSurfaceMeshed);
+      EXPECT_TRUE(mesh.MeshClosed);
+      EXPECT_FALSE(mesh.SurfaceCoverageVerified);
+      EXPECT_FALSE(mesh.SolidValidated);
+      EXPECT_GT(mesh.FieldDistanceBound, 0);
+      EXPECT_LE(mesh.FieldDistanceBound, .1);
+      ASSERT_FALSE(mesh.ImplicitTriangles.empty());
+      const auto field = occ::down_cast<BRep_TImplicitFace>(source.Faces.back().TShape())->Field();
+      const double       direction = operation == Ops::Operation::Common ? 1 : -1;
+      std::map<Key, Use> uses;
+      for (const auto& t : mesh.ImplicitTriangles)
+      {
+        for (int i = 0; i < 3; ++i)
+        {
+          ASSERT_GE(t[i], 0);
+          ASSERT_LT(size_t(t[i]), mesh.Nodes.size());
+          add(uses, t[i], t[(i + 1) % 3]);
+        }
+        const auto&  a = mesh.Nodes[size_t(t[0])];
+        const auto&  b = mesh.Nodes[size_t(t[1])];
+        const auto&  c = mesh.Nodes[size_t(t[2])];
+        const gp_Pnt center((a.XYZ() + b.XYZ() + c.XYZ()) / 3);
+        EXPECT_GT(direction * gp_Vec(a, b).Crossed(gp_Vec(a, c)).Dot(field->Gradient(center)), 0);
+        // Independent numerical witnesses, not the production bound formula.
+        for (const auto& p : {a, center, gp_Pnt((a.XYZ() + b.XYZ()) * .5)})
+        {
+          auto normal = field->Gradient(p);
+          ASSERT_GT(normal.Magnitude(), 0);
+          normal.Normalize();
+          EXPECT_LE(field->Value(p.Translated(normal * (-mesh.FieldDistanceBound))), 1.e-10);
+          EXPECT_GE(field->Value(p.Translated(normal * mesh.FieldDistanceBound)), -1.e-10);
+        }
+      }
+      for (const auto& t : mesh.CapTriangles)
+        for (int i = 0; i < 3; ++i)
+          add(uses, t.Nodes[i], t.Nodes[(i + 1) % 3]);
+      for (const auto& use : uses)
+      {
+        EXPECT_EQ(use.second.Count, 2);
+        EXPECT_EQ(use.second.Balance, 0);
+      }
+    }
+}
+
+TEST(BRepMesh_ImplicitBoundary, SurfaceLimitsAtomicityAndRestoredProvenance)
+{
+  const auto         source = boundary(true, Ops::Operation::Common);
+  std::ostringstream before;
+  BRepClass3d_ImplicitBoxIO::Write(source, before);
+  EXPECT_THROW(BRepMesh_ImplicitBoundary::Tessellate(source, 0), Standard_DomainError);
+  EXPECT_THROW(BRepMesh_ImplicitBoundary::Tessellate(source, .1, 257), Standard_DomainError);
+  EXPECT_THROW(BRepMesh_ImplicitBoundary::Tessellate(source, .1, 7), Standard_DomainError);
+  EXPECT_THROW(BRepMesh_ImplicitBoundary::Tessellate(source, .1, 8), Standard_NotImplemented);
+  EXPECT_THROW(BRepMesh_ImplicitBoundary::Tessellate(source, .1, 128, 3), Standard_NotImplemented);
+  EXPECT_THROW(BRepMesh_ImplicitBoundary::Tessellate(source, .1, 128, 200000, 1),
+               Standard_NotImplemented);
+  Ops::Boundary      restored;
+  std::istringstream input(before.str());
+  BRepClass3d_ImplicitBoxIO::Read(input, restored);
+  const auto mesh = BRepMesh_ImplicitBoundary::Tessellate(restored);
+  EXPECT_FALSE(mesh.SeamBoundVerified);
+  EXPECT_FALSE(mesh.SurfaceCoverageVerified);
+  EXPECT_FALSE(mesh.SolidValidated);
+  TopLoc_Location location;
+  for (const auto& face : source.Faces)
+    EXPECT_TRUE(BRep_Tool::Triangulation(face, location).IsNull());
+  std::ostringstream after;
+  BRepClass3d_ImplicitBoxIO::Write(source, after);
+  EXPECT_EQ(before.str(), after.str());
+}
+
+TEST(BRepMesh_ImplicitBoundary, SurfaceMultipleLoopsAndTranslatedPhysicalScale)
+{
+  TopoDS_Face field;
+  BRep_Builder().MakeImplicitFace(field,
+                                  new Geom_ImplicitGyroid(10, 1.45),
+                                  gp_Pnt(-5, -5, -5),
+                                  gp_Pnt(16, 16, 6),
+                                  TopLoc_Location(),
+                                  .1);
+  const auto box = BRepPrimAPI_MakeBox(gp_Pnt(-.31, -.37, 1.25), gp_Pnt(12.93, 2.91, 4)).Shape();
+  for (auto operation : {Ops::Operation::Common, Ops::Operation::BoxMinusField})
+  {
+    const auto source = Ops::Build(field, box, operation);
+    const auto mesh   = BRepMesh_ImplicitBoundary::Tessellate(source);
+    EXPECT_EQ(mesh.Wires.size(), 2u);
+    EXPECT_TRUE(mesh.MeshClosed);
+    EXPECT_LE(mesh.FieldDistanceBound, .1);
+  }
+  // Periodic translations retain the same phase, without placing the native
+  // face or relaxing the identity-operand Boolean contract.
+  for (double scale : {.5, 2.})
+  {
+    const gp_Vec shift(20 * scale, -10 * scale, 30 * scale);
+    const auto   placed = [&](double x, double y, double z) {
+      return gp_Pnt(x * scale, y * scale, z * scale).Translated(shift);
+    };
+    TopoDS_Face scaled;
+    BRep_Builder().MakeImplicitFace(scaled,
+                                    new Geom_ImplicitGyroid(10 * scale, 1.45),
+                                    placed(-5, -5, -5),
+                                    placed(16, 16, 6),
+                                    TopLoc_Location(),
+                                    .1);
+    const auto solid = BRepPrimAPI_MakeBox(placed(-.31, -.37, 1.25), placed(2.93, 2.91, 4)).Shape();
+    const auto source = Ops::Build(scaled, solid, Ops::Operation::Common);
+    const auto mesh   = BRepMesh_ImplicitBoundary::Tessellate(source);
+    EXPECT_TRUE(mesh.MeshClosed);
+    EXPECT_LE(mesh.FieldDistanceBound, .1);
+  }
 }

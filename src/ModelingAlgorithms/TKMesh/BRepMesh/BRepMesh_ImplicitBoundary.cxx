@@ -47,31 +47,47 @@ void require(bool value, const char* message)
 class ExactPolyline : public IMeshTools_CurveTessellator
 {
 public:
-  ExactPolyline(const TopoDS_Edge& edge)
+  ExactPolyline(const TopoDS_Edge& edge, double maximumStep)
   {
     double first, last;
     myCurve = occ::down_cast<Geom_BSplineCurve>(BRep_Tool::Curve(edge, myLocation, first, last));
     require(!myCurve.IsNull() && myCurve->Degree() == 1, "Unsupported exact cap constraint");
+    for (int i = 1; i < myCurve->NbPoles(); ++i)
+    {
+      const int pieces =
+        std::max(1, int(std::ceil(myCurve->Pole(i).Distance(myCurve->Pole(i + 1)) / maximumStep)));
+      for (int j = 0; j < pieces; ++j)
+        myParameters.push_back(myCurve->Knot(i)
+                               + (myCurve->Knot(i + 1) - myCurve->Knot(i)) * (double(j) / pieces));
+    }
+    myParameters.push_back(last);
   }
 
-  int PointsNb() const override { return myCurve->NbPoles(); }
+  int PointsNb() const override { return int(myParameters.size()); }
 
   bool Value(int index, gp_Pnt& point, double& parameter) const override
   {
     if (index < 1 || index > PointsNb())
       return false;
-    point     = myCurve->Pole(index).Transformed(myLocation.Transformation());
-    parameter = myCurve->Knot(index);
+    parameter = myParameters[size_t(index - 1)];
+    point     = myCurve->Value(parameter).Transformed(myLocation.Transformation());
     return true;
   }
 
 private:
   occ::handle<Geom_BSplineCurve> myCurve;
   TopLoc_Location                myLocation;
+  std::vector<double>            myParameters;
 };
 
 class ExactBoundaryDiscret : public IMeshTools_ModelAlgo
 {
+public:
+  explicit ExactBoundaryDiscret(double maximumStep)
+      : myMaximumStep(maximumStep)
+  {
+  }
+
 protected:
   bool performInternal(const occ::handle<IMeshData_Model>& model,
                        const IMeshTools_Parameters&        settings,
@@ -85,11 +101,16 @@ protected:
       BRepMesh_Deflection::ComputeDeflection(edge, model->GetMaxSize(), settings);
       for (int p = 0; p < edge->PCurvesNb(); ++p)
         BRepMesh_ShapeTool::CheckAndUpdateFlags(edge, edge->GetPCurve(p));
-      BRepMesh_EdgeDiscret::Tessellate3d(edge, new ExactPolyline(edge->GetEdge()), true);
+      BRepMesh_EdgeDiscret::Tessellate3d(edge,
+                                         new ExactPolyline(edge->GetEdge(), myMaximumStep),
+                                         true);
       BRepMesh_EdgeDiscret::Tessellate2d(edge, true);
     }
     return true;
   }
+
+private:
+  double myMaximumStep;
 };
 
 using Key = std::pair<int, int>;
@@ -150,7 +171,16 @@ BRepMesh_ImplicitBoundary::Result BRepMesh_ImplicitBoundary::Prepare(
     const auto      curve = occ::down_cast<Geom_BSplineCurve>(
       BRep_Tool::Curve(TopoDS::Edge(shape), location, first, last));
     require(!curve.IsNull() && curve->Degree() == 1, "Unsupported mesh constraint curve");
-    cost += size_t(curve->NbPoles());
+    ++cost;
+    for (int i = 1; i < curve->NbPoles(); ++i)
+    {
+      const double pieces =
+        std::ceil(curve->Pole(i).Distance(curve->Pole(i + 1)) / (deflection * .25));
+      require(std::isfinite(pieces) && pieces <= maximumNodes,
+              "Native boundary sampling budget exhausted");
+      cost += size_t(std::max(1., pieces));
+      require(cost <= size_t(maximumNodes), "Native boundary sampling budget exhausted");
+    }
     require(cost <= size_t(maximumNodes), "Native boundary pole budget exhausted");
     for (int p = 1; p <= curve->NbPoles(); ++p)
       for (int axis = 1; axis <= 3; ++axis)
@@ -163,7 +193,7 @@ BRepMesh_ImplicitBoundary::Result BRepMesh_ImplicitBoundary::Prepare(
   settings.InternalVerticesMode     = false;
   settings.ControlSurfaceDeflection = false;
   auto context                      = occ::handle<BRepMesh_Context>(new BRepMesh_Context);
-  context->SetEdgeDiscret(new ExactBoundaryDiscret);
+  context->SetEdgeDiscret(new ExactBoundaryDiscret(deflection * .25));
   BRepMesh_IncrementalMesh mesher;
   mesher.SetShape(caps); // conventional caps ONLY
   mesher.ChangeParameters() = settings;
