@@ -833,5 +833,6 @@ BRepClass3d_ImplicitBox::Boundary BRepClass3d_ImplicitBox::Build(const TopoDS_Fa
   }
   for (size_t i = 0; i < uses.size(); ++i)
     require(uses[i] == 2 && balance[i] == 0, "Unpaired or inconsistently oriented hybrid edge");
+  result.SeamBoundVerified = true;
   return result;
 }

@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Kavin Teenakul
 // SPDX-License-Identifier: LGPL-2.1-only WITH OCCT-exception-1.0
 #include <BRepClass3d_ImplicitBox.hxx>
+#include <BRepClass3d_ImplicitBoxIO.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <BRep_ImplicitTool.hxx>
@@ -19,6 +20,7 @@
 #include <cmath>
 #include <array>
 #include <limits>
+#include <Poly_Triangulation.hxx>
 
 namespace
 {
@@ -328,4 +330,99 @@ TEST(BRepClass3d_ImplicitBox, ClassifierLengthToleranceScalesIndependentlyOfFiel
   EXPECT_EQ(Ops::Classify(a, p, .1).State, Ops::PointState::Inside);
   EXPECT_EQ(Ops::Classify(b, q, .1).State, Ops::PointState::NearBoundary);
   EXPECT_EQ(Ops::Classify(b, q, .01).State, Ops::PointState::Inside);
+}
+
+TEST(BRepClass3d_ImplicitBox,
+     TopologyRoundTripPreservesSharedSeamsAndClassificationWithoutRetracing)
+{
+  using Ops = BRepClass3d_ImplicitBox;
+  const auto openBox =
+    BRepPrimAPI_MakeBox(gp_Pnt(-3.83, -4.07, -2.67), gp_Pnt(4.17, 3.93, 3.37)).Shape();
+  for (bool open : {false, true})
+    for (auto operation : {Ops::Operation::Common, Ops::Operation::BoxMinusField})
+    {
+      const auto source = Ops::Build(field(open ? 0 : 1.45), open ? openBox : box(), operation);
+      ASSERT_TRUE(source.SeamBoundVerified);
+      std::ostringstream record;
+      BRepClass3d_ImplicitBoxIO::Write(source, record);
+      EXPECT_EQ(record.str().find("OCCT_IMPLICIT_BOX_TOPOLOGY 1 "), 0u);
+      Ops::Boundary      restored;
+      std::istringstream input(record.str());
+      BRepClass3d_ImplicitBoxIO::Read(input, restored);
+      EXPECT_FALSE(restored.SeamBoundVerified);
+      EXPECT_EQ(restored.Faces.size(), source.Faces.size());
+      EXPECT_EQ(restored.Sources, source.Sources);
+      EXPECT_EQ(restored.SeamCount, source.SeamCount);
+      EXPECT_EQ(restored.BoxEdgeRootCount, source.BoxEdgeRootCount);
+      EXPECT_DOUBLE_EQ(restored.GeometricBound, source.GeometricBound);
+      EXPECT_EQ(restored.Faces.back().Orientation(), source.Faces.back().Orientation());
+      EXPECT_TRUE(BRep_Tool::IsImplicit(restored.Faces.back()));
+      EXPECT_FALSE(BRep_Tool::HasParametricSurface(restored.Faces.back()));
+      EXPECT_FALSE(restored.Sections.front().Resolved); // No tracing certificate invented by I/O.
+      for (const auto& p : {gp_Pnt(0, 0, 2), gp_Pnt(1.25, 1.25, 1.5), gp_Pnt(-.33, 0, 2)})
+        EXPECT_EQ(Ops::Classify(restored, p).State, Ops::Classify(source, p).State);
+      for (TopExp_Explorer edge(restored.Faces.back(), TopAbs_EDGE); edge.More(); edge.Next())
+      {
+        int shared = 0;
+        for (size_t i = 0; i + 1 < restored.Faces.size(); ++i)
+          for (TopExp_Explorer cap(restored.Faces[i], TopAbs_EDGE); cap.More(); cap.Next())
+            if (cap.Current().IsSame(edge.Current()))
+            {
+              EXPECT_NE(cap.Current().Orientation(), edge.Current().Orientation());
+              double first, last;
+              EXPECT_FALSE(BRep_Tool::CurveOnSurface(TopoDS::Edge(cap.Current()),
+                                                     restored.Faces[i],
+                                                     first,
+                                                     last)
+                             .IsNull());
+              ++shared;
+            }
+        EXPECT_EQ(shared, 1);
+      }
+      std::ostringstream again;
+      BRepClass3d_ImplicitBoxIO::Write(restored, again);
+      Ops::Boundary      twice;
+      std::istringstream second(again.str());
+      BRepClass3d_ImplicitBoxIO::Read(second, twice);
+      EXPECT_EQ(twice.BoxEdgeRootCount, source.BoxEdgeRootCount);
+    }
+}
+
+TEST(BRepClass3d_ImplicitBox, TopologyIORejectsMalformedRecordsAtomicallyAndOmitsMeshes)
+{
+  using Ops                        = BRepClass3d_ImplicitBox;
+  auto               source        = Ops::Build(field(), box(), Ops::Operation::Common);
+  const auto         originalShape = source.Shape;
+  std::ostringstream output;
+  auto               broken = source;
+  ++broken.SeamCount;
+  EXPECT_THROW(BRepClass3d_ImplicitBoxIO::Write(broken, output), Standard_DomainError);
+  EXPECT_TRUE(output.str().empty());
+  const occ::handle<Poly_Triangulation> mesh = new Poly_Triangulation(3, 1, false);
+  mesh->SetNode(1, gp_Pnt(-.31, -.37, 1.25));
+  mesh->SetNode(2, gp_Pnt(-.31, 2.91, 1.25));
+  mesh->SetNode(3, gp_Pnt(-.31, -.37, 4));
+  mesh->SetTriangle(1, Poly_Triangle(1, 2, 3));
+  BRep_Builder().UpdateFace(source.Faces.front(), mesh);
+  BRepClass3d_ImplicitBoxIO::Write(source, output);
+  const auto record = output.str();
+  for (const auto& bad : {std::string("garbage"),
+                          record + "trailing",
+                          record.substr(0, record.size() / 2),
+                          std::string("OCCT_IMPLICIT_BOX_TOPOLOGY 99 1 1 1 0 0 0\n-1 \nxx")})
+  {
+    std::istringstream input(bad);
+    EXPECT_THROW(BRepClass3d_ImplicitBoxIO::Read(input, source), Standard_DomainError);
+    EXPECT_TRUE(source.Shape.IsSame(originalShape));
+  }
+  Ops::Boundary      restored;
+  std::istringstream input(record);
+  BRepClass3d_ImplicitBoxIO::Read(input, restored);
+  TopLoc_Location location;
+  EXPECT_FALSE(BRep_Tool::Triangulation(source.Faces.front(), location).IsNull());
+  EXPECT_TRUE(BRep_Tool::Triangulation(restored.Faces.front(), location).IsNull());
+  source.Shape.Locked(true);
+  std::istringstream locked(record);
+  EXPECT_THROW(BRepClass3d_ImplicitBoxIO::Read(locked, source), Standard_DomainError);
+  source.Shape.Locked(false);
 }

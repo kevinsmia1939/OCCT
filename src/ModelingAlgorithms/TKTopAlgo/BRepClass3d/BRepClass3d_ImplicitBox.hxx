@@ -23,8 +23,9 @@ public:
     std::vector<int>         Sources; //!< -1 = implicit, otherwise input box face traversal index.
     std::vector<BRep_ImplicitPlaneSection::Result> Sections;
     int                                            SeamCount = 0;
-    int    BoxEdgeRootCount = 0; //!< Shared roots, each used by two adjacent face contours.
-    double GeometricBound   = 0; //!< Seam bound ONLY, not a surface/solid certificate.
+    int    BoxEdgeRootCount  = 0;     //!< Shared roots, each used by two adjacent face contours.
+    double GeometricBound    = 0;     //!< Seam bound ONLY, not a surface/solid certificate.
+    bool   SeamBoundVerified = false; //!< True only after tracing, false after topology I/O.
   };
 
   enum class PointState
@@ -45,8 +46,9 @@ public:
     double WitnessBracketWidth       = 0;
   };
 
-  //! Classify the authoritative mathematical region of an unchanged Build
-  //! result, not a mesh, approximate cap polygon, or UV-based solid classifier.
+  //! Classify the authoritative mathematical region of an unchanged Build or
+  //! structurally restored result, not a mesh, approximate cap polygon, or
+  //! UV-based solid classifier. Restored seam bounds are not re-certified.
   //! Inside/Outside require a conservative boundary-distance lower bound >
   //! the requested model-length tolerance. NearBoundary requires a cap point
   //! or sign bracket wholly inside that tolerance ball AND the box domain.
