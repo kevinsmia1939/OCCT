@@ -18,6 +18,30 @@ public:
     int                Cap;   //!< Zero-based index in the native Boundary::Faces.
   };
 
+  struct Result;
+
+  struct MeshAudit
+  {
+    enum class State
+    {
+      Clear,
+      Contact,
+      Limit
+    } Status             = State::Limit;
+    int    FirstTriangle = -1, SecondTriangle = -1;
+    size_t BroadTests = 0, PairTests = 0;
+  };
+
+  //! Exact binary64 triangle-contact audit of transient buffers, NOT the
+  //! authoritative implicit field or a native solid validator. Triangle IDs
+  //! enumerate caps first, then implicit triangles. Shared node IDs define
+  //! allowed common simplices; unrelated coincident nodes are contacts.
+  //! Clear means no intersections beyond these common simplices. Limit is
+  //! unresolved, never clear. Requires coordinate exponent spread <=512.
+  Standard_EXPORT static MeshAudit Audit(const Result&,
+                                         size_t theMaximumPairTests  = 2000000,
+                                         size_t theMaximumBroadTests = 50000000);
+
   struct Result
   {
     std::vector<gp_Pnt>           Nodes;

@@ -28,6 +28,113 @@ namespace
 {
 using Ops = BRepClass3d_ImplicitBox;
 
+TEST(BRepMesh_ImplicitBoundary, ExactTriangleAuditRejectsImproperContactsAndHandlesAdjacency)
+{
+  using Mesher = BRepMesh_ImplicitBoundary;
+  using State  = Mesher::MeshAudit::State;
+  Mesher::Result mesh;
+  mesh.Nodes             = {gp_Pnt(0, 0, 0),
+                            gp_Pnt(2, 0, 0),
+                            gp_Pnt(0, 2, 0),
+                            gp_Pnt(2, 2, 0),
+                            gp_Pnt(.5, .5, -1),
+                            gp_Pnt(.5, .5, 1),
+                            gp_Pnt(3, 3, 0)};
+  mesh.ImplicitTriangles = {{0, 1, 2}, {1, 3, 2}};
+  EXPECT_EQ(Mesher::Audit(mesh).Status, State::Clear); // shared edge, coplanar
+  mesh.ImplicitTriangles = {{0, 1, 2}, {0, 4, 5}};
+  EXPECT_EQ(Mesher::Audit(mesh).Status, State::Contact); // shared vertex does NOT excuse crossing
+  mesh.ImplicitTriangles = {{0, 1, 2}, {1, 4, 5}};
+  EXPECT_EQ(Mesher::Audit(mesh).Status, State::Contact); // crosses beyond common vertex
+  mesh.ImplicitTriangles = {{0, 1, 2}, {0, 1, 6}};
+  EXPECT_EQ(Mesher::Audit(mesh).Status, State::Contact); // shared edge, same-side overlap
+  mesh.ImplicitTriangles = {{0, 1, 2}, {0, 1, 4}};
+  EXPECT_EQ(Mesher::Audit(mesh).Status, State::Clear); // shared edge, noncoplanar
+  mesh.ImplicitTriangles = {{0, 1, 2}, {2, 1, 0}};
+  EXPECT_EQ(Mesher::Audit(mesh).Status, State::Contact); // duplicate face
+  mesh.Nodes.push_back(mesh.Nodes[0]);
+  mesh.ImplicitTriangles = {{0, 1, 2}, {7, 4, 5}};
+  EXPECT_EQ(Mesher::Audit(mesh).Status, State::Contact); // unrelated coincident node
+  mesh.Nodes             = {gp_Pnt(0, 0, 0),
+                            gp_Pnt(1, 0, 0),
+                            gp_Pnt(0, 1, 0),
+                            gp_Pnt(0, 0, 1.e-100),
+                            gp_Pnt(1, 0, 1.e-100),
+                            gp_Pnt(0, 1, 1.e-100)};
+  mesh.ImplicitTriangles = {{0, 1, 2}, {3, 4, 5}};
+  EXPECT_EQ(Mesher::Audit(mesh).Status, State::Clear); // no epsilon-based contact
+  mesh.Nodes[3].SetZ(1.e-300);
+  EXPECT_EQ(Mesher::Audit(mesh).Status, State::Limit); // bounded arithmetic, not false clear
+  mesh.Nodes[3].SetZ(1.e-100);
+  EXPECT_THROW(Mesher::Audit(mesh, 0), Standard_DomainError);
+  // Near-parallel planes whose 3D boxes overlap. Exact predicates must retain
+  // the tiny gap (and detect a tiny crossing), not rely on the box or epsilon.
+  const double tiny = 1.e-100;
+  mesh.Nodes        = {gp_Pnt(0, 0, 0),
+                       gp_Pnt(1, 0, tiny),
+                       gp_Pnt(0, 1, tiny),
+                       gp_Pnt(0, 0, tiny),
+                       gp_Pnt(1, 0, 2 * tiny),
+                       gp_Pnt(0, 1, 2 * tiny)};
+  EXPECT_EQ(Mesher::Audit(mesh).Status, State::Clear);
+  EXPECT_EQ(Mesher::Audit(mesh).PairTests, 1u);
+  mesh.Nodes[3].SetZ(-tiny);
+  EXPECT_EQ(Mesher::Audit(mesh).Status, State::Contact);
+  // Coplanar triangles have overlapping AABBs but an exact oblique separator.
+  // Exercise large/small binary scales and integer carries, not just box culls.
+  for (int exponent : {-100, 0, 100})
+  {
+    const double s         = std::ldexp(1., exponent);
+    mesh.Nodes             = {gp_Pnt(0, 0, 0),
+                              gp_Pnt(2 * s, 0, 0),
+                              gp_Pnt(0, 2 * s, 0),
+                              gp_Pnt(.75 * s, 1.5 * s, 0),
+                              gp_Pnt(1.5 * s, .75 * s, 0),
+                              gp_Pnt(1.5 * s, 1.5 * s, 0)};
+    mesh.ImplicitTriangles = {{0, 1, 2}, {3, 4, 5}};
+    const auto separated   = Mesher::Audit(mesh);
+    EXPECT_EQ(separated.Status, State::Clear);
+    EXPECT_EQ(separated.PairTests, 1u);
+    mesh.Nodes[3].SetX(.5 * s); // exact touching point on x+y=2*s
+    EXPECT_EQ(Mesher::Audit(mesh).Status, State::Contact);
+    std::swap(mesh.ImplicitTriangles[0][0], mesh.ImplicitTriangles[0][2]);
+    EXPECT_EQ(Mesher::Audit(mesh).Status, State::Contact);
+  }
+  mesh.Nodes             = {gp_Pnt(0, 0, 0),
+                            gp_Pnt(2, 0, 0),
+                            gp_Pnt(0, 2, 0),
+                            gp_Pnt(0, 0, 2),
+                            gp_Pnt(0, -2, -1)};
+  mesh.ImplicitTriangles = {{0, 1, 2}, {0, 1, 3}, {0, 1, 4}};
+  EXPECT_EQ(Mesher::Audit(mesh).Status, State::Clear);
+  EXPECT_EQ(Mesher::Audit(mesh, 1).Status, State::Limit);
+  EXPECT_EQ(Mesher::Audit(mesh, 100, 1).Status, State::Limit);
+  mesh.ImplicitTriangles[0][1] = 99;
+  EXPECT_THROW(Mesher::Audit(mesh), Standard_DomainError);
+  mesh.Nodes[4].SetZ(1.e-300);
+  EXPECT_THROW(Mesher::Audit(mesh), Standard_DomainError); // index checks precede arithmetic limits
+}
+
+TEST(BRepMesh_ImplicitBoundary, NativeCandidateContactAuditDiagnostic)
+{
+  using Mesher = BRepMesh_ImplicitBoundary;
+  TopoDS_Face field;
+  BRep_Builder().MakeImplicitFace(field,
+                                  new Geom_ImplicitGyroid(10, 0),
+                                  gp_Pnt(-5, -5, -5),
+                                  gp_Pnt(16, 16, 6),
+                                  TopLoc_Location(),
+                                  .1);
+  const auto box =
+    BRepPrimAPI_MakeBox(gp_Pnt(-3.83, -4.07, -2.67), gp_Pnt(4.17, 3.93, 3.37)).Shape();
+  const auto source = Ops::Build(field, box, Ops::Operation::Common);
+  const auto mesh   = Mesher::Tessellate(source);
+  const auto audit  = Mesher::Audit(mesh);
+  std::cout << "native contact audit state=" << int(audit.Status) << " pair=" << audit.FirstTriangle
+            << "," << audit.SecondTriangle << " tests=" << audit.PairTests << std::endl;
+  EXPECT_EQ(audit.Status, Mesher::MeshAudit::State::Clear);
+}
+
 Ops::Boundary boundary(bool crossing, Ops::Operation operation)
 {
   TopoDS_Face field;
