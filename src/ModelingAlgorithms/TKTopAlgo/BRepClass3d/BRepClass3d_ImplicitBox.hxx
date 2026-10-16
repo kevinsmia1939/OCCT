@@ -102,6 +102,28 @@ public:
     std::vector<double> RegionVolumes; //!< Sum of oriented reference shells per region.
   };
 
+  struct CapAttachment
+  {
+    bool Resolved = false, StoredGraphResolved = false, RegionReferenceResolved = false;
+    std::string Reason;
+    size_t WitnessTests = 0, SegmentTests = 0;
+    int ReferenceCapCount = 0, ReferenceShellCount = 0, ReferenceRegionCount = 0;
+    double RequiredClearance = 0;
+    // Source cap order; reference labels are transient, NOT persistent names.
+    std::vector<int> ReferenceCaps, ReferenceShells, ReferenceRegions;
+    std::vector<gp_Pnt> Witnesses;
+    std::vector<double> Clearances;
+  };
+
+  //! Attach stored conventional cap REGIONS to the closed homotopy reference
+  //! using strict common F/L retained points, source face classification and
+  //! clearance beyond the independently retraced seam uncertainty. Requires
+  //! stored graph correspondence first. NOT a trim-wire/whole-face attachment
+  //! or native shell/solid construction/validation certificate.
+  Standard_EXPORT static CapAttachment CheckCapAttachment(const Boundary&,
+    int theResolution = 32, int theMaximumDepth = 16, size_t theMaximumCells = 4000000,
+    size_t theMaximumWitnessTests = 2000000);
+
   //! Complete the homotopy reference with exact nodal-linear box caps sharing
   //! root/grid-vertex identities. Check closed manifold incidences/vertex links
   //! and report component grouping/oriented volume diagnostics. NOT stored

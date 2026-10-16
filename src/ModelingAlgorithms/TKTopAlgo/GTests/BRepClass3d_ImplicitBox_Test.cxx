@@ -18,6 +18,8 @@
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepClass_FaceClassifier.hxx>
+#include <set>
 #include <Geom_ImplicitGyroid.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
@@ -378,6 +380,81 @@ TEST(BRepClass3d_ImplicitBox, ClosedRegionReferenceMultipleComponentsAndFailureL
     topologyField(gp_Pnt(.7, .8, .9), gp_Pnt(1.8, 1.9, 2), 1.5));
   EXPECT_FALSE(critical.ClosedReferenceManifold);
   EXPECT_THROW(BRepClass3d_ImplicitBox::CheckRegionTopology(face, 3), Standard_DomainError);
+}
+
+TEST(BRepClass3d_ImplicitBox, StoredCapsAttachToReferenceShellsAndRegionsBothOperations)
+{
+  for (bool open : {false, true})
+    for (auto operation : {BRepClass3d_ImplicitBox::Operation::Common,
+                           BRepClass3d_ImplicitBox::Operation::BoxMinusField})
+    {
+      const auto operand =
+        open ? BRepPrimAPI_MakeBox(gp_Pnt(-3.83, -4.07, -2.67), gp_Pnt(4.17, 3.93, 3.37)).Shape()
+             : box();
+      const auto source =
+        BRepClass3d_ImplicitBox::Build(field(open ? 0 : 1.45), operand, operation);
+      std::ostringstream before;
+      BRepClass3d_ImplicitBoxIO::Write(source, before);
+      const auto report = BRepClass3d_ImplicitBox::CheckCapAttachment(source);
+      ASSERT_TRUE(report.Resolved) << open << " " << int(operation) << " " << report.Reason;
+      EXPECT_TRUE(report.StoredGraphResolved);
+      EXPECT_TRUE(report.RegionReferenceResolved);
+      EXPECT_EQ(report.ReferenceCaps.size(), source.Faces.size() - 1);
+      EXPECT_EQ(report.ReferenceCapCount, int(source.Faces.size()) - 1);
+      std::set<int> unique;
+      const auto&   gyroid = *static_cast<const Geom_ImplicitGyroid*>(
+        occ::down_cast<BRep_TImplicitFace>(source.Faces.back().TShape())->Field().get());
+      for (size_t cap = 0; cap < report.ReferenceCaps.size(); ++cap)
+      {
+        EXPECT_TRUE(unique.insert(report.ReferenceCaps[cap]).second);
+        EXPECT_GT(report.Clearances[cap], report.RequiredClearance);
+        EXPECT_GE(report.ReferenceShells[cap], 0);
+        EXPECT_LT(report.ReferenceShells[cap], report.ReferenceShellCount);
+        EXPECT_GE(report.ReferenceRegions[cap], 0);
+        EXPECT_LT(report.ReferenceRegions[cap], report.ReferenceRegionCount);
+        EXPECT_EQ(BRepClass_FaceClassifier(source.Faces[cap], report.Witnesses[cap], 1.e-9).State(),
+                  TopAbs_IN);
+        EXPECT_GT(gyroid.Value(report.Witnesses[cap])
+                    * (operation == BRepClass3d_ImplicitBox::Operation::Common ? -1 : 1),
+                  0);
+      }
+      std::ostringstream after;
+      BRepClass3d_ImplicitBoxIO::Write(source, after);
+      EXPECT_EQ(before.str(), after.str());
+      std::istringstream                input(before.str());
+      BRepClass3d_ImplicitBox::Boundary loaded;
+      BRepClass3d_ImplicitBoxIO::Read(input, loaded);
+      EXPECT_FALSE(loaded.SeamBoundVerified);
+      EXPECT_TRUE(BRepClass3d_ImplicitBox::CheckCapAttachment(loaded).Resolved);
+      EXPECT_FALSE(loaded.SeamBoundVerified);
+    }
+}
+
+TEST(BRepClass3d_ImplicitBox, CapAttachmentMultipleRegionsReorderingAndLimits)
+{
+  auto source = BRepClass3d_ImplicitBox::Build(
+    field(),
+    BRepPrimAPI_MakeBox(gp_Pnt(-.31, -.37, 1.25), gp_Pnt(12.93, 2.91, 4)).Shape(),
+    BRepClass3d_ImplicitBox::Operation::BoxMinusField);
+  const auto report = BRepClass3d_ImplicitBox::CheckCapAttachment(source, 64);
+  ASSERT_TRUE(report.Resolved) << report.Reason;
+  EXPECT_EQ(report.ReferenceRegionCount, 2);
+  ASSERT_EQ(report.ReferenceCaps.size(), 2u);
+  EXPECT_NE(report.ReferenceRegions[0], report.ReferenceRegions[1]);
+  std::swap(source.Faces[0], source.Faces[1]);
+  std::swap(source.Sources[0], source.Sources[1]);
+  BRep_Builder builder;
+  builder.MakeCompound(source.Shape);
+  for (const auto& face : source.Faces)
+    builder.Add(source.Shape, face);
+  const auto reordered = BRepClass3d_ImplicitBox::CheckCapAttachment(source, 64);
+  ASSERT_TRUE(reordered.Resolved) << reordered.Reason;
+  EXPECT_EQ(reordered.ReferenceCaps[0], report.ReferenceCaps[1]);
+  EXPECT_EQ(reordered.ReferenceCaps[1], report.ReferenceCaps[0]);
+  const auto limited = BRepClass3d_ImplicitBox::CheckCapAttachment(source, 64, 16, 4000000, 1);
+  EXPECT_FALSE(limited.Resolved);
+  EXPECT_FALSE(limited.Reason.empty());
+  EXPECT_THROW(BRepClass3d_ImplicitBox::CheckCapAttachment(source, 3), Standard_DomainError);
 }
 
 TEST(BRepClass3d_ImplicitBox, CommonAndDirectionalCutShareOppositeSeamsAndCapPCurves)
@@ -947,6 +1024,10 @@ TEST(BRepClass3d_ImplicitBox, CorrespondenceRefusesChangedMathForgedBoundsAndLim
   EXPECT_TRUE(report.RegularityResolved);
   EXPECT_FALSE(report.Resolved);
   EXPECT_FALSE(report.Reason.empty());
+  const auto caps = Ops::CheckCapAttachment(source);
+  EXPECT_FALSE(caps.Resolved);
+  EXPECT_FALSE(caps.StoredGraphResolved);
+  EXPECT_FALSE(caps.RegionReferenceResolved);
 }
 
 TEST(BRepClass3d_ImplicitBox, CorrespondenceAcceptsResamplingAndCyclicWireStarts)
