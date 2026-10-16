@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only WITH OCCT-exception-1.0
 #include <BRepClass3d_ImplicitBox.hxx>
 #include <BRepClass3d_ImplicitBoxIO.hxx>
+#include <BRepMesh_ImplicitBoundary.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <BRep_ImplicitTool.hxx>
@@ -27,6 +28,8 @@
 #include <sstream>
 #include <cmath>
 #include <array>
+#include <algorithm>
+#include <map>
 #include <limits>
 #include <Poly_Triangulation.hxx>
 
@@ -193,6 +196,188 @@ TEST(BRepClass3d_ImplicitBox, WholeBoxHomotopyRefusesCriticalBoxStrata)
     EXPECT_FALSE(result.ReferenceManifold);
     EXPECT_FALSE(result.Reason.empty());
   }
+}
+
+namespace
+{
+double regionVolume(const BRepClass3d_ImplicitBox::RegionTopologyWitness& region)
+{
+  double total = 0;
+  for (double volume : region.ComponentSignedVolumes)
+    total += volume;
+  return total;
+}
+
+void checkClosedReference(const BRepClass3d_ImplicitBox::RegionTopologyWitness& region)
+{
+  ASSERT_TRUE(region.Surface.HomotopyResolved) << region.Reason;
+  ASSERT_TRUE(region.Surface.ReferenceManifold) << region.Reason;
+  ASSERT_TRUE(region.ClosedReferenceManifold) << region.Reason;
+  ASSERT_EQ(region.Triangles.size(), region.TriangleSides.size());
+  ASSERT_EQ(region.Triangles.size(), region.TriangleComponents.size());
+  ASSERT_EQ(region.ComponentEuler.size(), region.ComponentSignedVolumes.size());
+  ASSERT_EQ(region.ComponentEuler.size(), region.ComponentRegions.size());
+  ASSERT_EQ(size_t(region.RegionCount), region.RegionVolumes.size());
+  for (size_t i = 0; i < region.ComponentRegions.size(); ++i)
+  {
+    ASSERT_GE(region.ComponentRegions[i], 0);
+    ASSERT_LT(region.ComponentRegions[i], region.RegionCount);
+  }
+  for (int r = 0; r < region.RegionCount; ++r)
+  {
+    double sum = 0;
+    for (size_t c = 0; c < region.ComponentRegions.size(); ++c)
+      if (region.ComponentRegions[c] == r)
+        sum += region.ComponentSignedVolumes[c];
+    EXPECT_NEAR(sum, region.RegionVolumes[size_t(r)], 1.e-10);
+    EXPECT_GT(region.RegionVolumes[size_t(r)], 0);
+  }
+  ASSERT_EQ(region.Surface.Nodes.size(), region.Surface.GridEdges.size());
+  for (size_t i = 0; i < region.Surface.Nodes.size(); ++i)
+    EXPECT_EQ(region.Nodes[i].Distance(region.Surface.Nodes[i]), 0);
+  std::map<std::pair<int, int>, std::pair<int, int>> edges;
+  for (size_t i = 0; i < region.Triangles.size(); ++i)
+  {
+    const auto& t = region.Triangles[i];
+    ASSERT_GE(region.TriangleComponents[i], 0);
+    ASSERT_LT(size_t(region.TriangleComponents[i]), region.ComponentEuler.size());
+    for (int j = 0; j < 3; ++j)
+    {
+      const int a = t[size_t(j)], b = t[size_t((j + 1) % 3)];
+      ASSERT_GE(a, 0);
+      ASSERT_LT(size_t(a), region.Nodes.size());
+      auto& edge = edges[std::minmax(a, b)];
+      ++edge.first;
+      edge.second += a < b ? 1 : -1;
+    }
+    if (i < region.Surface.Triangles.size())
+    {
+      EXPECT_EQ(t, region.Surface.Triangles[i]);
+      EXPECT_EQ(region.TriangleSides[i], -1);
+    }
+    else
+    {
+      const int side = region.TriangleSides[i];
+      ASSERT_GE(side, 0);
+      ASSERT_LT(side, 6);
+      const gp_Vec area =
+        gp_Vec(region.Nodes[size_t(t[0])], region.Nodes[size_t(t[1])])
+          .Crossed(gp_Vec(region.Nodes[size_t(t[0])], region.Nodes[size_t(t[2])]));
+      EXPECT_GT(area.Coord(side / 2 + 1) * (side % 2 ? 1 : -1), 0);
+    }
+  }
+  for (const auto& edge : edges)
+  {
+    EXPECT_EQ(edge.second.first, 2);
+    EXPECT_EQ(edge.second.second, 0);
+  }
+  int euler = 0;
+  for (int value : region.ComponentEuler)
+    euler += value;
+  EXPECT_EQ(int(region.Nodes.size()) - int(edges.size()) + int(region.Triangles.size()), euler);
+}
+} // namespace
+
+TEST(BRepClass3d_ImplicitBox, ClosedRegionReferenceBothOperationsAndComplementaryVolume)
+{
+  for (bool open : {false, true})
+  {
+    const gp_Pnt low     = open ? gp_Pnt(-3.83, -4.07, -2.67) : gp_Pnt(-.31, -.37, 1.25);
+    const gp_Pnt high    = open ? gp_Pnt(4.17, 3.93, 3.37) : gp_Pnt(2.93, 2.91, 4);
+    const auto   operand = BRepPrimAPI_MakeBox(low, high).Shape();
+    double       total   = 0;
+    for (auto operation : {BRepClass3d_ImplicitBox::Operation::Common,
+                           BRepClass3d_ImplicitBox::Operation::BoxMinusField})
+    {
+      const auto source =
+        BRepClass3d_ImplicitBox::Build(field(open ? 0 : 1.45), operand, operation);
+      std::ostringstream before;
+      BRepClass3d_ImplicitBoxIO::Write(source, before);
+      const auto region = BRepClass3d_ImplicitBox::CheckRegionTopology(source.Faces.back());
+      checkClosedReference(region);
+      ASSERT_TRUE(region.ClosedReferenceManifold) << region.Reason;
+      EXPECT_GT(region.Nodes.size(), region.Surface.Nodes.size());
+      EXPECT_GT(region.Triangles.size(), region.Surface.Triangles.size());
+      EXPECT_GT(regionVolume(region), 0);
+      total += regionVolume(region);
+      std::ostringstream after;
+      BRepClass3d_ImplicitBoxIO::Write(source, after);
+      EXPECT_EQ(before.str(), after.str());
+    }
+    EXPECT_NEAR(total, (high.X() - low.X()) * (high.Y() - low.Y()) * (high.Z() - low.Z()), 1.e-9);
+  }
+}
+
+TEST(BRepClass3d_ImplicitBox, ClosedRegionReferenceDistinguishesCavityAndEmptyFullRegions)
+{
+  const gp_Pnt low(.3, .3, .3), high(2.3, 2.3, 2.3);
+  auto         source = topologyField(low, high, 1.45);
+  const auto   common = BRepClass3d_ImplicitBox::CheckRegionTopology(source, 16);
+  checkClosedReference(common);
+  ASSERT_EQ(common.ComponentSignedVolumes.size(), 2u);
+  EXPECT_EQ(common.ComponentEuler, std::vector<int>({2, 2}));
+  EXPECT_EQ(common.RegionCount, 1);
+  EXPECT_EQ(common.ComponentRegions, std::vector<int>({0, 0}));
+  int positive = 0, negative = 0;
+  for (double volume : common.ComponentSignedVolumes)
+  {
+    positive += volume > 0;
+    negative += volume < 0;
+  }
+  EXPECT_EQ(positive, 1);
+  EXPECT_EQ(negative, 1);
+  BRepMesh_ImplicitBoundary::Result auditInput;
+  auditInput.Nodes             = common.Nodes;
+  auditInput.ImplicitTriangles = common.Triangles;
+  EXPECT_EQ(BRepMesh_ImplicitBoundary::Audit(auditInput).Status,
+            BRepMesh_ImplicitBoundary::MeshAudit::State::Clear);
+  source.Reverse();
+  const auto cut = BRepClass3d_ImplicitBox::CheckRegionTopology(source, 16);
+  checkClosedReference(cut);
+  EXPECT_EQ(cut.ComponentEuler, std::vector<int>({2}));
+  EXPECT_EQ(cut.RegionCount, 1);
+  EXPECT_GT(regionVolume(cut), 0);
+  EXPECT_EQ(cut.Nodes.size(), cut.Surface.Nodes.size());
+  EXPECT_EQ(cut.Triangles.size(), cut.Surface.Triangles.size());
+  EXPECT_NEAR(regionVolume(common) + regionVolume(cut), 8, 1.e-12);
+  for (double iso : {-2.0, 2.0})
+    for (bool reversed : {false, true})
+    {
+      auto face = topologyField(low, high, iso);
+      if (reversed)
+        face.Reverse();
+      const auto result = BRepClass3d_ImplicitBox::CheckRegionTopology(face, 4);
+      checkClosedReference(result);
+      const bool full = (iso > 0) != reversed;
+      EXPECT_EQ(result.RegionCount, full ? 1 : 0);
+      EXPECT_EQ(result.ComponentEuler, full ? std::vector<int>({2}) : std::vector<int>());
+      EXPECT_NEAR(regionVolume(result), full ? 8 : 0, 1.e-12);
+      EXPECT_TRUE(result.Surface.Triangles.empty());
+    }
+}
+
+TEST(BRepClass3d_ImplicitBox, ClosedRegionReferenceMultipleComponentsAndFailureLimits)
+{
+  auto face = topologyField(gp_Pnt(.3, .3, .3), gp_Pnt(12.3, 2.3, 2.3), 1.45);
+  face.Reverse();
+  const auto islands = BRepClass3d_ImplicitBox::CheckRegionTopology(face, 64);
+  checkClosedReference(islands);
+  ASSERT_TRUE(islands.ClosedReferenceManifold) << islands.Reason;
+  EXPECT_EQ(islands.ComponentEuler, std::vector<int>({2, 2}));
+  EXPECT_EQ(islands.RegionCount, 2);
+  ASSERT_EQ(islands.ComponentRegions.size(), 2u);
+  EXPECT_NE(islands.ComponentRegions[0], islands.ComponentRegions[1]);
+  for (double volume : islands.ComponentSignedVolumes)
+    EXPECT_GT(volume, 0);
+  const auto limited = BRepClass3d_ImplicitBox::CheckRegionTopology(face, 32, 16, 1);
+  EXPECT_FALSE(limited.Surface.HomotopyResolved);
+  EXPECT_FALSE(limited.ClosedReferenceManifold);
+  EXPECT_TRUE(limited.Nodes.empty());
+  EXPECT_FALSE(limited.Reason.empty());
+  const auto critical = BRepClass3d_ImplicitBox::CheckRegionTopology(
+    topologyField(gp_Pnt(.7, .8, .9), gp_Pnt(1.8, 1.9, 2), 1.5));
+  EXPECT_FALSE(critical.ClosedReferenceManifold);
+  EXPECT_THROW(BRepClass3d_ImplicitBox::CheckRegionTopology(face, 3), Standard_DomainError);
 }
 
 TEST(BRepClass3d_ImplicitBox, CommonAndDirectionalCutShareOppositeSeamsAndCapPCurves)

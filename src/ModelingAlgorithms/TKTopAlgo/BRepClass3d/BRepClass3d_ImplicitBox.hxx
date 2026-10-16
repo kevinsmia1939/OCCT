@@ -80,10 +80,34 @@ public:
     gp_Pnt UnresolvedMinimum, UnresolvedMaximum;
     // Transient nodal-linear reference ONLY, not native topology or a .1mm mesh.
     std::vector<gp_Pnt> Nodes;
+    std::vector<std::array<int, 2>> GridEdges; //!< Origin grid-edge IDs for transient root identity.
     std::vector<std::array<int, 3>> Triangles;
     std::vector<std::vector<int>> BoundaryLoops;
     std::vector<int> ComponentEuler;
   };
+
+  struct RegionTopologyWitness
+  {
+    TopologyWitness Surface;
+    bool ClosedReferenceManifold = false;
+    std::string Reason;
+    std::vector<gp_Pnt> Nodes; //!< Surface root nodes first, then retained cap grid vertices.
+    std::vector<std::array<int, 3>> Triangles;
+    std::vector<int> TriangleSides; //!< -1 implicit, otherwise 2*axis+(high side ? 1 : 0).
+    std::vector<int> TriangleComponents; //!< Closed-shell reference component, snapshot-local.
+    std::vector<int> ComponentEuler;
+    std::vector<double> ComponentSignedVolumes; //!< Numerical linear-reference diagnostics ONLY.
+    int RegionCount = 0; //!< Connected retained nodal-linear volume regions, not shell count.
+    std::vector<int> ComponentRegions; //!< Adjacent retained volume region per closed shell.
+    std::vector<double> RegionVolumes; //!< Sum of oriented reference shells per region.
+  };
+
+  //! Complete the homotopy reference with exact nodal-linear box caps sharing
+  //! root/grid-vertex identities. Check closed manifold incidences/vertex links
+  //! and report component grouping/oriented volume diagnostics. NOT stored
+  //! native trim/cap correspondence or native shell/solid construction.
+  Standard_EXPORT static RegionTopologyWitness CheckRegionTopology(const TopoDS_Face&,
+    int theResolution = 32, int theMaximumDepth = 16, size_t theMaximumCells = 4000000);
 
   //! Check the whole BOX zero set against a common Freudenthal nodal-linear
   //! reference. On tetrahedra and true box-boundary strata, exclude homotopy

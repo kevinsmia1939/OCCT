@@ -172,7 +172,7 @@ struct Checker
   }
 };
 
-bool referenceTopology(Witness& result)
+bool referenceTopology(Witness& result, std::vector<int>* triangleComponents = nullptr)
 {
   struct Use
   {
@@ -275,6 +275,18 @@ bool referenceTopology(Witness& result)
   for (const auto& component : euler)
     result.ComponentEuler.push_back(component.second);
   std::sort(result.ComponentEuler.begin(), result.ComponentEuler.end());
+  if (triangleComponents)
+  {
+    std::vector<std::pair<int, int>> ordered;
+    for (const auto& component : euler)
+      ordered.emplace_back(component.second, component.first);
+    std::sort(ordered.begin(), ordered.end());
+    std::map<int, int> labels;
+    for (size_t i = 0; i < ordered.size(); ++i)
+      labels.emplace(ordered[i].second, int(i));
+    for (const auto& triangle : result.Triangles)
+      triangleComponents->push_back(labels.at(root(triangle[0])));
+  }
   return true;
 }
 } // namespace
@@ -364,6 +376,7 @@ BRepClass3d_ImplicitBox::TopologyWitness BRepClass3d_ImplicitBox::CheckTopology(
     const double t     = values[size_t(a)] / (values[size_t(a)] - values[size_t(b)]);
     const int    index = int(result.Nodes.size());
     result.Nodes.emplace_back(points[size_t(a)].XYZ() * (1 - t) + points[size_t(b)].XYZ() * t);
+    result.GridEdges.push_back({edge.first, edge.second});
     roots.emplace(edge, index);
     return index;
   };
@@ -466,5 +479,259 @@ BRepClass3d_ImplicitBox::TopologyWitness BRepClass3d_ImplicitBox::CheckTopology(
   result.Reason              = result.ReferenceManifold ? "homotopy_and_reference_manifold_resolved"
                                                         : "reference_manifold_unresolved";
   result.UnresolvedDimension = -1;
+  return result;
+}
+
+BRepClass3d_ImplicitBox::RegionTopologyWitness BRepClass3d_ImplicitBox::CheckRegionTopology(
+  const TopoDS_Face& face,
+  int                resolution,
+  int                maximumDepth,
+  size_t             maximumCells)
+{
+  RegionTopologyWitness result;
+  result.Surface = CheckTopology(face, resolution, maximumDepth, maximumCells);
+  if (!result.Surface.HomotopyResolved || !result.Surface.ReferenceManifold)
+  {
+    result.Reason = result.Surface.Reason;
+    return result;
+  }
+  const auto   data  = occ::down_cast<BRep_TImplicitFace>(face.TShape());
+  const auto&  field = *static_cast<const Geom_ImplicitGyroid*>(data->Field().get());
+  const gp_Pnt low = data->Minimum(), high = data->Maximum();
+  const int    side  = resolution + 1;
+  auto         id    = [side](int x, int y, int z) { return (z * side + y) * side + x; };
+  auto         point = [&](int index) {
+    const int coordinates[3] = {index % side, (index / side) % side, index / (side * side)};
+    gp_Pnt    p;
+    for (int axis = 1; axis <= 3; ++axis)
+      p.SetCoord(axis,
+                 coordinates[axis - 1] == resolution
+                   ? high.Coord(axis)
+                   : low.Coord(axis)
+                       + (high.Coord(axis) - low.Coord(axis)) * coordinates[axis - 1] / resolution);
+    return p;
+  };
+  result.Nodes     = result.Surface.Nodes;
+  result.Triangles = result.Surface.Triangles;
+  result.TriangleSides.resize(result.Triangles.size(), -1);
+  std::map<Edge, int> roots;
+  for (size_t i = 0; i < result.Surface.GridEdges.size(); ++i)
+  {
+    const auto& edge = result.Surface.GridEdges[i];
+    roots.emplace(Edge(edge[0], edge[1]), int(i));
+  }
+  std::map<int, int>    vertices;
+  std::map<int, double> values;
+  auto                  value = [&](int index) {
+    auto found = values.find(index);
+    if (found != values.end())
+      return found->second;
+    const double f = field.Value(point(index));
+    values.emplace(index, f);
+    return f;
+  };
+  auto vertex = [&](int index) {
+    auto found = vertices.find(index);
+    if (found != vertices.end())
+      return found->second;
+    const int n = int(result.Nodes.size());
+    result.Nodes.push_back(point(index));
+    vertices.emplace(index, n);
+    return n;
+  };
+  const bool negative = face.Orientation() == TopAbs_FORWARD;
+  // Both sides of every exterior grid square use its low-low / high-high
+  // diagonal, exactly the restriction of the common Freudenthal complex.
+  for (int axis = 0; axis < 3; ++axis)
+    for (int highSide = 0; highSide < 2; ++highSide)
+      for (int v = 0; v < resolution; ++v)
+        for (int u = 0; u < resolution; ++u)
+        {
+          int       corners[4];
+          const int du[4] = {0, 1, 1, 0}, dv[4] = {0, 0, 1, 1};
+          for (int corner = 0; corner < 4; ++corner)
+          {
+            int coordinates[3];
+            coordinates[axis]           = highSide ? resolution : 0;
+            coordinates[(axis + 1) % 3] = u + du[corner];
+            coordinates[(axis + 2) % 3] = v + dv[corner];
+            corners[corner]             = id(coordinates[0], coordinates[1], coordinates[2]);
+          }
+          for (const auto& local : {std::array<int, 3>{0, 1, 2}, std::array<int, 3>{0, 2, 3}})
+          {
+            int triangle[3] = {corners[size_t(local[0])],
+                               corners[size_t(local[1])],
+                               corners[size_t(local[2])]};
+            if (!highSide)
+              std::swap(triangle[1], triangle[2]);
+            if (result.Nodes.size() + 3 > 200000 || result.Triangles.size() + 2 > 400000)
+            {
+              result.Reason = "closed_reference_mesh_budget_exhausted";
+              return result;
+            }
+            std::vector<int> polygon;
+            for (int edge = 0; edge < 3; ++edge)
+            {
+              const int  a = triangle[edge], b = triangle[(edge + 1) % 3];
+              const bool insideA = (value(a) < 0) == negative, insideB = (value(b) < 0) == negative;
+              if (insideA)
+                polygon.push_back(vertex(a));
+              if (insideA != insideB)
+              {
+                const auto found = roots.find(std::minmax(a, b));
+                if (found == roots.end())
+                {
+                  result.Reason = "closed_reference_missing_shared_root";
+                  return result;
+                }
+                polygon.push_back(found->second);
+              }
+            }
+            for (size_t i = 1; i + 1 < polygon.size(); ++i)
+            {
+              result.Triangles.push_back({polygon[0], polygon[i], polygon[i + 1]});
+              result.TriangleSides.push_back(2 * axis + highSide);
+            }
+          }
+        }
+  Witness closed;
+  closed.Nodes     = result.Nodes;
+  closed.Triangles = result.Triangles;
+  if (!referenceTopology(closed, &result.TriangleComponents) || !closed.BoundaryLoops.empty())
+  {
+    result.Reason = "closed_reference_manifold_unresolved";
+    return result;
+  }
+  result.ComponentEuler = std::move(closed.ComponentEuler);
+  // Translate before summing scalar triple products. These are diagnostics of
+  // the linear reference, not volume/error bounds for the authoritative field.
+  const gp_Pnt             origin((low.XYZ() + high.XYZ()) * .5);
+  std::vector<long double> volumes(result.ComponentEuler.size(), 0);
+  for (size_t i = 0; i < result.Triangles.size(); ++i)
+  {
+    const auto& t = result.Triangles[i];
+    long double a[3], b[3], c[3];
+    for (int axis = 1; axis <= 3; ++axis)
+    {
+      a[axis - 1] =
+        static_cast<long double>(result.Nodes[size_t(t[0])].Coord(axis)) - origin.Coord(axis);
+      b[axis - 1] =
+        static_cast<long double>(result.Nodes[size_t(t[1])].Coord(axis)) - origin.Coord(axis);
+      c[axis - 1] =
+        static_cast<long double>(result.Nodes[size_t(t[2])].Coord(axis)) - origin.Coord(axis);
+    }
+    volumes[size_t(result.TriangleComponents[i])] +=
+      (a[0] * (b[1] * c[2] - b[2] * c[1]) + a[1] * (b[2] * c[0] - b[0] * c[2])
+       + a[2] * (b[0] * c[1] - b[1] * c[0]))
+      / 6;
+  }
+  for (long double volume : volumes)
+    result.ComponentSignedVolumes.push_back(double(volume));
+  // Within a tetrahedron a retained affine half-space is convex. Every
+  // nonempty retained cell/face contains a strictly retained grid vertex
+  // (nodal zeros were excluded). Joining same-sign vertices along the common
+  // tetrahedral 1-skeleton therefore gives VOLUME connectivity, not merely
+  // connectivity of its possibly disconnected boundary shells.
+  const size_t        gridSize = size_t(side) * side * side;
+  std::vector<double> nodal(gridSize);
+  std::vector<int>    parent(gridSize, -1);
+  for (size_t i = 0; i < gridSize; ++i)
+  {
+    nodal[i] = field.Value(point(int(i)));
+    if ((nodal[i] < 0) == negative)
+      parent[i] = int(i);
+  }
+  auto representative = [&](int n) {
+    while (parent[size_t(n)] != n)
+    {
+      parent[size_t(n)] = parent[size_t(parent[size_t(n)])];
+      n                 = parent[size_t(n)];
+    }
+    return n;
+  };
+  constexpr int offsets[8][3] =
+    {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {1, 1, 0}, {0, 0, 1}, {1, 0, 1}, {0, 1, 1}, {1, 1, 1}};
+  constexpr int tets[6][4] =
+    {{0, 1, 3, 7}, {0, 3, 2, 7}, {0, 2, 6, 7}, {0, 6, 4, 7}, {0, 4, 5, 7}, {0, 5, 1, 7}};
+  for (int z = 0; z < resolution; ++z)
+    for (int y = 0; y < resolution; ++y)
+      for (int x = 0; x < resolution; ++x)
+      {
+        int cube[8];
+        for (int i = 0; i < 8; ++i)
+          cube[i] = id(x + offsets[i][0], y + offsets[i][1], z + offsets[i][2]);
+        for (const auto& tet : tets)
+        {
+          int anchor = -1;
+          for (int local : tet)
+          {
+            const int n = cube[local];
+            if (parent[size_t(n)] < 0)
+              continue;
+            if (anchor < 0)
+              anchor = n;
+            else
+              parent[size_t(representative(n))] = representative(anchor);
+          }
+        }
+      }
+  std::map<int, int> regions;
+  for (size_t i = 0; i < gridSize; ++i)
+    if (parent[i] >= 0)
+      regions.emplace(representative(int(i)), 0);
+  for (auto& entry : regions)
+    entry.second = result.RegionCount++;
+  std::vector<int> nodeRegion(result.Nodes.size(), -1);
+  for (size_t i = 0; i < result.Surface.GridEdges.size(); ++i)
+  {
+    const auto& edge     = result.Surface.GridEdges[i];
+    const int   retained = parent[size_t(edge[0])] >= 0 ? edge[0] : edge[1];
+    if (parent[size_t(retained)] < 0)
+    {
+      result.Reason = "closed_reference_root_region_unresolved";
+      return result;
+    }
+    nodeRegion[i] = regions.at(representative(retained));
+  }
+  for (const auto& entry : vertices)
+    nodeRegion[size_t(entry.second)] = regions.at(representative(entry.first));
+  result.ComponentRegions.assign(result.ComponentEuler.size(), -1);
+  for (size_t i = 0; i < result.Triangles.size(); ++i)
+  {
+    const auto& triangle        = result.Triangles[i];
+    const int   region          = nodeRegion[size_t(triangle[0])];
+    auto&       componentRegion = result.ComponentRegions[size_t(result.TriangleComponents[i])];
+    if (region < 0 || nodeRegion[size_t(triangle[1])] != region
+        || nodeRegion[size_t(triangle[2])] != region
+        || (componentRegion >= 0 && componentRegion != region))
+    {
+      result.Reason = "closed_reference_shell_region_grouping_unresolved";
+      return result;
+    }
+    componentRegion = region;
+  }
+  std::vector<long double> regionVolumes(size_t(result.RegionCount), 0);
+  std::vector<bool>        regionUsed(size_t(result.RegionCount), false);
+  for (size_t component = 0; component < volumes.size(); ++component)
+  {
+    const int region = result.ComponentRegions[component];
+    if (region < 0)
+    {
+      result.Reason = "closed_reference_unassigned_shell";
+      return result;
+    }
+    regionVolumes[size_t(region)] += volumes[component];
+    regionUsed[size_t(region)] = true;
+  }
+  for (bool used : regionUsed)
+    if (!used)
+    {
+      result.Reason = "closed_reference_region_without_boundary";
+      return result;
+    }
+  for (long double volume : regionVolumes)
+    result.RegionVolumes.push_back(double(volume));
+  result.ClosedReferenceManifold = true;
+  result.Reason                  = "closed_region_reference_resolved";
   return result;
 }
