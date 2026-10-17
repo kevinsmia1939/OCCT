@@ -1398,8 +1398,7 @@ BRepClass3d_ImplicitBox::TrimAttachment BRepClass3d_ImplicitBox::CheckTrimAttach
   std::istringstream input(record.str());
   Boundary           copy;
   BRepClass3d_ImplicitBoxIO::Read(input, copy);
-  const auto retained =
-    CheckCapAttachment(copy, resolution, maximumDepth, maximumCells, maximumTests);
+  auto retained = CheckCapAttachment(copy, resolution, maximumDepth, maximumCells, maximumTests);
   report.CapRegionsAttached = retained.Resolved;
   if (!retained.Resolved)
   {
@@ -1661,6 +1660,32 @@ BRepClass3d_ImplicitBox::TrimAttachment BRepClass3d_ImplicitBox::CheckTrimAttach
       components.emplace(root(int(i)), 0);
     for (auto& entry : components)
       entry.second = report.ReferenceSurfaceComponentCount++;
+    report.SurfaceNodeComponents.resize(parent.size());
+    report.SurfaceComponentShells.assign(size_t(report.ReferenceSurfaceComponentCount), -1);
+    report.SurfaceComponentRegions.assign(size_t(report.ReferenceSurfaceComponentCount), -1);
+    report.SurfaceComponentEuler.assign(size_t(report.ReferenceSurfaceComponentCount), 0);
+    for (size_t i = 0; i < parent.size(); ++i)
+    {
+      const int component             = components.at(root(int(i)));
+      report.SurfaceNodeComponents[i] = component;
+      ++report.SurfaceComponentEuler[size_t(component)];
+    }
+    std::set<Segment> surfaceEdges;
+    for (size_t i = 0; i < ref.Surface.Triangles.size(); ++i)
+    {
+      const auto&  t     = ref.Surface.Triangles[i];
+      const size_t c     = size_t(report.SurfaceNodeComponents[size_t(t[0])]);
+      const int    shell = ref.TriangleComponents[i], region = ref.ComponentRegions[size_t(shell)];
+      require(report.SurfaceComponentShells[c] < 0 || report.SurfaceComponentShells[c] == shell,
+              "Reference surface component spans multiple boundary shells");
+      report.SurfaceComponentShells[c]  = shell;
+      report.SurfaceComponentRegions[c] = region;
+      ++report.SurfaceComponentEuler[c];
+      for (int j = 0; j < 3; ++j)
+        surfaceEdges.insert(std::minmax(t[size_t(j)], t[size_t((j + 1) % 3)]));
+    }
+    for (const auto& edge : surfaceEdges)
+      --report.SurfaceComponentEuler[size_t(report.SurfaceNodeComponents[size_t(edge.first)])];
     std::set<int> usedWires;
     for (const auto& key : wires(face, aEdges, matching, directions, false))
     {
@@ -1672,8 +1697,9 @@ BRepClass3d_ImplicitBox::TrimAttachment BRepClass3d_ImplicitBox::CheckTrimAttach
         components.at(root(loops[size_t(found->second)].front())));
     }
     require(usedWires.size() == loops.size(), "Native/reference wire bijection incomplete");
-    report.Resolved = true;
-    report.Reason   = "trim_wires_attached";
+    report.Resolved     = true;
+    report.Reason       = "trim_wires_attached";
+    report.RetainedCaps = std::move(retained);
   }
   catch (const Standard_NotImplemented& error)
   {

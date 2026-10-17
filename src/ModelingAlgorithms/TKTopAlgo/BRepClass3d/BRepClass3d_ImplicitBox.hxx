@@ -4,6 +4,7 @@
 #define _BRepClass3d_ImplicitBox_HeaderFile
 #include <BRep_ImplicitPlaneSection.hxx>
 #include <TopoDS_Compound.hxx>
+#include <TopoDS_Shell.hxx>
 #include <vector>
 #include <array>
 #include <string>
@@ -126,7 +127,33 @@ public:
     int ReferenceArcCount=0, ReferenceWireCount=0, ReferenceSurfaceComponentCount=0;
     std::vector<int> SeamReferenceArcs; //!< Unique implicit-edge traversal order.
     std::vector<int> WireReferenceLoops, WireSurfaceComponents; //!< Native direct wire order.
+    CapAttachment RetainedCaps;
+    std::vector<int> SurfaceNodeComponents, SurfaceComponentShells, SurfaceComponentRegions;
+    std::vector<int> SurfaceComponentEuler;
   };
+
+  struct NativeShells
+  {
+    bool FacesAttached=false, ShellsConstructed=false, TopologyValidated=false;
+    std::string Reason;
+    size_t SeparatorCells=0;
+    int Separators=0;
+    TopoDS_Compound Shape;
+    std::vector<TopoDS_Shell> Shells;
+    std::vector<TopoDS_Face> Faces;
+    std::vector<int> FaceSources, FaceComponents, FaceShells, ShellRegions, ShellEuler;
+    std::vector<std::array<gp_Pnt,2>> ComponentDomains;
+    Boundary Source; //!< Owned authoritative recipe/topology snapshot; not a mesh definition.
+  };
+
+  //! Attach whole field faces, partitioning disconnected components only at
+  //! checked F/L-zero-free axis planes, then assemble genuine native shells.
+  //! Validate face attachment, oriented incidence, cyclic vertex links, Euler
+  //! and component grouping. Never promotes reference triangles to CAD faces.
+  //! NOT geometric/solid validation or generic UV-based consumer support.
+  Standard_EXPORT static NativeShells BuildNativeShells(const Boundary&,
+    int theResolution=32,int theMaximumDepth=16,size_t theMaximumCells=4000000,
+    size_t theMaximumTests=2000000,size_t theMaximumSeparatorCells=2000000);
 
   //! Dual retained/complement cap-region identities and ordered box-edge-root
   //! anchors identify contour arcs. Require a bijection and equal full directed

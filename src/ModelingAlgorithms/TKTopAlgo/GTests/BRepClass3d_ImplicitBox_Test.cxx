@@ -531,6 +531,123 @@ TEST(BRepClass3d_ImplicitBox, DualCapTrimAttachmentRestoreAndBudgetFailures)
   EXPECT_THROW(BRepClass3d_ImplicitBox::CheckTrimAttachment(loaded, 3), Standard_DomainError);
 }
 
+TEST(BRepClass3d_ImplicitBox, GenuineNativeShellsBothOperationsAndFieldFaces)
+{
+  for (bool open : {false, true})
+    for (auto operation : {BRepClass3d_ImplicitBox::Operation::Common,
+                           BRepClass3d_ImplicitBox::Operation::BoxMinusField})
+    {
+      const auto operand =
+        open ? BRepPrimAPI_MakeBox(gp_Pnt(-3.83, -4.07, -2.67), gp_Pnt(4.17, 3.93, 3.37)).Shape()
+             : box();
+      const auto source =
+        BRepClass3d_ImplicitBox::Build(field(open ? 0 : 1.45), operand, operation);
+      std::ostringstream before;
+      BRepClass3d_ImplicitBoxIO::Write(source, before);
+      const auto result = BRepClass3d_ImplicitBox::BuildNativeShells(source);
+      ASSERT_TRUE(result.FacesAttached) << result.Reason;
+      ASSERT_TRUE(result.ShellsConstructed)
+        << open << " " << int(operation) << " " << result.Reason;
+      EXPECT_TRUE(result.TopologyValidated);
+      EXPECT_EQ(result.Faces.size(), source.Faces.size());
+      EXPECT_EQ(result.ComponentDomains.size(), 1u);
+      EXPECT_EQ(result.Separators, 0);
+      int implicit = 0;
+      for (size_t i = 0; i < result.Faces.size(); ++i)
+        if (BRep_Tool::IsImplicit(result.Faces[i]))
+        {
+          ++implicit;
+          EXPECT_EQ(result.FaceSources[i], int(source.Faces.size()) - 1);
+          EXPECT_EQ(result.Faces[i].Orientation(), source.Faces.back().Orientation());
+          EXPECT_EQ(BRep_ImplicitTool::Value(result.Faces[i], gp_Pnt(1, 2, 3)),
+                    BRep_ImplicitTool::Value(source.Faces.back(), gp_Pnt(1, 2, 3)));
+          TopLoc_Location location;
+          EXPECT_TRUE(BRep_Tool::Triangulation(result.Faces[i], location).IsNull());
+        }
+      EXPECT_EQ(implicit, 1);
+      for (const auto& shell : result.Shells)
+      {
+        EXPECT_EQ(shell.ShapeType(), TopAbs_SHELL);
+        EXPECT_TRUE(shell.Closed());
+      }
+      std::ostringstream after;
+      BRepClass3d_ImplicitBoxIO::Write(source, after);
+      EXPECT_EQ(before.str(), after.str());
+    }
+}
+
+TEST(BRepClass3d_ImplicitBox, NativeShellsSplitDisconnectedComponentsAtCheckedEmptyPlanes)
+{
+  for (auto operation : {BRepClass3d_ImplicitBox::Operation::Common,
+                         BRepClass3d_ImplicitBox::Operation::BoxMinusField})
+  {
+    const auto source = BRepClass3d_ImplicitBox::Build(
+      field(),
+      BRepPrimAPI_MakeBox(gp_Pnt(-.31, -.37, 1.25), gp_Pnt(12.93, 2.91, 4)).Shape(),
+      operation);
+    const auto result = BRepClass3d_ImplicitBox::BuildNativeShells(source, 64);
+    ASSERT_TRUE(result.ShellsConstructed) << result.Reason;
+    EXPECT_TRUE(result.TopologyValidated);
+    EXPECT_EQ(result.Separators, 1);
+    EXPECT_GT(result.SeparatorCells, 1u);
+    ASSERT_EQ(result.ComponentDomains.size(), 2u);
+    auto domains = result.ComponentDomains;
+    std::sort(domains.begin(), domains.end(), [](const auto& a, const auto& b) {
+      return a[0].X() < b[0].X();
+    });
+    EXPECT_EQ(domains[0][1].X(), domains[1][0].X());
+    EXPECT_GT(domains[0][1].X(), 3);
+    EXPECT_LT(domains[0][1].X(), 10);
+    int implicit = 0;
+    for (const auto& face : result.Faces)
+      implicit += BRep_Tool::IsImplicit(face);
+    EXPECT_EQ(implicit, 2);
+    EXPECT_EQ(result.Shells.size(),
+              operation == BRepClass3d_ImplicitBox::Operation::Common ? 1u : 2u);
+    if (operation == BRepClass3d_ImplicitBox::Operation::Common)
+    {
+      const auto limited =
+        BRepClass3d_ImplicitBox::BuildNativeShells(source, 64, 16, 4000000, 2000000, 1);
+      EXPECT_FALSE(limited.ShellsConstructed);
+      EXPECT_TRUE(limited.Shape.IsNull());
+      EXPECT_TRUE(limited.Shells.empty());
+      EXPECT_FALSE(limited.Reason.empty());
+    }
+  }
+}
+
+TEST(BRepClass3d_ImplicitBox, NativeShellsEnclosedCavityAndEmptyFullRegions)
+{
+  const auto operand = BRepPrimAPI_MakeBox(gp_Pnt(.3, .3, .3), gp_Pnt(2.3, 2.3, 2.3)).Shape();
+  for (auto operation : {BRepClass3d_ImplicitBox::Operation::Common,
+                         BRepClass3d_ImplicitBox::Operation::BoxMinusField})
+  {
+    const auto source = BRepClass3d_ImplicitBox::Build(field(), operand, operation);
+    const auto result = BRepClass3d_ImplicitBox::BuildNativeShells(source);
+    ASSERT_TRUE(result.ShellsConstructed) << result.Reason;
+    EXPECT_EQ(result.ComponentDomains.size(), 1u);
+    EXPECT_EQ(result.Shells.size(),
+              operation == BRepClass3d_ImplicitBox::Operation::Common ? 2u : 1u);
+    for (int region : result.ShellRegions)
+      EXPECT_EQ(region, 0);
+    EXPECT_EQ(result.Source.BoxEdgeRootCount, 0);
+  }
+  for (auto operation : {BRepClass3d_ImplicitBox::Operation::Common,
+                         BRepClass3d_ImplicitBox::Operation::BoxMinusField})
+  {
+    const auto source = BRepClass3d_ImplicitBox::Build(field(2), operand, operation);
+    const auto result = BRepClass3d_ImplicitBox::BuildNativeShells(source, 4);
+    ASSERT_TRUE(result.ShellsConstructed) << result.Reason;
+    EXPECT_TRUE(result.ComponentDomains.empty());
+    EXPECT_EQ(result.Shells.size(),
+              operation == BRepClass3d_ImplicitBox::Operation::Common ? 1u : 0u);
+    for (const auto& face : result.Faces)
+      EXPECT_FALSE(BRep_Tool::IsImplicit(face));
+    for (const auto& shell : result.Shells)
+      EXPECT_TRUE(BRepCheck_Analyzer(shell).IsValid());
+  }
+}
+
 TEST(BRepClass3d_ImplicitBox, CommonAndDirectionalCutShareOppositeSeamsAndCapPCurves)
 {
   const auto source  = field();
