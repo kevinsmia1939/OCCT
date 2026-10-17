@@ -457,6 +457,80 @@ TEST(BRepClass3d_ImplicitBox, CapAttachmentMultipleRegionsReorderingAndLimits)
   EXPECT_THROW(BRepClass3d_ImplicitBox::CheckCapAttachment(source, 3), Standard_DomainError);
 }
 
+TEST(BRepClass3d_ImplicitBox, DualCapTrimAttachmentBothOperationsAndDirectedWires)
+{
+  for (bool open : {false, true})
+    for (auto operation : {BRepClass3d_ImplicitBox::Operation::Common,
+                           BRepClass3d_ImplicitBox::Operation::BoxMinusField})
+    {
+      const auto operand =
+        open ? BRepPrimAPI_MakeBox(gp_Pnt(-3.83, -4.07, -2.67), gp_Pnt(4.17, 3.93, 3.37)).Shape()
+             : box();
+      const auto source =
+        BRepClass3d_ImplicitBox::Build(field(open ? 0 : 1.45), operand, operation);
+      std::ostringstream before;
+      BRepClass3d_ImplicitBoxIO::Write(source, before);
+      const auto report = BRepClass3d_ImplicitBox::CheckTrimAttachment(source);
+      ASSERT_TRUE(report.Resolved) << open << " " << int(operation) << " " << report.Reason;
+      EXPECT_TRUE(report.CapRegionsAttached);
+      EXPECT_TRUE(report.ComplementCapsAttached);
+      EXPECT_EQ(report.ReferenceArcCount, source.SeamCount);
+      EXPECT_EQ(report.SeamReferenceArcs.size(), size_t(source.SeamCount));
+      EXPECT_EQ(report.ReferenceWireCount, open ? 3 : 1);
+      EXPECT_EQ(report.ReferenceSurfaceComponentCount, 1);
+      EXPECT_EQ(report.WireReferenceLoops.size(), size_t(report.ReferenceWireCount));
+      std::set<int> arcs(report.SeamReferenceArcs.begin(), report.SeamReferenceArcs.end());
+      EXPECT_EQ(arcs.size(), report.SeamReferenceArcs.size());
+      std::set<int> loops(report.WireReferenceLoops.begin(), report.WireReferenceLoops.end());
+      EXPECT_EQ(loops.size(), report.WireReferenceLoops.size());
+      for (int component : report.WireSurfaceComponents)
+        EXPECT_EQ(component, 0);
+      std::ostringstream after;
+      BRepClass3d_ImplicitBoxIO::Write(source, after);
+      EXPECT_EQ(before.str(), after.str());
+    }
+}
+
+TEST(BRepClass3d_ImplicitBox, DualCapTrimAttachmentDistinguishesHolesAndSurfaceComponents)
+{
+  const auto operand =
+    BRepPrimAPI_MakeBox(gp_Pnt(-.31, -.37, 1.25), gp_Pnt(12.93, 2.91, 4)).Shape();
+  for (auto operation : {BRepClass3d_ImplicitBox::Operation::Common,
+                         BRepClass3d_ImplicitBox::Operation::BoxMinusField})
+  {
+    const auto source = BRepClass3d_ImplicitBox::Build(field(), operand, operation);
+    const auto report = BRepClass3d_ImplicitBox::CheckTrimAttachment(source, 64);
+    ASSERT_TRUE(report.Resolved) << report.Reason;
+    EXPECT_EQ(report.ReferenceArcCount, 2);
+    EXPECT_EQ(report.ReferenceWireCount, 2);
+    EXPECT_EQ(report.ReferenceSurfaceComponentCount, 2);
+    ASSERT_EQ(report.SeamReferenceArcs.size(), 2u);
+    EXPECT_NE(report.SeamReferenceArcs[0], report.SeamReferenceArcs[1]);
+    ASSERT_EQ(report.WireSurfaceComponents.size(), 2u);
+    EXPECT_NE(report.WireSurfaceComponents[0], report.WireSurfaceComponents[1]);
+  }
+}
+
+TEST(BRepClass3d_ImplicitBox, DualCapTrimAttachmentRestoreAndBudgetFailures)
+{
+  const auto source =
+    BRepClass3d_ImplicitBox::Build(field(), box(), BRepClass3d_ImplicitBox::Operation::Common);
+  std::ostringstream output;
+  BRepClass3d_ImplicitBoxIO::Write(source, output);
+  std::istringstream                input(output.str());
+  BRepClass3d_ImplicitBox::Boundary loaded;
+  BRepClass3d_ImplicitBoxIO::Read(input, loaded);
+  ASSERT_TRUE(BRepClass3d_ImplicitBox::CheckTrimAttachment(loaded).Resolved);
+  EXPECT_FALSE(loaded.SeamBoundVerified);
+  const auto limited = BRepClass3d_ImplicitBox::CheckTrimAttachment(loaded, 32, 16, 4000000, 1);
+  EXPECT_FALSE(limited.Resolved);
+  EXPECT_FALSE(limited.Reason.empty());
+  const auto low = BRepClass3d_ImplicitBox::CheckTrimAttachment(loaded, 32, 16, 1);
+  EXPECT_FALSE(low.Resolved);
+  EXPECT_FALSE(low.CapRegionsAttached);
+  EXPECT_THROW(BRepClass3d_ImplicitBox::CheckTrimAttachment(loaded, 3), Standard_DomainError);
+}
+
 TEST(BRepClass3d_ImplicitBox, CommonAndDirectionalCutShareOppositeSeamsAndCapPCurves)
 {
   const auto source  = field();
@@ -1028,6 +1102,9 @@ TEST(BRepClass3d_ImplicitBox, CorrespondenceRefusesChangedMathForgedBoundsAndLim
   EXPECT_FALSE(caps.Resolved);
   EXPECT_FALSE(caps.StoredGraphResolved);
   EXPECT_FALSE(caps.RegionReferenceResolved);
+  const auto trim = Ops::CheckTrimAttachment(source);
+  EXPECT_FALSE(trim.Resolved);
+  EXPECT_FALSE(trim.CapRegionsAttached);
 }
 
 TEST(BRepClass3d_ImplicitBox, CorrespondenceAcceptsResamplingAndCyclicWireStarts)
@@ -1119,6 +1196,8 @@ TEST(BRepClass3d_ImplicitBox, CorrespondenceAcceptsResamplingAndCyclicWireStarts
     builder.Add(source.Shape, face);
   const auto rotated = Ops::CheckCorrespondence(source);
   EXPECT_TRUE(rotated.Resolved) << rotated.Reason;
+  const auto attached = Ops::CheckTrimAttachment(source);
+  EXPECT_TRUE(attached.Resolved) << attached.Reason;
 }
 
 TEST(BRepClass3d_ImplicitBox, CorrespondenceChecksMultipleRegionsAndCapParameterGeometry)

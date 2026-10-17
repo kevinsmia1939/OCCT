@@ -968,7 +968,8 @@ using FaceKey = std::pair<int, std::vector<WireKey>>;
 std::vector<WireKey> wires(const TopoDS_Face&      face,
                            const Map&              edges,
                            const std::vector<int>& mapping,
-                           const std::vector<int>& directions)
+                           const std::vector<int>& directions,
+                           bool                    sortResult = true)
 {
   std::vector<WireKey> result;
   for (TopoDS_Iterator wire(face); wire.More(); wire.Next())
@@ -985,7 +986,8 @@ std::vector<WireKey> wires(const TopoDS_Face&      face,
     std::rotate(key.begin(), std::min_element(key.begin(), key.end()), key.end());
     result.push_back(std::move(key));
   }
-  std::sort(result.begin(), result.end());
+  if (sortResult)
+    std::sort(result.begin(), result.end());
   return result;
 }
 
@@ -1260,6 +1262,418 @@ BRepClass3d_ImplicitBox::Correspondence BRepClass3d_ImplicitBox::CheckCorrespond
     }
     report.Resolved = true;
     report.Reason   = "matched";
+  }
+  catch (const Standard_NotImplemented& error)
+  {
+    report.Reason = error.what();
+  }
+  return report;
+}
+
+namespace
+{
+using RootKey = std::array<int, 2>;
+using ArcKey  = std::array<int, 7>;
+using CapPair = std::array<int, 3>; // side, retained cap, complement cap
+using Segment = std::pair<int, int>;
+
+int physicalEdge(const gp_Pnt& p, const gp_Pnt& low, const gp_Pnt& high, double reserve)
+{
+  int fixed[3] = {-1, -1, -1}, count = 0;
+  for (int axis = 0; axis < 3; ++axis)
+  {
+    if (std::abs(p.Coord(axis + 1) - low.Coord(axis + 1)) <= reserve)
+      fixed[axis] = 0;
+    else if (std::abs(p.Coord(axis + 1) - high.Coord(axis + 1)) <= reserve)
+      fixed[axis] = 1;
+    if (fixed[axis] >= 0)
+      ++count;
+  }
+  require(count != 3, "Trim attachment has an ambiguous box-corner anchor");
+  if (count != 2)
+    return -1;
+  int axis = 0;
+  while (fixed[axis] >= 0)
+    ++axis;
+  return 4 * axis + fixed[(axis + 1) % 3] + 2 * fixed[(axis + 2) % 3];
+}
+
+std::map<int, RootKey> rootLabels(const std::map<int, gp_Pnt>& points,
+                                  const gp_Pnt&                low,
+                                  const gp_Pnt&                high,
+                                  double                       reserve,
+                                  std::array<int, 12>&         counts)
+{
+  std::array<std::vector<std::pair<double, int>>, 12> groups;
+  for (const auto& entry : points)
+  {
+    const int edge = physicalEdge(entry.second, low, high, reserve);
+    if (edge >= 0)
+      groups[size_t(edge)].emplace_back(entry.second.Coord(edge / 4 + 1), entry.first);
+  }
+  std::map<int, RootKey> labels;
+  for (int edge = 0; edge < 12; ++edge)
+  {
+    auto& group = groups[size_t(edge)];
+    std::sort(group.begin(), group.end());
+    counts[size_t(edge)] = int(group.size());
+    for (size_t i = 0; i < group.size(); ++i)
+    {
+      require(i == 0 || group[i].first - group[i - 1].first > 4 * reserve,
+              "Trim attachment root ordering precision exhausted");
+      labels.emplace(group[i].second, RootKey{edge, int(i)});
+    }
+  }
+  return labels;
+}
+
+int areaDirection(const std::vector<gp_Pnt>& points, int side, double reserve)
+{
+  require(points.size() >= 3, "Degenerate closed trim arc");
+  const int   u = (side / 2 + 1) % 3 + 1, v = (side / 2 + 2) % 3 + 1;
+  long double area     = 0;
+  double      diameter = 0;
+  const auto& origin   = points.front();
+  for (size_t i = 1; i < points.size(); ++i)
+  {
+    const auto&       a  = points[i - 1];
+    const auto&       b  = points[i];
+    const long double au = static_cast<long double>(a.Coord(u)) - origin.Coord(u),
+                      av = static_cast<long double>(a.Coord(v)) - origin.Coord(v),
+                      bu = static_cast<long double>(b.Coord(u)) - origin.Coord(u),
+                      bv = static_cast<long double>(b.Coord(v)) - origin.Coord(v);
+    area += au * bv - av * bu;
+    diameter = std::max(diameter, origin.Distance(b));
+  }
+  area *= side % 2 ? 1 : -1;
+  const double error = points.size()
+                       * (4096 * std::numeric_limits<double>::epsilon() * diameter * diameter
+                          + 64 * reserve * diameter);
+  require(std::abs(area) > error, "Closed trim winding area unresolved");
+  return area > 0 ? 1 : -1;
+}
+
+ArcKey arcKey(const CapPair& pair, RootKey first, RootKey last, int& direction)
+{
+  if (last < first)
+  {
+    std::swap(first, last);
+    direction = -1;
+  }
+  return {pair[0], pair[1], pair[2], first[0], first[1], last[0], last[1]};
+}
+
+std::vector<int> seamOwners(const Boundary& boundary, const Map& seams)
+{
+  std::vector<int> owners(size_t(seams.Extent()), -1);
+  for (size_t cap = 0; cap + 1 < boundary.Faces.size(); ++cap)
+    for (TopExp_Explorer it(boundary.Faces[cap], TopAbs_EDGE); it.More(); it.Next())
+    {
+      const int index = seams.FindIndex(it.Current()) - 1;
+      if (index < 0)
+        continue;
+      require(owners[size_t(index)] < 0, "Native seam has multiple cap owners");
+      owners[size_t(index)] = int(cap);
+    }
+  for (int owner : owners)
+    require(owner >= 0, "Native seam has no retained cap owner");
+  return owners;
+}
+} // namespace
+
+BRepClass3d_ImplicitBox::TrimAttachment BRepClass3d_ImplicitBox::CheckTrimAttachment(
+  const Boundary& source,
+  int             resolution,
+  int             maximumDepth,
+  size_t          maximumCells,
+  size_t          maximumTests)
+{
+  if (resolution < 4 || resolution > 64 || (resolution & (resolution - 1)) || maximumDepth < 0
+      || maximumDepth > 16 || !maximumCells || maximumCells > 10000000 || !maximumTests
+      || maximumTests > 10000000)
+    throw Standard_DomainError("Invalid trim attachment settings");
+  TrimAttachment     report;
+  std::ostringstream record;
+  BRepClass3d_ImplicitBoxIO::Write(source, record);
+  std::istringstream input(record.str());
+  Boundary           copy;
+  BRepClass3d_ImplicitBoxIO::Read(input, copy);
+  const auto retained =
+    CheckCapAttachment(copy, resolution, maximumDepth, maximumCells, maximumTests);
+  report.CapRegionsAttached = retained.Resolved;
+  if (!retained.Resolved)
+  {
+    report.Reason = "retained_caps_unresolved: " + retained.Reason;
+    return report;
+  }
+  const auto& face = copy.Faces.back();
+  const auto  data = occ::down_cast<BRep_TImplicitFace>(face.TShape());
+  const auto  low = data->Minimum(), high = data->Maximum();
+  double      magnitude = 1;
+  for (int axis = 1; axis <= 3; ++axis)
+    magnitude = std::max({magnitude, std::abs(low.Coord(axis)), std::abs(high.Coord(axis))});
+  const double reserve = 8192 * std::numeric_limits<double>::epsilon() * magnitude;
+  try
+  {
+    TopoDS_Face bare;
+    BRep_Builder()
+      .MakeImplicitFace(bare, data->Field(), low, high, TopLoc_Location(), data->Tolerance());
+    std::vector<Side> sides;
+    for (int axis = 0; axis < 3; ++axis)
+      for (int sign : {-1, 1})
+        sides.push_back(
+          canonicalSide(axis, sign, 2 * axis + int(sign > 0), low, high, data->Tolerance(), 512));
+    const auto opposite =
+      construct(bare,
+                low,
+                high,
+                std::move(sides),
+                face.Orientation() == TopAbs_FORWARD ? Operation::BoxMinusField : Operation::Common,
+                data->Tolerance(),
+                512 * std::numeric_limits<double>::epsilon() * magnitude);
+    const auto complement =
+      CheckCapAttachment(opposite, resolution, maximumDepth, maximumCells, maximumTests);
+    report.ComplementCapsAttached = complement.Resolved;
+    if (!complement.Resolved)
+    {
+      report.Reason = "complement_caps_unresolved: " + complement.Reason;
+      return report;
+    }
+    const auto&       ref   = retained.Reference;
+    const auto&       other = complement.Reference;
+    const auto&       loops = ref.Surface.BoundaryLoops;
+    std::set<Segment> boundaryEdges;
+    for (const auto& loop : loops)
+      for (size_t i = 1; i < loop.size(); ++i)
+        boundaryEdges.insert(std::minmax(loop[i - 1], loop[i]));
+    std::map<RootKey, int> originRoots;
+    for (size_t i = 0; i < ref.Surface.GridEdges.size(); ++i)
+      originRoots.emplace(ref.Surface.GridEdges[i], int(i));
+    require(other.Surface.GridEdges.size() == originRoots.size(),
+            "Dual reference root counts differ");
+    std::vector<int> otherRoots;
+    for (const auto& origin : other.Surface.GridEdges)
+    {
+      const auto found = originRoots.find(origin);
+      require(found != originRoots.end(), "Dual reference root provenance differs");
+      otherRoots.push_back(found->second);
+    }
+    auto owners = [&](const CapAttachment& attachment, const std::vector<int>* mapping) {
+      std::map<Segment, int> result;
+      for (size_t i = 0; i < attachment.Reference.Triangles.size(); ++i)
+      {
+        const int cap = attachment.ReferenceTriangleCaps[i];
+        if (cap < 0)
+          continue;
+        const auto& t = attachment.Reference.Triangles[i];
+        for (int j = 0; j < 3; ++j)
+        {
+          int a = t[size_t(j)], b = t[size_t((j + 1) % 3)];
+          if (size_t(a) >= attachment.Reference.Surface.Nodes.size()
+              || size_t(b) >= attachment.Reference.Surface.Nodes.size())
+            continue;
+          if (mapping)
+          {
+            a = (*mapping)[size_t(a)];
+            b = (*mapping)[size_t(b)];
+          }
+          const Segment edge = std::minmax(a, b);
+          if (!boundaryEdges.count(edge))
+            continue;
+          require(result.emplace(edge, cap).second, "Ambiguous reference contour cap owner");
+        }
+      }
+      require(result.size() == boundaryEdges.size(), "Reference contour cap owner missing");
+      return result;
+    };
+    const auto                        currentOwners = owners(retained, nullptr),
+                                      otherOwners   = owners(complement, &otherRoots);
+    std::vector<std::vector<CapPair>> labels;
+    std::map<int, gp_Pnt>             refAnchors;
+    for (const auto& loop : loops)
+    {
+      std::vector<CapPair> line;
+      for (size_t i = 1; i < loop.size(); ++i)
+      {
+        const Segment edge = std::minmax(loop[i - 1], loop[i]);
+        const int     a = currentOwners.at(edge), b = otherOwners.at(edge);
+        const int     side = retained.ReferenceCapSides[size_t(a)];
+        require(side == complement.ReferenceCapSides[size_t(b)], "Dual cap physical sides differ");
+        line.push_back({side, a, b});
+      }
+      for (size_t i = 0; i < line.size(); ++i)
+        if (line[i] != line[(i + line.size() - 1) % line.size()])
+          refAnchors.emplace(loop[i], ref.Nodes[size_t(loop[i])]);
+      labels.push_back(std::move(line));
+    }
+    std::array<int, 12> refCounts{}, sourceCounts{};
+    const auto          referenceRoots = rootLabels(refAnchors, low, high, reserve, refCounts);
+    Map                 aEdges, bEdges, aVertices;
+    TopExp::MapShapes(face, TopAbs_EDGE, aEdges);
+    TopExp::MapShapes(opposite.Faces.back(), TopAbs_EDGE, bEdges);
+    TopExp::MapShapes(face, TopAbs_VERTEX, aVertices);
+    std::map<int, gp_Pnt> sourcePoints;
+    for (int i = 1; i <= aVertices.Extent(); ++i)
+      sourcePoints.emplace(i - 1, BRep_Tool::Pnt(TopoDS::Vertex(aVertices(i))));
+    const auto sourceRoots = rootLabels(sourcePoints, low, high, reserve, sourceCounts);
+    require(refCounts == sourceCounts, "Native/reference ordered box-root counts differ");
+    require(int(referenceRoots.size()) == copy.BoxEdgeRootCount,
+            "Native/reference box-root anchors differ");
+    std::map<ArcKey, int>                            arcIds;
+    std::vector<std::vector<std::pair<ArcKey, int>>> referenceKeys;
+    for (size_t wire = 0; wire < loops.size(); ++wire)
+    {
+      const auto& loop  = loops[wire];
+      const auto& line  = labels[wire];
+      size_t      start = 0;
+      while (start < line.size() && line[start] == line[(start + line.size() - 1) % line.size()])
+        ++start;
+      const bool closed = start == line.size();
+      if (closed)
+        start = 0;
+      std::vector<std::pair<ArcKey, int>> key;
+      size_t                              done = 0;
+      while (done < line.size())
+      {
+        const size_t begin = (start + done) % line.size();
+        size_t       span  = 1;
+        while (done + span < line.size() && line[(begin + span) % line.size()] == line[begin])
+          ++span;
+        const size_t end       = (begin + span) % line.size();
+        int          direction = 1;
+        RootKey      a{-1, -1}, b{-1, -1};
+        if (!closed)
+        {
+          require(referenceRoots.count(loop[begin]) && referenceRoots.count(loop[end]),
+                  "Reference arc endpoint lacks root anchor");
+          a = referenceRoots.at(loop[begin]);
+          b = referenceRoots.at(loop[end]);
+        }
+        auto descriptor = arcKey(line[begin], a, b, direction);
+        if (closed)
+        {
+          std::vector<gp_Pnt> path;
+          for (size_t i = 0; i <= span; ++i)
+            path.push_back(ref.Nodes[size_t(loop[(begin + i) % line.size()])]);
+          direction = areaDirection(path, line[begin][0], reserve);
+        }
+        require(arcIds.emplace(descriptor, -1).second, "Nonunique reference contour identity");
+        key.emplace_back(descriptor, direction);
+        done += span;
+      }
+      referenceKeys.push_back(std::move(key));
+    }
+    int next = 0;
+    for (auto& entry : arcIds)
+      entry.second = next++;
+    report.ReferenceArcCount  = next;
+    report.ReferenceWireCount = int(loops.size());
+    require(aEdges.Extent() == next && aEdges.Extent() == bEdges.Extent(),
+            "Native/reference contour arc counts differ");
+    const auto       ac = curves(aEdges), bc = curves(bEdges);
+    const auto       aOwners = seamOwners(copy, aEdges), bOwners = seamOwners(opposite, bEdges);
+    std::vector<int> matching(ac.size(), -1), directions(ac.size(), 1), oppositeUsed(bc.size(), 0),
+      used(size_t(next), 0);
+    Correspondence samples;
+    for (size_t i = 0; i < ac.size(); ++i)
+    {
+      int otherEdge = -1;
+      for (size_t j = 0; j < bc.size(); ++j)
+      {
+        require(report.Comparisons < maximumTests, "Dual contour comparison budget exhausted");
+        ++report.Comparisons;
+        for (int dir : {1, -1})
+        {
+          if (ac[i].Points.front().Distance(dir > 0 ? bc[j].Points.front() : bc[j].Points.back())
+                > retained.MatchingTolerance
+              || ac[i].Points.back().Distance(dir > 0 ? bc[j].Points.back() : bc[j].Points.front())
+                   > retained.MatchingTolerance)
+            continue;
+          auto candidate = bc[j];
+          if (dir < 0)
+          {
+            auto points = candidate.Points;
+            std::reverse(points.begin(), points.end());
+            candidate = curveRecord(std::move(points));
+          }
+          const double deviation = curveBound(ac[i], candidate, reserve, samples);
+          report.CurveSamples    = samples.SampleTests;
+          if (deviation > retained.MatchingTolerance)
+            continue;
+          require(otherEdge < 0 && !oppositeUsed[j], "Ambiguous dual contour match");
+          otherEdge = int(j);
+        }
+      }
+      require(otherEdge >= 0, "Native contour lacks a complement trace");
+      oppositeUsed[size_t(otherEdge)] = 1;
+      const int a                     = retained.ReferenceCaps[size_t(aOwners[i])],
+                b    = complement.ReferenceCaps[size_t(bOwners[size_t(otherEdge)])],
+                side = retained.ReferenceCapSides[size_t(a)];
+      require(side == complement.ReferenceCapSides[size_t(b)], "Native dual contour sides differ");
+      TopoDS_Vertex first, last;
+      TopExp::Vertices(TopoDS::Edge(aEdges(int(i) + 1)), first, last);
+      RootKey f{-1, -1}, l{-1, -1};
+      if (!first.IsSame(last))
+      {
+        const int fi = aVertices.FindIndex(first) - 1, li = aVertices.FindIndex(last) - 1;
+        require(sourceRoots.count(fi) && sourceRoots.count(li),
+                "Native contour endpoint lacks a box-root anchor");
+        f = sourceRoots.at(fi);
+        l = sourceRoots.at(li);
+      }
+      auto descriptor = arcKey({side, a, b}, f, l, directions[i]);
+      if (first.IsSame(last))
+        directions[i] = areaDirection(ac[i].Points, side, reserve);
+      const auto found = arcIds.find(descriptor);
+      require(found != arcIds.end(), "Native dual cap/root identity has no reference arc");
+      require(!used[size_t(found->second)]++, "Nonbijective native contour identity");
+      matching[i] = found->second;
+    }
+    report.CurveSamples      = samples.SampleTests;
+    report.SeamReferenceArcs = matching;
+    std::map<WireKey, int> referenceWires;
+    for (size_t i = 0; i < referenceKeys.size(); ++i)
+    {
+      WireKey key;
+      for (const auto& arc : referenceKeys[i])
+        key.push_back((arcIds.at(arc.first) + 1) * arc.second);
+      std::rotate(key.begin(), std::min_element(key.begin(), key.end()), key.end());
+      require(referenceWires.emplace(key, int(i)).second, "Ambiguous reference directed wire");
+    }
+    std::vector<int> parent(ref.Surface.Nodes.size());
+    for (size_t i = 0; i < parent.size(); ++i)
+      parent[i] = int(i);
+    auto root = [&](int i) {
+      while (parent[size_t(i)] != i)
+      {
+        parent[size_t(i)] = parent[size_t(parent[size_t(i)])];
+        i                 = parent[size_t(i)];
+      }
+      return i;
+    };
+    for (const auto& t : ref.Surface.Triangles)
+    {
+      parent[size_t(root(t[0]))] = root(t[1]);
+      parent[size_t(root(t[1]))] = root(t[2]);
+    }
+    std::map<int, int> components;
+    for (size_t i = 0; i < parent.size(); ++i)
+      components.emplace(root(int(i)), 0);
+    for (auto& entry : components)
+      entry.second = report.ReferenceSurfaceComponentCount++;
+    std::set<int> usedWires;
+    for (const auto& key : wires(face, aEdges, matching, directions, false))
+    {
+      const auto found = referenceWires.find(key);
+      require(found != referenceWires.end() && usedWires.insert(found->second).second,
+              "Native/reference directed wire cycles differ");
+      report.WireReferenceLoops.push_back(found->second);
+      report.WireSurfaceComponents.push_back(
+        components.at(root(loops[size_t(found->second)].front())));
+    }
+    require(usedWires.size() == loops.size(), "Native/reference wire bijection incomplete");
+    report.Resolved = true;
+    report.Reason   = "trim_wires_attached";
   }
   catch (const Standard_NotImplemented& error)
   {

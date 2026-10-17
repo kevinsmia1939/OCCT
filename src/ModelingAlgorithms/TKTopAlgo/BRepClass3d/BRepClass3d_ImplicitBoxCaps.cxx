@@ -71,8 +71,7 @@ BRepClass3d_ImplicitBox::CapAttachment BRepClass3d_ImplicitBox::CheckCapAttachme
   std::istringstream input(record.str());
   Boundary           copy;
   BRepClass3d_ImplicitBoxIO::Read(input, copy);
-  const auto reference =
-    CheckRegionTopology(copy.Faces.back(), resolution, maximumDepth, maximumCells);
+  auto reference = CheckRegionTopology(copy.Faces.back(), resolution, maximumDepth, maximumCells);
   report.RegionReferenceResolved = reference.ClosedReferenceManifold;
   if (!report.RegionReferenceResolved)
   {
@@ -150,7 +149,8 @@ BRepClass3d_ImplicitBox::CapAttachment BRepClass3d_ImplicitBox::CheckCapAttachme
       group.Triangles.push_back(i);
     }
   report.ReferenceCapCount = int(groups.size());
-  const size_t caps        = copy.Faces.size() - 1;
+  report.ReferenceTriangleCaps.assign(size_t(count), -1);
+  const size_t caps = copy.Faces.size() - 1;
   if (caps != groups.size())
   {
     report.Reason = "stored_reference_cap_region_counts_differ";
@@ -173,6 +173,7 @@ BRepClass3d_ImplicitBox::CapAttachment BRepClass3d_ImplicitBox::CheckCapAttachme
     + field.LipschitzBound() * reserve;
   report.RequiredClearance = graph.ReferenceSeamBound + graph.CurveDeviationBound
                              + graph.CapParameterDeviationBound + graph.MatchingTolerance;
+  report.MatchingTolerance = graph.MatchingTolerance;
   std::vector<std::vector<std::pair<gp_Pnt, gp_Pnt>>> segments(caps);
   std::vector<int>                                    sides;
   for (size_t cap = 0; cap < caps; ++cap)
@@ -220,6 +221,9 @@ BRepClass3d_ImplicitBox::CapAttachment BRepClass3d_ImplicitBox::CheckCapAttachme
   for (auto& entry : groups)
   {
     auto& group = entry.second;
+    report.ReferenceCapSides.push_back(group.Side);
+    for (int index : group.Triangles)
+      report.ReferenceTriangleCaps[size_t(index)] = groupIndex;
     std::stable_sort(group.Triangles.begin(), group.Triangles.end(), [&](int a, int b) {
       return depth[size_t(a)] > depth[size_t(b)];
     });
@@ -284,7 +288,8 @@ BRepClass3d_ImplicitBox::CapAttachment BRepClass3d_ImplicitBox::CheckCapAttachme
     }
     ++groupIndex;
   }
-  report.Resolved = true;
-  report.Reason   = "cap_regions_attached";
+  report.Resolved  = true;
+  report.Reason    = "cap_regions_attached";
+  report.Reference = std::move(reference);
   return report;
 }

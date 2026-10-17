@@ -109,11 +109,32 @@ public:
     size_t WitnessTests = 0, SegmentTests = 0;
     int ReferenceCapCount = 0, ReferenceShellCount = 0, ReferenceRegionCount = 0;
     double RequiredClearance = 0;
+    double MatchingTolerance = 0;
     // Source cap order; reference labels are transient, NOT persistent names.
     std::vector<int> ReferenceCaps, ReferenceShells, ReferenceRegions;
     std::vector<gp_Pnt> Witnesses;
     std::vector<double> Clearances;
+    RegionTopologyWitness Reference;
+    std::vector<int> ReferenceTriangleCaps, ReferenceCapSides;
   };
+
+  struct TrimAttachment
+  {
+    bool Resolved=false, CapRegionsAttached=false, ComplementCapsAttached=false;
+    std::string Reason;
+    size_t Comparisons=0, CurveSamples=0;
+    int ReferenceArcCount=0, ReferenceWireCount=0, ReferenceSurfaceComponentCount=0;
+    std::vector<int> SeamReferenceArcs; //!< Unique implicit-edge traversal order.
+    std::vector<int> WireReferenceLoops, WireSurfaceComponents; //!< Native direct wire order.
+  };
+
+  //! Dual retained/complement cap-region identities and ordered box-edge-root
+  //! anchors identify contour arcs. Require a bijection and equal full directed
+  //! cyclic native/reference wires. This attaches trim boundaries ONLY, not
+  //! the entire implicit face or a native shell/solid; no validity promotion.
+  Standard_EXPORT static TrimAttachment CheckTrimAttachment(const Boundary&,
+    int theResolution=32, int theMaximumDepth=16, size_t theMaximumCells=4000000,
+    size_t theMaximumTests=2000000);
 
   //! Attach stored conventional cap REGIONS to the closed homotopy reference
   //! using strict common F/L retained points, source face classification and
