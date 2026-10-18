@@ -359,8 +359,8 @@ BRepClass3d_ImplicitBox::PointClassification BRepClass3d_ImplicitBox::Classify(
   const gp_Pnt&   point,
   double          tolerance)
 {
-  require(boundary.Policy == CornerPolicy::Reject,
-          "Corner-aware regularized distance classification is not implemented");
+  require(boundary.Policy == CornerPolicy::Reject || boundary.Policy == CornerPolicy::Regularized,
+          "Unknown mathematical-region corner policy");
   if (!std::isfinite(tolerance) || tolerance <= 0)
     throw Standard_DomainError("Classification distance tolerance must be finite and positive");
   require(!boundary.Faces.empty(), "Classification requires a constructed native mixed boundary");
@@ -439,11 +439,69 @@ BRepClass3d_ImplicitBox::PointClassification BRepClass3d_ImplicitBox::Classify(
   else
     result.DistanceLowerBound =
       std::max(boxOutsideDistance, signResolved && !retained ? fieldDistance : 0.);
+  CornerModel corners;
+  double cornerReserve = coordinateReserve;
+  if (boundary.Policy == CornerPolicy::Regularized)
+  {
+    const double span = std::min({high.X() - low.X(), high.Y() - low.Y(), high.Z() - low.Z()});
+    corners = CheckCornerGerms(face, span / 8);
+    require(corners.Resolved, "Regularized classification needs checked local corner identities");
+    cornerReserve = std::max(coordinateReserve, corners.CoordinateReserve);
+    for (size_t index = 0; index < 8; ++index)
+    {
+      const auto& corner = corners.Corners[index];
+      if (!corner.ExactZero || corner.Kind != (negative ? CornerKind::PositiveCone
+                                                       : CornerKind::NegativeCone))
+        continue;
+      double exact = 0;
+      gp_Vec jet;
+      require(field.LatticeJet(corner.Anchor, exact, jet) && exact == 0,
+              "Excluded corner lost its exact field identity");
+      double inward = std::numeric_limits<double>::infinity();
+      for (int axis = 0; axis < 3; ++axis)
+        inward = std::min(inward, jet.Coord(axis + 1) * (index & (1 << axis) ? -1 : 1)
+                                  * (negative ? 1 : -1));
+      const double error = hessian * 8 * cornerReserve
+                           + 1024 * std::numeric_limits<double>::epsilon() * lipschitz;
+      // For inward d, G(a+d) >= m*|d| - H*|d|^2/2 since G(a)=0 exactly.
+      // Thus the entire clipped ball of radius m/H has G>0 except at a.
+      // Its anchor is NOT in closure(interior(material)). This is a region
+      // exclusion bound, not residual-as-distance or a nearest-point estimate.
+      const double radius = std::max(0., std::min(span / 8, (inward - 4 * error) / hessian)
+                                           - 32 * cornerReserve);
+      const double exclusion = std::max(0., radius - distance(point, corner.Anchor)
+                                            - 16 * cornerReserve);
+      result.DistanceLowerBound = std::max(result.DistanceLowerBound, exclusion);
+      if (exclusion > tolerance + coordinateReserve)
+      {
+        result.State = PointState::Outside;
+        return result;
+      }
+    }
+  }
   if (result.DistanceLowerBound > tolerance + coordinateReserve)
   {
     result.State = insideBox && retained && signResolved ? PointState::Inside : PointState::Outside;
     return result;
   }
+  if (boundary.Policy == CornerPolicy::Regularized)
+    for (const auto& corner : corners.Corners)
+    {
+      // Checked split/retained cones have strict material points arbitrarily
+      // close inside the box. Their exact corner is therefore a true boundary
+      // witness. Never use an excluded closed-inequality point as a witness.
+      if (!corner.ExactZero || corner.Kind == (negative ? CornerKind::PositiveCone
+                                                       : CornerKind::NegativeCone))
+        continue;
+      const double upper = distance(point, corner.Anchor) + 16 * cornerReserve;
+      if (upper > tolerance)
+        continue;
+      result.State = PointState::NearBoundary;
+      result.HasBoundaryWitness = true;
+      result.WitnessFirst = result.WitnessLast = corner.Anchor;
+      result.WitnessDistanceUpperBound = upper;
+      return result;
+    }
   // A retained point on a box side is an actual boundary witness even when a
   // gyroid root is absent nearby. Test all six clipped orthogonal cap points.
   for (int axis = 1; axis <= 3; ++axis)

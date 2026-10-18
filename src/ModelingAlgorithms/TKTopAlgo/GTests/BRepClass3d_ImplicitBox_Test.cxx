@@ -1112,7 +1112,9 @@ TEST(BRepClass3d_ImplicitBox, DefaultCornerBoundaryUsesSharedNativeTopology)
     EXPECT_THROW(BRepMesh_ImplicitBoundary::Prepare(restored), Standard_NotImplemented);
     EXPECT_THROW(BRepMesh_ImplicitBoundary::CheckCoverage(restored, {}), Standard_NotImplemented);
     EXPECT_THROW(Ops::CheckCapGeometry(restored, {}), Standard_NotImplemented);
-    EXPECT_THROW(Ops::Classify(result, gp_Pnt(0, 0, 0), .1), Standard_NotImplemented);
+    EXPECT_EQ(Ops::Classify(result, gp_Pnt(0, 0, 0), .1).State,
+              operation == Ops::Operation::Common ? Ops::PointState::Outside
+                                                   : Ops::PointState::NearBoundary);
   }
   EXPECT_FALSE(TopoDS_Iterator(source).More());
   EXPECT_TRUE(BRepCheck_Analyzer(operand).IsValid());
@@ -1191,6 +1193,87 @@ TEST(BRepClass3d_ImplicitBox, CornerTopologyIORejectsPolicyCorruptionAtomically)
   std::ostringstream after;
   BRepClass3d_ImplicitBoxIO::Write(source, after);
   EXPECT_EQ(after.str(), record.str());
+}
+
+TEST(BRepClass3d_ImplicitBox, RegularizedCornerDistanceExcludesIsolatedClosedContacts)
+{
+  using Ops = BRepClass3d_ImplicitBox;
+  const auto face = topologyField(gp_Pnt(), gp_Pnt(10, 10, 10), 0);
+  const auto operand = BRepPrimAPI_MakeBox(10, 10, 10).Shape();
+  for (auto operation : {Ops::Operation::Common, Ops::Operation::BoxMinusField})
+  {
+    const auto source = Ops::Build(face, operand, operation, .1, 512, Ops::CornerPolicy::Regularized);
+    const int excluded = operation == Ops::Operation::Common ? 0 : 7;
+    for (int corner = 0; corner < 8; ++corner)
+    {
+      const gp_Pnt anchor(corner & 1 ? 10 : 0, corner & 2 ? 10 : 0, corner & 4 ? 10 : 0);
+      const auto result = Ops::Classify(source, anchor, .1);
+      const auto local = Ops::ClassifyCornerGerm(face, corner, anchor, operation);
+      ASSERT_TRUE(local.Resolved);
+      EXPECT_TRUE(local.ClosedRetained);
+      if (corner == excluded)
+      {
+        EXPECT_EQ(result.State, Ops::PointState::Outside);
+        EXPECT_FALSE(result.HasBoundaryWitness);
+        EXPECT_GT(result.DistanceLowerBound, .1);
+        EXPECT_LT(result.DistanceLowerBound, 5); // An independently known edge root is 5 mm away.
+        EXPECT_FALSE(local.RegularizedRetained);
+        auto near = anchor;
+        near.SetX(near.X() + (corner == 0 ? -.02 : .02));
+        const auto external = Ops::Classify(source, near, .1);
+        EXPECT_EQ(external.State, Ops::PointState::Outside);
+        EXPECT_GT(external.DistanceLowerBound, .1); // Not merely distance .02 to the box.
+        const auto coarse = Ops::Classify(source, anchor, 1);
+        EXPECT_EQ(coarse.State, Ops::PointState::Unresolved);
+        EXPECT_FALSE(coarse.HasBoundaryWitness);
+      }
+      else
+      {
+        EXPECT_EQ(result.State, Ops::PointState::NearBoundary);
+        ASSERT_TRUE(result.HasBoundaryWitness);
+        EXPECT_EQ(result.WitnessFirst.Distance(anchor), 0);
+        EXPECT_EQ(result.WitnessLast.Distance(anchor), 0);
+        EXPECT_LE(result.WitnessDistanceUpperBound, .1);
+        EXPECT_TRUE(local.RegularizedRetained);
+      }
+    }
+    EXPECT_EQ(Ops::Classify(source, gp_Pnt(8, 8, 8), .1).State,
+              excluded == 0 ? Ops::PointState::Inside : Ops::PointState::Outside);
+    EXPECT_EQ(Ops::Classify(source, gp_Pnt(2, 2, 2), .1).State,
+              excluded == 0 ? Ops::PointState::Outside : Ops::PointState::Inside);
+    const auto root = Ops::Classify(source, gp_Pnt(5, 5, 5), .1);
+    EXPECT_EQ(root.State, Ops::PointState::NearBoundary);
+    EXPECT_GT(root.WitnessBracketWidth, 0);
+    EXPECT_LE(root.WitnessBracketWidth, .1 / 256);
+    EXPECT_TRUE(source.SeamBoundVerified);
+  }
+}
+
+TEST(BRepClass3d_ImplicitBox, RegularizedClassificationScalingRestoreAndSourceImmutability)
+{
+  using Ops = BRepClass3d_ImplicitBox;
+  for (double scale : {.1, 1., 2.})
+  {
+    const gp_Pnt low(-10 * scale, 10 * scale, -10 * scale);
+    const gp_Pnt high(low.XYZ() + gp_XYZ(10, 10, 10) * scale);
+    const auto source = Ops::Build(topologyField(low, high, 0, scale),
+      BRepPrimAPI_MakeBox(low, high).Shape(), Ops::Operation::Common,
+      .1 * scale, 512, Ops::CornerPolicy::Regularized);
+    std::ostringstream before, after;
+    BRepClass3d_ImplicitBoxIO::Write(source, before);
+    std::istringstream input(before.str());
+    Ops::Boundary restored;
+    BRepClass3d_ImplicitBoxIO::Read(input, restored);
+    const auto scaled = Ops::Classify(restored, low, .1 * scale);
+    EXPECT_EQ(scaled.State, Ops::PointState::Outside);
+    EXPECT_GT(scaled.DistanceLowerBound, .1 * scale);
+    const auto fixed = Ops::Classify(restored, low, .1);
+    EXPECT_EQ(fixed.State, scale == .1 ? Ops::PointState::Unresolved : Ops::PointState::Outside);
+    EXPECT_FALSE(restored.SeamBoundVerified);
+    BRepClass3d_ImplicitBoxIO::Write(source, after);
+    EXPECT_EQ(before.str(), after.str());
+    EXPECT_THROW(Ops::Classify(restored, low, 0), Standard_DomainError);
+  }
 }
 
 TEST(BRepClass3d_ImplicitBox, UnsupportedInputsRejectRatherThanReturnPartialBoundary)
