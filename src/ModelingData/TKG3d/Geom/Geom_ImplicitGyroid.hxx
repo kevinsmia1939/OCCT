@@ -15,6 +15,14 @@ public:
   Standard_EXPORT gp_Vec Gradient(const gp_Pnt& thePoint) const override;
   Standard_EXPORT double LipschitzBound() const override;
 
+  //! Recognize EXACT binary-rational quarter-period coordinates, not nearby
+  //! samples. Trigonometric factors are then integers; the gradient still uses
+  //! the numerical wave number. Does not change Value/Gradient evaluation.
+  //! Returns false without changing outputs if any coordinate is not recognized.
+  Standard_EXPORT bool LatticeJet(const gp_Pnt& thePoint,
+                                  double& theValue,
+                                  gp_Vec& theGradient) const;
+
   double Period() const { return myPeriod; }
 
   double IsoValue() const { return myIsoValue; }

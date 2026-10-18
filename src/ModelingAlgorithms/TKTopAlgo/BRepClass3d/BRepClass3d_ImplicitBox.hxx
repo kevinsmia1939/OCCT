@@ -62,6 +62,56 @@ public:
     gp_Pnt UnresolvedMinimum, UnresolvedMaximum;
   };
 
+  enum class CornerKind
+  {
+    Unresolved,
+    Positive,
+    Negative,
+    PositiveCone,
+    NegativeCone,
+    SplitCone
+  };
+
+  struct CornerGerm
+  {
+    CornerKind Kind = CornerKind::Unresolved;
+    bool ExactZero = false;
+    gp_Pnt Anchor, Minimum, Maximum;
+    std::array<double, 3> InwardDerivativeLower{}, InwardDerivativeUpper{};
+    double Radius = 0; //!< Local neighborhood edge length, NOT an approximation/error bound.
+    std::string Reason;
+  };
+
+  struct CornerModel
+  {
+    bool Resolved = false; //!< Local corner neighborhoods ONLY, not strict stratified regularity.
+    std::array<CornerGerm, 8> Corners;
+    int ExactZeroCount = 0, SplitCount = 0;
+    double CoordinateReserve = 0, HessianBound = 0;
+  };
+
+  struct CornerMembership
+  {
+    bool Resolved = false, OnField = false;
+    bool ClosedRetained = false, RegularizedRetained = false;
+    std::string Reason;
+  };
+
+  //! Isolate mesh-free box-corner neighborhoods with uniform-sign F or exact
+  //! quarter-period zeros and nonzero signed coordinate derivatives throughout.
+  //! Does NOT relax CheckRegularity or enable Build/native solid construction.
+  //! Engineering reserves, not directed intervals. Nonrecognized near-zeros,
+  //! tangent coordinate directions and exhausted spatial precision stay unresolved.
+  Standard_EXPORT static CornerModel CheckCornerGerms(const TopoDS_Face&,
+                                                       double theMaximumRadius = 0.1);
+
+  //! Local membership, not a distance-tolerant whole-solid classifier. Reports
+  //! closed inequalities separately from closure-of-interior regularization:
+  //! an isolated zero corner belongs only to the former. Outside the checked
+  //! neighborhood or uncertain field sign returns unresolved, never Outside.
+  Standard_EXPORT static CornerMembership ClassifyCornerGerm(const TopoDS_Face&,
+    int theCorner, const gp_Pnt&, Operation, double theMaximumRadius = 0.1);
+
   struct Correspondence
   {
     bool        Resolved = false, RegularityResolved = false;

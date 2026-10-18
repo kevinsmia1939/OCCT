@@ -1388,6 +1388,165 @@ TEST(BRepClass3d_ImplicitBox, TopologyIORejectsMalformedRecordsAtomicallyAndOmit
   source.Shape.Locked(false);
 }
 
+TEST(BRepClass3d_ImplicitBox, ExactQuarterPeriodJetDoesNotSnapNearbyCoordinates)
+{
+  Geom_ImplicitGyroid field(10, 0);
+  double value = 17;
+  gp_Vec gradient(3, 4, 5);
+  const double samples[][3] = {{0, 0, 1}, {2.5, 1, 0}, {5, 0, -1}, {7.5, -1, 0},
+                              {10, 0, 1}, {-10, 0, 1}, {2500000, 0, 1}};
+  const double k = 2 * std::acos(-1.) / field.Period();
+  for (const auto& sample : samples)
+  {
+    ASSERT_TRUE(field.LatticeJet(gp_Pnt(sample[0], 0, 0), value, gradient));
+    EXPECT_EQ(value, sample[1]);
+    EXPECT_DOUBLE_EQ(gradient.X(), k * sample[2]);
+    EXPECT_DOUBLE_EQ(gradient.Y(), k);
+    EXPECT_DOUBLE_EQ(gradient.Z(), k * sample[2]);
+  }
+  for (double coordinate : {std::nextafter(0., 1.), std::nextafter(10., 11.),
+                            std::nextafter(10., 9.), .123, 2500002.5})
+  {
+    value = 17;
+    gradient = gp_Vec(3, 4, 5);
+    EXPECT_FALSE(field.LatticeJet(gp_Pnt(coordinate, 0, 0), value, gradient));
+    EXPECT_EQ(value, 17);
+    EXPECT_EQ(gradient.X(), 3);
+    EXPECT_EQ(gradient.Y(), 4);
+    EXPECT_EQ(gradient.Z(), 5);
+  }
+  for (double period : {1.e-200, 10., 1.e200})
+  {
+    Geom_ImplicitGyroid scaled(period, 0);
+    ASSERT_TRUE(scaled.LatticeJet(gp_Pnt(period, period, period), value, gradient));
+    EXPECT_EQ(value, 0);
+    EXPECT_GT(gradient.X(), 0);
+    EXPECT_FALSE(scaled.LatticeJet(gp_Pnt(std::nextafter(period, 0.), period, period), value, gradient));
+  }
+  EXPECT_THROW(field.LatticeJet(gp_Pnt(std::numeric_limits<double>::infinity(), 0, 0),
+                                value, gradient), Standard_DomainError);
+}
+
+TEST(BRepClass3d_ImplicitBox, DefaultGyroidCornerGermsAndRegularizedMaterialAreSeparate)
+{
+  using Ops = BRepClass3d_ImplicitBox;
+  for (double scale : {.001, 1., 2.})
+    for (bool moved : {false, true})
+    {
+      const gp_XYZ shift = moved ? gp_XYZ(-10 * scale, -10 * scale, 10 * scale) : gp_XYZ();
+      const auto face = topologyField(gp_Pnt(shift), gp_Pnt(shift + gp_XYZ(10, 10, 10) * scale), 0, scale);
+      std::ostringstream before, after;
+      BRep_ImplicitIO::Write(face, before);
+      const auto model = Ops::CheckCornerGerms(face, .1 * scale);
+      ASSERT_TRUE(model.Resolved);
+      EXPECT_EQ(model.ExactZeroCount, 8);
+      EXPECT_EQ(model.SplitCount, 6);
+      for (int index = 0; index < 8; ++index)
+      {
+        const auto& corner = model.Corners[size_t(index)];
+        ASSERT_TRUE(corner.ExactZero);
+        EXPECT_GT(corner.Radius, 16 * model.CoordinateReserve);
+        EXPECT_LE(corner.Radius, .1 * scale);
+        EXPECT_EQ(corner.Kind, index == 0 ? Ops::CornerKind::PositiveCone
+                            : index == 7 ? Ops::CornerKind::NegativeCone : Ops::CornerKind::SplitCone);
+        for (auto operation : {Ops::Operation::Common, Ops::Operation::BoxMinusField})
+        {
+          const auto anchor = Ops::ClassifyCornerGerm(face, index, corner.Anchor, operation, .1 * scale);
+          ASSERT_TRUE(anchor.Resolved);
+          EXPECT_TRUE(anchor.OnField);
+          EXPECT_TRUE(anchor.ClosedRetained);
+          EXPECT_EQ(anchor.RegularizedRetained,
+                    operation == Ops::Operation::Common ? index != 0 : index != 7);
+          gp_Pnt point = corner.Anchor;
+          for (int axis = 0; axis < 3; ++axis)
+            point.SetCoord(axis + 1, point.Coord(axis + 1)
+                                     + (index & (1 << axis) ? -1 : 1) * corner.Radius / 4);
+          const auto query = Ops::ClassifyCornerGerm(face, index, point, operation, .1 * scale);
+          ASSERT_TRUE(query.Resolved);
+          EXPECT_FALSE(query.OnField);
+          const int high = (index & 1) + ((index >> 1) & 1) + ((index >> 2) & 1);
+          const bool negative = high >= 2;
+          EXPECT_EQ(query.ClosedRetained, operation == Ops::Operation::Common ? negative : !negative);
+          EXPECT_EQ(query.RegularizedRetained, query.ClosedRetained);
+          const auto outside = Ops::ClassifyCornerGerm(face, index,
+            gp_Pnt(corner.Maximum.X() + corner.Radius, corner.Anchor.Y(), corner.Anchor.Z()),
+            operation, .1 * scale);
+          EXPECT_FALSE(outside.Resolved);
+          EXPECT_EQ(outside.Reason, "outside_corner_neighborhood");
+        }
+        // Independent samples exercise the WHOLE-neighborhood derivative bounds.
+        const Geom_ImplicitGyroid field(10 * scale, 0);
+        for (int sample = 0; sample < 27; ++sample)
+        {
+          gp_Pnt point = corner.Anchor;
+          int code = sample;
+          for (int axis = 0; axis < 3; ++axis, code /= 3)
+            point.SetCoord(axis + 1, point.Coord(axis + 1)
+              + (index & (1 << axis) ? -1 : 1) * corner.Radius * (code % 3) / 2);
+          const auto gradient = field.Gradient(point);
+          for (int axis = 0; axis < 3; ++axis)
+          {
+            const double inward = gradient.Coord(axis + 1) * (index & (1 << axis) ? -1 : 1);
+            EXPECT_GE(inward, corner.InwardDerivativeLower[size_t(axis)]);
+            EXPECT_LE(inward, corner.InwardDerivativeUpper[size_t(axis)]);
+          }
+        }
+      }
+      BRep_ImplicitIO::Write(face, after);
+      EXPECT_EQ(before.str(), after.str());
+      std::istringstream saved(before.str());
+      TopoDS_Face loaded;
+      BRep_ImplicitIO::Read(saved, loaded);
+      EXPECT_EQ(Ops::CheckCornerGerms(loaded, .1 * scale).SplitCount, 6);
+      // Local corner support does NOT grant permission to the old trim builder.
+      EXPECT_THROW(Ops::Build(face,
+        BRepPrimAPI_MakeBox(gp_Pnt(shift), gp_Pnt(shift + gp_XYZ(10, 10, 10) * scale)).Shape(),
+        Ops::Operation::Common), Standard_NotImplemented);
+    }
+}
+
+TEST(BRepClass3d_ImplicitBox, CornerModelsRefuseUnrecognizedZerosTangenciesAndPrecisionLoss)
+{
+  using Ops = BRepClass3d_ImplicitBox;
+  const auto near = topologyField(gp_Pnt(std::nextafter(0., 1.), 0, 0), gp_Pnt(10, 10, 10), 0);
+  const auto unresolved = Ops::CheckCornerGerms(near);
+  EXPECT_FALSE(unresolved.Resolved);
+  EXPECT_FALSE(unresolved.Corners[0].ExactZero);
+  EXPECT_EQ(unresolved.Corners[0].Kind, Ops::CornerKind::Unresolved);
+  const auto tangent = Ops::CheckCornerGerms(topologyField(gp_Pnt(2.5, 0, 0), gp_Pnt(12.5, 10, 10), 1));
+  EXPECT_FALSE(tangent.Resolved);
+  EXPECT_EQ(tangent.ExactZeroCount, 8);
+  const auto defaultField = topologyField(gp_Pnt(), gp_Pnt(10, 10, 10), 0);
+  const auto quarter = Ops::CheckCornerGerms(topologyField(gp_Pnt(2.5, 2.5, 2.5), gp_Pnt(7.5, 7.5, 7.5), 0));
+  ASSERT_TRUE(quarter.Resolved);
+  EXPECT_EQ(quarter.ExactZeroCount, 8);
+  EXPECT_EQ(quarter.SplitCount, 6);
+  EXPECT_EQ(quarter.Corners[0].Kind, Ops::CornerKind::NegativeCone);
+  EXPECT_EQ(quarter.Corners[7].Kind, Ops::CornerKind::PositiveCone);
+  gp_Trsf move;
+  move.SetTranslation(gp_Vec(1.e-18, 0, 0));
+  EXPECT_THROW(Ops::CheckCornerGerms(TopoDS::Face(defaultField.Moved(TopLoc_Location(move)))),
+               Standard_NotImplemented);
+  EXPECT_FALSE(Ops::CheckCornerGerms(defaultField, 1.e-20).Resolved);
+  EXPECT_THROW(Ops::CheckCornerGerms(defaultField, 0), Standard_DomainError);
+  EXPECT_THROW(Ops::CheckCornerGerms(defaultField, std::numeric_limits<double>::infinity()), Standard_DomainError);
+  const TopExp_Explorer conventional(box(), TopAbs_FACE);
+  EXPECT_THROW(Ops::CheckCornerGerms(TopoDS::Face(conventional.Current())), Standard_NotImplemented);
+  const auto stable = Ops::CheckCornerGerms(topologyField(gp_Pnt(), gp_Pnt(10, 10, 10), 3));
+  ASSERT_TRUE(stable.Resolved);
+  EXPECT_EQ(stable.ExactZeroCount, 0);
+  for (const auto& corner : stable.Corners)
+    EXPECT_EQ(corner.Kind, Ops::CornerKind::Negative);
+  EXPECT_THROW(Ops::ClassifyCornerGerm(defaultField, 8, gp_Pnt(), Ops::Operation::Common), Standard_DomainError);
+  const auto model = Ops::CheckCornerGerms(defaultField);
+  const auto& corner = model.Corners[1];
+  const auto query = Ops::ClassifyCornerGerm(defaultField, 1,
+    gp_Pnt(corner.Anchor.X() - corner.Radius / 2, corner.Radius / 4, corner.Radius / 4),
+    Ops::Operation::Common);
+  EXPECT_FALSE(query.Resolved);
+  EXPECT_EQ(query.Reason, "corner_field_sign_unresolved");
+}
+
 TEST(BRepClass3d_ImplicitBox, WholeBoxStratifiedRegularityBothOperationsAndStoredTopology)
 {
   using Ops = BRepClass3d_ImplicitBox;
