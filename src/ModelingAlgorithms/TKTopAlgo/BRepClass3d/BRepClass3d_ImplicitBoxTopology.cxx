@@ -19,6 +19,16 @@ using Triangle            = std::array<int, 3>;
 using Edge                = std::pair<int, int>;
 constexpr double Roundoff = std::numeric_limits<double>::epsilon();
 
+bool exactIdentity(const TopLoc_Location& location)
+{
+  const auto matrix = location.Transformation();
+  for (int row = 1; row <= 3; ++row)
+    for (int column = 1; column <= 4; ++column)
+      if (matrix.Value(row, column) != (row == column ? 1. : 0.))
+        return false;
+  return true;
+}
+
 struct Simplex
 {
   int                   Count = 0;
@@ -297,13 +307,31 @@ BRepClass3d_ImplicitBox::TopologyWitness BRepClass3d_ImplicitBox::CheckTopology(
   int                maximumDepth,
   size_t             maximumCells)
 {
+  return CheckTopology(face, resolution, maximumDepth, maximumCells, CornerPolicy::Reject);
+}
+
+BRepClass3d_ImplicitBox::TopologyWitness BRepClass3d_ImplicitBox::CheckTopology(
+  const TopoDS_Face& face,
+  int                resolution,
+  int                maximumDepth,
+  size_t             maximumCells,
+  CornerPolicy       policy)
+{
   if (resolution < 4 || resolution > 64 || (resolution & (resolution - 1)) || maximumDepth < 0
       || maximumDepth > 16 || !maximumCells || maximumCells > 10000000)
     throw Standard_DomainError("Invalid native box topology settings");
+  if (policy != CornerPolicy::Reject && policy != CornerPolicy::Regularized)
+    throw Standard_DomainError("Unknown box topology corner policy");
+  const bool regularized = policy == CornerPolicy::Regularized;
+  // Odd subdivisions avoid systematic quarter/eighth-period interior samples;
+  // only checked BOX corners may be exact zeros in this reference policy.
+  if (regularized)
+    --resolution;
   const auto data = occ::down_cast<BRep_TImplicitFace>(face.TShape());
   if (data.IsNull() || typeid(*data) != typeid(BRep_TImplicitFace)
-      || typeid(*data->Field()) != typeid(Geom_ImplicitGyroid) || !face.Location().IsIdentity()
-      || !data->Location().IsIdentity()
+      || typeid(*data->Field()) != typeid(Geom_ImplicitGyroid)
+      || (regularized ? !exactIdentity(face.Location() * data->Location())
+                      : !face.Location().IsIdentity() || !data->Location().IsIdentity())
       || (face.Orientation() != TopAbs_FORWARD && face.Orientation() != TopAbs_REVERSED))
     throw Standard_NotImplemented("Topology witness requires an identity-placed native gyroid box");
   const auto&  field = *static_cast<const Geom_ImplicitGyroid*>(data->Field().get());
@@ -325,6 +353,20 @@ BRepClass3d_ImplicitBox::TopologyWitness BRepClass3d_ImplicitBox::CheckTopology(
       throw Standard_DomainError("Topology grid coordinate precision exhausted");
   const double fieldReserve = 2048 * Roundoff * (1 + std::abs(field.IsoValue())) + l * reserve;
   Witness      result;
+  result.Policy = policy;
+  CornerModel cornerModel;
+  if (regularized)
+  {
+    cornerModel = CheckCornerGerms(face, data->Tolerance());
+    if (!cornerModel.Resolved)
+    {
+      result.Reason = "reference_corner_germs_unresolved";
+      return result;
+    }
+    for (const auto& corner : cornerModel.Corners)
+      if (corner.ExactZero && corner.Kind != CornerKind::SplitCone)
+        result.PointContacts.push_back(corner.Anchor);
+  }
   result.Resolution             = resolution;
   result.MaximumSimplexDiameter = low.Distance(high) / resolution;
   Checker             checker{field,
@@ -340,6 +382,7 @@ BRepClass3d_ImplicitBox::TopologyWitness BRepClass3d_ImplicitBox::CheckTopology(
   auto                id   = [side](int x, int y, int z) { return (z * side + y) * side + x; };
   std::vector<gp_Pnt> points(size_t(side) * side * side);
   std::vector<double> values(points.size());
+  std::vector<int> cornerIndex(points.size(), -1);
   for (int z = 0; z <= resolution; ++z)
     for (int y = 0; y <= resolution; ++y)
       for (int x = 0; x <= resolution; ++x)
@@ -355,7 +398,20 @@ BRepClass3d_ImplicitBox::TopologyWitness BRepClass3d_ImplicitBox::CheckTopology(
                            + (high.Coord(axis) - low.Coord(axis)) * coord[axis - 1] / resolution);
         points[size_t(index)] = p;
         values[size_t(index)] = field.Value(p);
-        if (checker.Work >= maximumCells || !(std::abs(values[size_t(index)]) > fieldReserve))
+        bool fixedCorner = false;
+        if (regularized && (x == 0 || x == resolution) && (y == 0 || y == resolution)
+            && (z == 0 || z == resolution))
+        {
+          const int corner = int(x != 0) + 2 * int(y != 0) + 4 * int(z != 0);
+          if (cornerModel.Corners[size_t(corner)].ExactZero)
+          {
+            values[size_t(index)] = 0; // Exact mathematical identity, not near-zero snapping.
+            cornerIndex[size_t(index)] = corner;
+            fixedCorner = true;
+          }
+        }
+        if (checker.Work >= maximumCells
+            || (!fixedCorner && !(std::abs(values[size_t(index)]) > fieldReserve)))
         {
           result.Reason = checker.Work >= maximumCells ? "homotopy_cell_budget_exhausted"
                                                        : "reference_vertex_sign_unresolved";
@@ -365,15 +421,22 @@ BRepClass3d_ImplicitBox::TopologyWitness BRepClass3d_ImplicitBox::CheckTopology(
         }
         ++checker.Work;
         ++result.Visited[0];
-        ++result.Excluded[0];
+        if (fixedCorner)
+          ++result.FixedCornerCount;
+        else
+          ++result.Excluded[0];
       }
   std::map<Edge, int> roots;
   auto                root = [&](int a, int b) {
+    if (values[size_t(a)] == 0)
+      b = a;
+    else if (values[size_t(b)] == 0)
+      a = b;
     const Edge edge  = std::minmax(a, b);
     auto       found = roots.find(edge);
     if (found != roots.end())
       return found->second;
-    const double t     = values[size_t(a)] / (values[size_t(a)] - values[size_t(b)]);
+    const double t     = a == b ? 0 : values[size_t(a)] / (values[size_t(a)] - values[size_t(b)]);
     const int    index = int(result.Nodes.size());
     result.Nodes.emplace_back(points[size_t(a)].XYZ() * (1 - t) + points[size_t(b)].XYZ() * t);
     result.GridEdges.push_back({edge.first, edge.second});
@@ -393,6 +456,46 @@ BRepClass3d_ImplicitBox::TopologyWitness BRepClass3d_ImplicitBox::CheckTopology(
           nodes[i] = id(x + offsets[i][0], y + offsets[i][1], z + offsets[i][2]);
         for (const auto& tet : tets)
         {
+          if (regularized)
+          {
+            Simplex incident;
+            incident.Count = 4;
+            int fixed = -1;
+            double valueMagnitude = 1;
+            for (int i = 0; i < 4; ++i)
+            {
+              const int index = nodes[tet[i]];
+              incident.Points[size_t(i)] = points[size_t(index)];
+              incident.Linear[size_t(i)] = values[size_t(index)];
+              valueMagnitude = std::max(valueMagnitude, std::abs(values[size_t(index)]));
+              if (cornerIndex[size_t(index)] >= 0)
+                fixed = cornerIndex[size_t(index)];
+            }
+            if (fixed >= 0)
+            {
+              gp_Vec unit;
+              double norm = 0, condition = 0;
+              if (!direction(incident, unit, norm, condition))
+              {
+                result.Reason = "reference_corner_linear_gradient_unresolved";
+                return result;
+              }
+              const double error = 16384 * Roundoff * valueMagnitude * condition
+                                   + checker.GradientReserve;
+              const auto& germ = cornerModel.Corners[size_t(fixed)];
+              for (int axis = 0; axis < 3; ++axis)
+              {
+                const double inward = unit.Coord(axis + 1) * norm
+                                      * (fixed & (1 << axis) ? -1 : 1);
+                if (!(germ.InwardDerivativeLower[size_t(axis)] > 0 ? inward > error
+                                                                   : inward < -error))
+                {
+                  result.Reason = "reference_corner_homotopy_cone_unresolved";
+                  return result;
+                }
+              }
+            }
+          }
           // Interior grid faces/edges are NOT boundary strata. Requiring their
           // restrictions to be transverse would reject harmless tangencies to
           // an artificial grid. Each full tetrahedron instead proves
@@ -426,13 +529,15 @@ BRepClass3d_ImplicitBox::TopologyWitness BRepClass3d_ImplicitBox::CheckTopology(
           }
           Simplex cell;
           cell.Count = 4;
-          int neg[4], pos[4], n = 0, p = 0;
+          int neg[4], pos[4], n = 0, p = 0, zero = -1;
           for (int i = 0; i < 4; ++i)
           {
             const int index        = nodes[tet[i]];
             cell.Points[size_t(i)] = points[size_t(index)];
             cell.Linear[size_t(i)] = values[size_t(index)];
-            if (values[size_t(index)] < 0)
+            if (values[size_t(index)] == 0)
+              zero = index;
+            else if (values[size_t(index)] < 0)
               neg[n++] = index;
             else
               pos[p++] = index;
@@ -459,7 +564,14 @@ BRepClass3d_ImplicitBox::TopologyWitness BRepClass3d_ImplicitBox::CheckTopology(
               std::swap(b, c);
             result.Triangles.push_back({a, b, c});
           };
-          if (n == 1 || p == 1)
+          if (zero >= 0)
+          {
+            // One exact box corner per tetrahedron. Strict signs are required
+            // on both sides for a 2-D cut; isolated zeros create no fake face.
+            const int a = root(zero, zero), b = root(neg[0], pos[0]);
+            triangle(a, b, n == 2 ? root(neg[1], pos[0]) : root(neg[0], pos[1]));
+          }
+          else if (n == 1 || p == 1)
           {
             const int  a     = n == 1 ? neg[0] : pos[0];
             const int* other = n == 1 ? pos : neg;

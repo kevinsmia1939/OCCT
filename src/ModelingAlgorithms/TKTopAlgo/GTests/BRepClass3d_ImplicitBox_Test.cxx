@@ -72,6 +72,71 @@ TopoDS_Shape box()
 }
 } // namespace
 
+TEST(BRepClass3d_ImplicitBox, CornerHomotopyHasSharedReferenceVerticesAndSeparateContacts)
+{
+  using Ops = BRepClass3d_ImplicitBox;
+  auto face = topologyField(gp_Pnt(), gp_Pnt(10, 10, 10), 0);
+  for (bool reversed : {false, true})
+  {
+    if (reversed) face.Reverse();
+    const auto result = Ops::CheckTopology(face, 32, 16, 4000000, Ops::CornerPolicy::Regularized);
+    ASSERT_TRUE(result.HomotopyResolved) << result.Reason << " dim " << result.UnresolvedDimension
+      << " at " << result.UnresolvedMinimum.X() << "," << result.UnresolvedMinimum.Y()
+      << "," << result.UnresolvedMinimum.Z();
+    ASSERT_TRUE(result.ReferenceManifold) << result.Reason;
+    EXPECT_EQ(result.Resolution, 31);
+    EXPECT_EQ(result.FixedCornerCount, 8);
+    ASSERT_EQ(result.PointContacts.size(), 2u);
+    EXPECT_EQ(result.GridEdges.size(), result.Nodes.size());
+    int cornerNodes = 0;
+    std::set<std::array<int, 2>> identities;
+    for (size_t i = 0; i < result.GridEdges.size(); ++i)
+    {
+      const auto& edge = result.GridEdges[i];
+      EXPECT_TRUE(identities.insert(edge).second);
+      cornerNodes += edge[0] == edge[1];
+      for (const auto& contact : result.PointContacts)
+        EXPECT_GT(result.Nodes[i].Distance(contact), 0);
+    }
+    EXPECT_EQ(cornerNodes, 6);
+    EXPECT_FALSE(result.BoundaryLoops.empty());
+    EXPECT_FALSE(Ops::CheckTopology(face).HomotopyResolved);
+    EXPECT_FALSE(Ops::CheckTopology(face, 32, 16, 1, Ops::CornerPolicy::Regularized).HomotopyResolved);
+  }
+}
+
+TEST(BRepClass3d_ImplicitBox, CornerHomotopyScalingRestoreAndFailClosedSettings)
+{
+  using Ops = BRepClass3d_ImplicitBox;
+  for (double scale : {.1, 2.})
+  {
+    const gp_Pnt low(-10 * scale, 10 * scale, -10 * scale);
+    const gp_Pnt high(low.XYZ() + gp_XYZ(10, 10, 10) * scale);
+    const auto face = topologyField(low, high, 0, scale);
+    std::ostringstream before, after;
+    BRep_ImplicitIO::Write(face, before);
+    std::istringstream input(before.str());
+    TopoDS_Face restored;
+    BRep_ImplicitIO::Read(input, restored);
+    const auto result = Ops::CheckTopology(restored, 32, 16, 4000000, Ops::CornerPolicy::Regularized);
+    ASSERT_TRUE(result.HomotopyResolved) << result.Reason;
+    ASSERT_TRUE(result.ReferenceManifold) << result.Reason;
+    EXPECT_EQ(result.FixedCornerCount, 8);
+    EXPECT_EQ(result.PointContacts.size(), 2u);
+    BRep_ImplicitIO::Write(face, after);
+    EXPECT_EQ(before.str(), after.str());
+    EXPECT_FALSE(Ops::CheckTopology(face, 4, 0, 4000000, Ops::CornerPolicy::Regularized).HomotopyResolved);
+    EXPECT_THROW(Ops::CheckTopology(face, 31, 16, 4000000, Ops::CornerPolicy::Regularized), Standard_DomainError);
+    gp_Trsf transform;
+    transform.SetTranslation(gp_Vec(1e-12, 0, 0));
+    auto placed = face;
+    placed.Location(TopLoc_Location(transform));
+    EXPECT_THROW(Ops::CheckTopology(placed, 32, 16, 4000000, Ops::CornerPolicy::Regularized), Standard_NotImplemented);
+  }
+  const auto unknown = topologyField(gp_Pnt(), gp_Pnt(10, 10, 10), 1e-14);
+  EXPECT_FALSE(Ops::CheckTopology(unknown, 32, 16, 4000000, Ops::CornerPolicy::Regularized).HomotopyResolved);
+}
+
 TEST(BRepClass3d_ImplicitBox, WholeBoxHomotopyReferenceAndBoundaryTopology)
 {
   for (double iso : {1.45, 0.0})

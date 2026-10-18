@@ -141,10 +141,13 @@ public:
     gp_Pnt UnresolvedMinimum, UnresolvedMaximum;
     // Transient nodal-linear reference ONLY, not native topology or a .1mm mesh.
     std::vector<gp_Pnt> Nodes;
-    std::vector<std::array<int, 2>> GridEdges; //!< Origin grid-edge IDs for transient root identity.
+    std::vector<std::array<int, 2>> GridEdges; //!< Grid edge IDs; (i,i) is one exact shared corner node.
     std::vector<std::array<int, 3>> Triangles;
     std::vector<std::vector<int>> BoundaryLoops;
     std::vector<int> ComponentEuler;
+    CornerPolicy Policy = CornerPolicy::Reject;
+    int FixedCornerCount = 0;
+    std::vector<gp_Pnt> PointContacts; //!< Isolated zero-set contacts, NOT surface mesh vertices.
   };
 
   struct RegionTopologyWitness
@@ -290,6 +293,11 @@ public:
                                                        int theResolution = 32,
                                                        int theMaximumDepth = 16,
                                                        size_t theMaximumCells = 4000000);
+  //! Explicit regularized corner reference. Uses an odd grid <= requested
+  //! resolution, exact shared corner IDs and separate isolated zero contacts.
+  //! Whole-surface homotopy/reference only; no native attachment or solids.
+  Standard_EXPORT static TopologyWitness CheckTopology(const TopoDS_Face&,
+    int theResolution, int theMaximumDepth, size_t theMaximumCells, CornerPolicy);
 
   //! Re-trace a PRIVATE canonical box graph; match edge geometry, shared
   //! vertices, cap grouping and directed cyclic wires bijectively. Source
