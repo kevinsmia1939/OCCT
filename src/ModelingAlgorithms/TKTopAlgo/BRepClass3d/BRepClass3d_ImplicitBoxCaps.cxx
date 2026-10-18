@@ -71,13 +71,14 @@ BRepClass3d_ImplicitBox::CapAttachment BRepClass3d_ImplicitBox::CheckCapAttachme
   std::istringstream input(record.str());
   Boundary           copy;
   BRepClass3d_ImplicitBoxIO::Read(input, copy);
-  auto reference = CheckRegionTopology(copy.Faces.back(), resolution, maximumDepth, maximumCells);
+  auto reference = CheckRegionTopology(copy.Faces.back(), resolution, maximumDepth, maximumCells, copy.Policy);
   report.RegionReferenceResolved = reference.ClosedReferenceManifold;
   if (!report.RegionReferenceResolved)
   {
     report.Reason = "region_reference_unresolved: " + reference.Reason;
     return report;
   }
+  resolution = reference.Surface.Resolution;
   report.ReferenceShellCount             = int(reference.ComponentEuler.size());
   report.ReferenceRegionCount            = reference.RegionCount;
   const int                        count = int(reference.Triangles.size());
@@ -212,7 +213,18 @@ BRepClass3d_ImplicitBox::CapAttachment BRepClass3d_ImplicitBox::CheckCapAttachme
                    ? high.Coord(v + 1)
                    : low.Coord(v + 1)
                        + (high.Coord(v + 1) - low.Coord(v + 1)) * (iv + dv) / resolution);
-      return field.Value(q);
+      double f = field.Value(q);
+      if (copy.Policy == CornerPolicy::Regularized)
+      {
+        bool corner = true;
+        for (int axis = 1; axis <= 3; ++axis)
+          corner &= q.Coord(axis) == low.Coord(axis) || q.Coord(axis) == high.Coord(axis);
+        double exact = 0;
+        gp_Vec gradient;
+        if (corner && field.LatticeJet(q, exact, gradient) && exact == 0)
+          f = 0; // Same fixed node as L, never a rounded near-zero substitution.
+      }
+      return f;
     };
     return fu >= fv ? (1 - fu) * sample(0, 0) + (fu - fv) * sample(1, 0) + fv * sample(1, 1)
                     : (1 - fv) * sample(0, 0) + (fv - fu) * sample(0, 1) + fu * sample(1, 1);

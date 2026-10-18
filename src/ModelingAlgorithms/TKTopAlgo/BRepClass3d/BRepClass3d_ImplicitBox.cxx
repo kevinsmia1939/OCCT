@@ -1275,8 +1275,6 @@ BRepClass3d_ImplicitBox::Correspondence BRepClass3d_ImplicitBox::CheckCorrespond
   int             maximumCells,
   size_t          maximumComparisons)
 {
-  require(source.Policy == CornerPolicy::Reject,
-          "Corner-aware whole-domain trim correspondence is not implemented");
   if (maximumCells < 4 || maximumCells > 512 || (maximumCells & (maximumCells - 1))
       || !maximumComparisons || maximumComparisons > 10000000)
     throw Standard_DomainError("Invalid trim correspondence settings");
@@ -1288,7 +1286,18 @@ BRepClass3d_ImplicitBox::Correspondence BRepClass3d_ImplicitBox::CheckCorrespond
   BRepClass3d_ImplicitBoxIO::Read(input, copy);
   Correspondence report;
   const auto&    original   = copy.Faces.back();
-  report.RegularityResolved = CheckRegularity(original).Resolved;
+  if (copy.Policy == CornerPolicy::Regularized)
+  {
+    const auto witness = CheckTopology(original, 32, 16, 4000000, copy.Policy);
+    report.RegularityResolved = witness.HomotopyResolved && witness.ReferenceManifold;
+    if (!report.RegularityResolved)
+    {
+      report.Reason = "fixed_corner_homotopy_unresolved: " + witness.Reason;
+      return report;
+    }
+  }
+  else
+    report.RegularityResolved = CheckRegularity(original).Resolved;
   if (!report.RegularityResolved)
   {
     report.Reason = "field_box_regularity_unresolved";
@@ -1318,7 +1327,8 @@ BRepClass3d_ImplicitBox::Correspondence BRepClass3d_ImplicitBox::CheckCorrespond
       std::move(sides),
       original.Orientation() == TopAbs_FORWARD ? Operation::Common : Operation::BoxMinusField,
       tolerance,
-      512 * std::numeric_limits<double>::epsilon() * magnitude);
+      512 * std::numeric_limits<double>::epsilon() * magnitude,
+      copy.Policy);
     report.ReferenceSeamBound = reference.GeometricBound;
     Map aEdges, bEdges, aVertices, bVertices, aNative, bNative;
     TopExp::MapShapes(copy.Shape, TopAbs_EDGE, aEdges);
@@ -1329,7 +1339,10 @@ BRepClass3d_ImplicitBox::Correspondence BRepClass3d_ImplicitBox::CheckCorrespond
     TopExp::MapShapes(reference.Faces.back(), TopAbs_EDGE, bNative);
     if (aEdges.Extent() != bEdges.Extent() || aVertices.Extent() != bVertices.Extent()
         || copy.Faces.size() != reference.Faces.size() || copy.SeamCount != reference.SeamCount
-        || copy.BoxEdgeRootCount != reference.BoxEdgeRootCount)
+        || copy.BoxEdgeRootCount != reference.BoxEdgeRootCount
+        || copy.ExactCornerCount != reference.ExactCornerCount
+        || copy.CornerContourEnds != reference.CornerContourEnds
+        || copy.PlanarCornerContacts != reference.PlanarCornerContacts)
     {
       report.Reason = "reference_graph_counts_differ";
       return report;
@@ -1648,6 +1661,8 @@ BRepClass3d_ImplicitBox::TrimAttachment BRepClass3d_ImplicitBox::CheckTrimAttach
   size_t          maximumCells,
   size_t          maximumTests)
 {
+  require(source.Policy == CornerPolicy::Reject,
+          "Corner-aware native trim-cycle attachment is not implemented");
   if (resolution < 4 || resolution > 64 || (resolution & (resolution - 1)) || maximumDepth < 0
       || maximumDepth > 16 || !maximumCells || maximumCells > 10000000 || !maximumTests
       || maximumTests > 10000000)

@@ -123,6 +123,8 @@ public:
 
   struct Correspondence
   {
+    //! RegularityResolved uses strict strata for Reject; fixed-corner whole-box
+    //! homotopy and checked corner cones for Regularized, not zero exclusion.
     bool        Resolved = false, RegularityResolved = false;
     size_t      Comparisons = 0, SampleTests = 0;
     int         MatchedEdges = 0, MatchedVertices = 0, MatchedCaps = 0, MatchedWires = 0;

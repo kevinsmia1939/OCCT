@@ -424,6 +424,85 @@ TEST(BRepClass3d_ImplicitBox, CornerClosedReferenceScalingRestoreAndSeparateMate
   EXPECT_EQ(islands.Surface.FixedCornerCount, 0);
 }
 
+TEST(BRepClass3d_ImplicitBox, CornerStoredGraphAndCapsAttachWithoutPromotingNativeSolids)
+{
+  using Ops = BRepClass3d_ImplicitBox;
+  const auto face = topologyField(gp_Pnt(), gp_Pnt(10, 10, 10), 0);
+  const auto operand = BRepPrimAPI_MakeBox(10, 10, 10).Shape();
+  for (auto operation : {Ops::Operation::Common, Ops::Operation::BoxMinusField})
+  {
+    const auto source = Ops::Build(face, operand, operation, .1, 512, Ops::CornerPolicy::Regularized);
+    std::ostringstream before, after;
+    BRepClass3d_ImplicitBoxIO::Write(source, before);
+    const auto graph = Ops::CheckCorrespondence(source);
+    ASSERT_TRUE(graph.Resolved) << graph.Reason;
+    EXPECT_TRUE(graph.RegularityResolved);
+    EXPECT_EQ(graph.MatchedEdges, 30);
+    EXPECT_EQ(graph.MatchedVertices, 19);
+    EXPECT_EQ(graph.MatchedCaps, 12);
+    EXPECT_EQ(graph.MatchedWires, 1);
+    EXPECT_GT(graph.MinimumTangentAlignment, 0);
+    const auto caps = Ops::CheckCapAttachment(source);
+    ASSERT_TRUE(caps.Resolved) << caps.Reason;
+    EXPECT_TRUE(caps.StoredGraphResolved && caps.RegionReferenceResolved);
+    EXPECT_EQ(caps.ReferenceCapCount, 12);
+    EXPECT_EQ(caps.ReferenceShellCount, 1);
+    EXPECT_EQ(caps.ReferenceRegionCount, 1);
+    EXPECT_EQ(caps.Reference.Surface.Resolution, 31);
+    EXPECT_EQ(caps.Reference.Surface.Policy, Ops::CornerPolicy::Regularized);
+    std::set<int> mapped(caps.ReferenceCaps.begin(), caps.ReferenceCaps.end());
+    EXPECT_EQ(mapped.size(), 12u);
+    for (size_t i = 0; i < caps.Witnesses.size(); ++i)
+    {
+      EXPECT_EQ(BRepClass_FaceClassifier(source.Faces[i], caps.Witnesses[i], 1e-9).State(), TopAbs_IN);
+      const double sign = operation == Ops::Operation::Common ? -1 : 1;
+      EXPECT_GT(sign * BRep_ImplicitTool::Value(face, caps.Witnesses[i]), 0);
+      EXPECT_GT(caps.Clearances[i], caps.RequiredClearance);
+    }
+    EXPECT_THROW(Ops::CheckTrimAttachment(source), Standard_NotImplemented);
+    EXPECT_THROW(Ops::BuildNativeShells(source), Standard_NotImplemented);
+    EXPECT_THROW(Ops::BuildNativeSolids(source), Standard_NotImplemented);
+    BRepClass3d_ImplicitBoxIO::Write(source, after);
+    EXPECT_EQ(before.str(), after.str());
+    EXPECT_TRUE(source.SeamBoundVerified);
+    std::istringstream input(before.str());
+    Ops::Boundary restored;
+    BRepClass3d_ImplicitBoxIO::Read(input, restored);
+    EXPECT_TRUE(Ops::CheckCorrespondence(restored).Resolved);
+    EXPECT_FALSE(restored.SeamBoundVerified);
+  }
+}
+
+TEST(BRepClass3d_ImplicitBox, CornerAttachmentReorderingBudgetsAndSourceImmutability)
+{
+  using Ops = BRepClass3d_ImplicitBox;
+  const auto source = Ops::Build(topologyField(gp_Pnt(), gp_Pnt(10, 10, 10), 0),
+    BRepPrimAPI_MakeBox(10, 10, 10).Shape(), Ops::Operation::Common,
+    .1, 512, Ops::CornerPolicy::Regularized);
+  std::ostringstream before, after;
+  BRepClass3d_ImplicitBoxIO::Write(source, before);
+  EXPECT_FALSE(Ops::CheckCorrespondence(source, 512, 1).Resolved);
+  EXPECT_FALSE(Ops::CheckCorrespondence(source, 4).Resolved);
+  EXPECT_FALSE(Ops::CheckCapAttachment(source, 32, 16, 4000000, 1).Resolved);
+  EXPECT_FALSE(Ops::CheckCapAttachment(source, 32, 16, 1).Resolved);
+  std::istringstream input(before.str());
+  Ops::Boundary reordered;
+  BRepClass3d_ImplicitBoxIO::Read(input, reordered);
+  std::reverse(reordered.Faces.begin(), reordered.Faces.end() - 1);
+  std::reverse(reordered.Sources.begin(), reordered.Sources.end() - 1);
+  BRep_Builder builder;
+  builder.MakeCompound(reordered.Shape);
+  for (const auto& face : reordered.Faces) builder.Add(reordered.Shape, face);
+  EXPECT_TRUE(Ops::CheckCorrespondence(reordered).Resolved);
+  const auto caps = Ops::CheckCapAttachment(reordered);
+  ASSERT_TRUE(caps.Resolved) << caps.Reason;
+  for (size_t i = 0; i < caps.Witnesses.size(); ++i)
+    EXPECT_EQ(BRepClass_FaceClassifier(reordered.Faces[i], caps.Witnesses[i], 1e-9).State(), TopAbs_IN);
+  EXPECT_FALSE(reordered.SeamBoundVerified);
+  BRepClass3d_ImplicitBoxIO::Write(source, after);
+  EXPECT_EQ(before.str(), after.str());
+}
+
 TEST(BRepClass3d_ImplicitBox, ClosedRegionReferenceBothOperationsAndComplementaryVolume)
 {
   for (bool open : {false, true})
