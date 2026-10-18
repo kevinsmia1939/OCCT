@@ -112,6 +112,11 @@ bool BRep_ImplicitTool::IsInDomain(const TopoDS_Face& f, const gp_Pnt& p)
     if (local.Coord(axis) < data.Minimum().Coord(axis)
         || local.Coord(axis) > data.Maximum().Coord(axis))
       return false;
+  for (const auto& box : data.ExcludedDomains())
+    if (local.X() >= box[0].X() && local.X() <= box[1].X()
+        && local.Y() >= box[0].Y() && local.Y() <= box[1].Y()
+        && local.Z() >= box[0].Z() && local.Z() <= box[1].Z())
+      return false;
   if (const auto* patch = dynamic_cast<const BRep_TImplicitSpherePatch*>(&data))
     return gp_Vec(patch->Plane().Location(), local).Dot(gp_Vec(patch->Plane().Axis().Direction()))
            <= 0;

@@ -693,6 +693,7 @@ BRepClass3d_ImplicitBox::Boundary BRepClass3d_ImplicitBox::Build(const TopoDS_Fa
   const auto data = occ::down_cast<BRep_TImplicitFace>(fieldFace.TShape());
   require(!data.IsNull() && typeid(*data) == typeid(BRep_TImplicitFace)
             && typeid(*data->Field()) == typeid(Geom_ImplicitGyroid)
+            && data->ExcludedDomains().empty()
             && !TopoDS_Iterator(fieldFace).More()
             && (policy == CornerPolicy::Regularized
                   ? exactIdentity(fieldFace.Location() * data->Location())
@@ -1105,6 +1106,9 @@ Boundary construct(const TopoDS_Face& fieldFace,
                 "Canonical corner must match its checked cross-face contour incidence");
   TopoDS_Face implicit;
   builder.MakeImplicitFace(implicit, data->Field(), low, high, TopLoc_Location(), tolerance);
+  if (policy == CornerPolicy::Regularized)
+    implicit.TShape(new BRep_TImplicitFace(data->Field(), low, high, tolerance,
+      BRepClass3d_ImplicitBox::SurfaceCornerExclusions(implicit)));
   if (!negative)
     implicit.Reverse();
   for (const auto& loop : assemble(implicitUses, arcs, nullptr))

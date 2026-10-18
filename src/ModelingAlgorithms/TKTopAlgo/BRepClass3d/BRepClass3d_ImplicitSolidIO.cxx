@@ -46,6 +46,7 @@ const BRep_TImplicitFace& implicit(const TopoDS_Face& face)
 {
   const auto data = occ::down_cast<BRep_TImplicitFace>(face.TShape());
   require(!data.IsNull() && typeid(*data) == typeid(BRep_TImplicitFace) && !data->Field().IsNull()
+          && data->ExcludedDomains().empty()
           && typeid(*data->Field()) == typeid(Geom_ImplicitGyroid) && face.Location().IsIdentity()
           && data->Location().IsIdentity()
           && (face.Orientation() == TopAbs_FORWARD || face.Orientation() == TopAbs_REVERSED));

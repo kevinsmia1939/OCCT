@@ -50,7 +50,7 @@ BRep_ImplicitGyroidOps::Split BRep_ImplicitGyroidOps::SplitZ(const TopoDS_Face& 
                                                              int                maximumCells)
 {
   const auto data = occ::down_cast<BRep_TImplicitFace>(face.TShape());
-  if (data.IsNull() || typeid(*data) != typeid(BRep_TImplicitFace)
+  if (data.IsNull() || !data->ExcludedDomains().empty() || typeid(*data) != typeid(BRep_TImplicitFace)
       || typeid(*data->Field()) != typeid(Geom_ImplicitGyroid) || TopoDS_Iterator(face).More()
       || face.Orientation() != TopAbs_FORWARD || !face.Location().IsIdentity()
       || !data->Location().IsIdentity())

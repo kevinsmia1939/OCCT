@@ -135,6 +135,20 @@ Ops::CornerModel Ops::CheckCornerGerms(const TopoDS_Face& face, double maximumRa
   return result;
 }
 
+std::vector<std::array<gp_Pnt, 2>> Ops::SurfaceCornerExclusions(const TopoDS_Face& face)
+{
+  const auto& data = geometry(face);
+  const auto model = CheckCornerGerms(face, data.Tolerance());
+  if (!model.Resolved)
+    throw Standard_NotImplemented("Implicit surface corner exclusions unresolved");
+  std::vector<std::array<gp_Pnt, 2>> result;
+  for (const auto& corner : model.Corners)
+    if (corner.ExactZero && (corner.Kind == CornerKind::PositiveCone
+                            || corner.Kind == CornerKind::NegativeCone))
+      result.push_back({corner.Minimum, corner.Maximum});
+  return result;
+}
+
 Ops::CornerMembership Ops::ClassifyCornerGerm(const TopoDS_Face& face, int index,
                                             const gp_Pnt& point, Operation operation,
                                             double maximumRadius)

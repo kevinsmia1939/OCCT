@@ -115,6 +115,11 @@ void validate(const Boundary& boundary)
     // stored seam bounds. Geometry and topology remain the stored graph.
     corners = BRepClass3d_ImplicitBox::CheckCornerGerms(implicit, data.Tolerance());
     require(corners.Resolved && boundary.ExactCornerCount == corners.ExactZeroCount);
+    const auto exclusions = BRepClass3d_ImplicitBox::SurfaceCornerExclusions(implicit);
+    require(exclusions.size() == data.ExcludedDomains().size());
+    for (size_t i = 0; i < exclusions.size(); ++i)
+      for (int end = 0; end < 2; ++end)
+        require(distance(exclusions[i][size_t(end)], data.ExcludedDomains()[i][size_t(end)]) == 0);
     std::vector<gp_Pnt> excluded;
     int contacts = 0;
     for (const auto& corner : corners.Corners)
@@ -167,7 +172,8 @@ void validate(const Boundary& boundary)
   }
   else
     require(boundary.ExactCornerCount == 0 && boundary.CornerContourEnds == 0
-            && boundary.PlanarCornerContacts == 0 && boundary.ExcludedCornerContacts.empty());
+            && boundary.PlanarCornerContacts == 0 && boundary.ExcludedCornerContacts.empty()
+            && data.ExcludedDomains().empty());
   int rootCount = 0;
   for (const auto& vertex : nativeVertices)
   {
@@ -298,6 +304,7 @@ void BRepClass3d_ImplicitBoxIO::Write(const Boundary& boundary, Standard_OStream
                            TopLoc_Location(),
                            data.Tolerance());
   bare.Orientation(face.Orientation());
+  bare.TShape(data.EmptyCopy());
   std::ostringstream math;
   BRep_ImplicitIO::Write(bare, math);
   TopoDS_Compound payload, wires;
@@ -414,6 +421,14 @@ void BRepClass3d_ImplicitBoxIO::Read(Standard_IStream& input, Boundary& destinat
                                   raw->Maximum(),
                                   TopLoc_Location(),
                                   raw->Tolerance());
+  // Schema-2 mixed records written before explicit face restrictions stored
+  // only the box. Migrate its local mathematical domain, not its trim topology
+  // or saved seam provenance. New primitive schema-2 records retain exclusions.
+  auto exclusions = raw->ExcludedDomains();
+  if (result.Policy == BRepClass3d_ImplicitBox::CornerPolicy::Regularized && exclusions.empty())
+    exclusions = BRepClass3d_ImplicitBox::SurfaceCornerExclusions(canonical);
+  canonical.TShape(new BRep_TImplicitFace(raw->Field(), raw->Minimum(), raw->Maximum(),
+                                         raw->Tolerance(), exclusions));
   canonical.Orientation(implicit.Orientation());
   implicit = canonical;
   primitive(implicit);

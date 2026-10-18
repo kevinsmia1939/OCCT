@@ -373,7 +373,7 @@ BRep_ImplicitPlaneSection::Result BRep_ImplicitPlaneSection::Trace(const TopoDS_
                                                                    const Settings&    settings)
 {
   const auto data = occ::down_cast<BRep_TImplicitFace>(face.TShape());
-  if (data.IsNull() || typeid(*data) != typeid(BRep_TImplicitFace)
+  if (data.IsNull() || !data->ExcludedDomains().empty() || typeid(*data) != typeid(BRep_TImplicitFace)
       || typeid(*data->Field()) != typeid(Geom_ImplicitGyroid) || TopoDS_Iterator(face).More())
     throw Standard_NotImplemented("Plane section requires a childless exact native gyroid face");
   require(cells(settings.MinimumCells) && cells(settings.MaximumCells)

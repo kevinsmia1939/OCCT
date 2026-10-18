@@ -45,7 +45,7 @@ struct Sphere
 Sphere sphere(const TopoDS_Face& face)
 {
   auto data = occ::down_cast<BRep_TImplicitFace>(face.TShape());
-  if (data.IsNull() || typeid(*data) != typeid(BRep_TImplicitFace)
+  if (data.IsNull() || !data->ExcludedDomains().empty() || typeid(*data) != typeid(BRep_TImplicitFace)
       || face.Orientation() != TopAbs_FORWARD || TopoDS_Iterator(face).More()
       || typeid(*data->Field()) != typeid(Geom_ImplicitSphere))
     throw Standard_NotImplemented("Native sphere operation requires an untrimmed forward sphere");
@@ -231,7 +231,7 @@ BRep_ImplicitSphereOps::Mesh BRep_ImplicitSphereOps::Tessellate(const TopoDS_Fac
                                                                 double             deflection)
 {
   auto data = occ::down_cast<BRep_TImplicitFace>(face.TShape());
-  if (data.IsNull() || typeid(*data->Field()) != typeid(Geom_ImplicitSphere)
+  if (data.IsNull() || !data->ExcludedDomains().empty() || typeid(*data->Field()) != typeid(Geom_ImplicitSphere)
       || (typeid(*data) != typeid(BRep_TImplicitFace)
           && typeid(*data) != typeid(BRep_TImplicitSpherePatch)))
     throw Standard_NotImplemented("Analytic mesher supports only native sphere/plane patches");

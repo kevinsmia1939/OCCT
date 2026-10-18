@@ -536,6 +536,66 @@ TEST(BRepClass3d_ImplicitBox, CornerTrimCyclesAttachWithSharedCornerAndEdgeAncho
   }
 }
 
+TEST(BRepClass3d_ImplicitBox, CornerNativeFaceExcludesBothUniformContacts)
+{
+  using Ops = BRepClass3d_ImplicitBox;
+  const auto fieldFace = topologyField(gp_Pnt(), gp_Pnt(10, 10, 10), 0);
+  for (const auto operation : {Ops::Operation::Common, Ops::Operation::BoxMinusField})
+  {
+    const auto source = Ops::Build(fieldFace, BRepPrimAPI_MakeBox(10, 10, 10).Shape(),
+      operation, .1, 512, Ops::CornerPolicy::Regularized);
+    const auto& face = source.Faces.back();
+    const auto data = occ::down_cast<BRep_TImplicitFace>(face.TShape());
+    ASSERT_EQ(data->ExcludedDomains().size(), 2u);
+    const auto model = Ops::CheckCornerGerms(face);
+    for (int c = 0; c < 8; ++c)
+      EXPECT_EQ(BRep_ImplicitTool::IsInDomain(face, model.Corners[size_t(c)].Anchor), c != 0 && c != 7);
+    // Both signs are removed from the 2-D face, irrespective of which corner
+    // belongs to the regularized material's cap boundary.
+    for (const auto& box : data->ExcludedDomains())
+      EXPECT_FALSE(BRep_ImplicitTool::IsInDomain(face, gp_Pnt((box[0].XYZ() + box[1].XYZ()) * .5)));
+    EXPECT_TRUE(BRep_ImplicitTool::IsInDomain(face, gp_Pnt(5, 5, 5)));
+    std::ostringstream output;
+    BRepClass3d_ImplicitBoxIO::Write(source, output);
+    Ops::Boundary restored;
+    std::istringstream input(output.str());
+    BRepClass3d_ImplicitBoxIO::Read(input, restored);
+    EXPECT_FALSE(restored.SeamBoundVerified);
+    EXPECT_FALSE(BRep_ImplicitTool::IsInDomain(restored.Faces.back(), gp_Pnt()));
+    EXPECT_FALSE(BRep_ImplicitTool::IsInDomain(restored.Faces.back(), gp_Pnt(10, 10, 10)));
+    EXPECT_TRUE(BRep_ImplicitTool::IsInDomain(restored.Faces.back(), gp_Pnt(10, 0, 0)));
+    // Legacy outer schema 2 embedded an unrestricted primitive schema 1.
+    // Rebuild that byte layout, not the topology, to exercise migration.
+    TopoDS_Face bare;
+    BRep_Builder().MakeImplicitFace(bare, data->Field(), data->Minimum(), data->Maximum(),
+                                   TopLoc_Location(), data->Tolerance());
+    bare.Orientation(face.Orientation());
+    std::ostringstream oldMath;
+    BRep_ImplicitIO::Write(bare, oldMath);
+    const auto record = output.str();
+    std::istringstream header(record);
+    std::string magic;
+    int version = 0;
+    size_t mathSize = 0;
+    header >> magic >> version >> mathSize;
+    const auto mathStart = record.find("OCCT_IMPLICIT_FACE ");
+    ASSERT_NE(mathStart, std::string::npos);
+    const auto sizeStart = record.find(' ', record.find(' ') + 1) + 1;
+    const auto sizeEnd = record.find(' ', sizeStart);
+    const auto legacy = record.substr(0, sizeStart) + std::to_string(oldMath.str().size())
+      + record.substr(sizeEnd, mathStart - sizeEnd) + oldMath.str() + record.substr(mathStart + mathSize);
+    std::istringstream oldInput(legacy);
+    Ops::Boundary migrated;
+    BRepClass3d_ImplicitBoxIO::Read(oldInput, migrated);
+    EXPECT_FALSE(migrated.SeamBoundVerified);
+    EXPECT_FALSE(BRep_ImplicitTool::IsInDomain(migrated.Faces.back(), gp_Pnt()));
+    EXPECT_FALSE(BRep_ImplicitTool::IsInDomain(migrated.Faces.back(), gp_Pnt(10, 10, 10)));
+    EXPECT_THROW(Ops::Build(face, BRepPrimAPI_MakeBox(10, 10, 10).Shape(), operation,
+      .1, 512, Ops::CornerPolicy::Regularized), Standard_NotImplemented);
+  }
+  EXPECT_TRUE(BRep_ImplicitTool::IsInDomain(fieldFace, gp_Pnt()));
+}
+
 TEST(BRepClass3d_ImplicitBox, CornerTrimAttachmentRestoreCyclicStartsAndFailureLimits)
 {
   using Ops = BRepClass3d_ImplicitBox;
@@ -553,6 +613,7 @@ TEST(BRepClass3d_ImplicitBox, CornerTrimAttachmentRestoreCyclicStartsAndFailureL
   TopoDS_Face rotated;
   builder.MakeImplicitFace(rotated, data->Field(), data->Minimum(), data->Maximum(),
                            TopLoc_Location(), data->Tolerance());
+  rotated.TShape(data->EmptyCopy());
   for (TopoDS_Iterator it(originalFace); it.More(); it.Next())
   {
     std::vector<TopoDS_Shape> edges;

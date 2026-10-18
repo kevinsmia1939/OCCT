@@ -37,6 +37,40 @@ public:
   gp_Vec Gradient(const gp_Pnt&) const override { return gp_Vec(0, 0, 1); }
 };
 
+TEST(BRep_ImplicitFace, ExplicitDomainExclusionsQueriesCopyAndPersistence)
+{
+  const gp_Pnt low(-3, -3, -3), high(3, 3, 3);
+  const std::vector<BRep_TImplicitFace::DomainBox> boxes = {
+    {gp_Pnt(-3, -1, -1), gp_Pnt(-1, 1, 1)}};
+  TopoDS_Face face;
+  face.TShape(new BRep_TImplicitFace(new Geom_ImplicitSphere(gp_Pnt(), 2), low, high, .01, boxes));
+  EXPECT_FALSE(BRep_ImplicitTool::IsInDomain(face, gp_Pnt(-2, 0, 0)));
+  EXPECT_FALSE(BRep_ImplicitTool::IsInDomain(face, gp_Pnt(-1, 1, 1)));
+  EXPECT_TRUE(BRep_ImplicitTool::IsInDomain(face, gp_Pnt(2, 0, 0)));
+  EXPECT_DOUBLE_EQ(BRep_ImplicitTool::Value(face, gp_Pnt(-2, 0, 0)), 0);
+  const auto hits = BRep_ImplicitTool::IntersectRay(face, gp_Pnt(-3, 0, 0), gp_Vec(1, 0, 0), 0, 6, 12);
+  ASSERT_EQ(hits.size(), 1u);
+  EXPECT_NEAR(hits[0].Point.X(), 2, .01);
+  TopoDS_Face copy = TopoDS::Face(face.EmptyCopied());
+  EXPECT_FALSE(BRep_ImplicitTool::IsInDomain(copy, gp_Pnt(-2, 0, 0)));
+  gp_Trsf transform;
+  transform.SetTranslation(gp_Vec(4, 5, 6));
+  face.Location(TopLoc_Location(transform));
+  std::ostringstream out;
+  BRep_ImplicitIO::Write(face, out);
+  EXPECT_EQ(out.str().find("OCCT_IMPLICIT_FACE 2\n"), 0u);
+  TopoDS_Face restored;
+  std::istringstream in(out.str());
+  BRep_ImplicitIO::Read(in, restored);
+  EXPECT_FALSE(BRep_ImplicitTool::IsInDomain(restored, gp_Pnt(2, 5, 6)));
+  EXPECT_TRUE(BRep_ImplicitTool::IsInDomain(restored, gp_Pnt(6, 5, 6)));
+  std::ostringstream again;
+  BRep_ImplicitIO::Write(restored, again);
+  EXPECT_EQ(out.str(), again.str());
+  EXPECT_THROW(new BRep_TImplicitFace(new Geom_ImplicitSphere(gp_Pnt(), 2), low, high, .01,
+    {{gp_Pnt(-4, -1, -1), gp_Pnt(-1, 1, 1)}}), Standard_DomainError);
+}
+
 TopoDS_Face sphereFace(const gp_Pnt& low = gp_Pnt(-3, -3, -3), const gp_Pnt& high = gp_Pnt(3, 3, 3))
 {
   TopoDS_Face face;

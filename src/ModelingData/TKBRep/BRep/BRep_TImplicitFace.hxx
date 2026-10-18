@@ -7,6 +7,8 @@
 #include <TopoDS_Shape.hxx>
 #include <BRep_TFace.hxx>
 #include <Geom_ImplicitField.hxx>
+#include <array>
+#include <vector>
 
 //! Experimental native field-backed face storage, without a fake UV surface.
 //! The finite domain clips queries; it is NOT sewn trimming topology or caps.
@@ -14,10 +16,18 @@
 class BRep_TImplicitFace : public BRep_TFace
 {
 public:
+  using DomainBox = std::array<gp_Pnt, 2>;
   Standard_EXPORT BRep_TImplicitFace(const occ::handle<Geom_ImplicitField>& theField,
                                      const gp_Pnt&                          theMinimum,
                                      const gp_Pnt&                          theMaximum,
                                      double                                 theTolerance);
+
+  //! Closed boxes removed from the query domain. This stores a restriction,
+  //! not a proof that its boundary contains no surface or that topology is valid.
+  Standard_EXPORT BRep_TImplicitFace(const occ::handle<Geom_ImplicitField>&,
+                                    const gp_Pnt&, const gp_Pnt&, double,
+                                    const std::vector<DomainBox>&);
+  const std::vector<DomainBox>& ExcludedDomains() const { return myExcludedDomains; }
 
   const occ::handle<Geom_ImplicitField>& Field() const { return myField; }
 
@@ -31,5 +41,6 @@ public:
 private:
   occ::handle<Geom_ImplicitField> myField;
   gp_Pnt                          myMinimum, myMaximum;
+  std::vector<DomainBox>           myExcludedDomains;
 };
 #endif

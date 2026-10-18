@@ -26,7 +26,7 @@ constexpr size_t MaxBytes = 65536;
 void require(bool condition)
 {
   if (!condition)
-    throw Standard_DomainError("BRep_ImplicitIO: invalid schema-1 record or stream failure");
+    throw Standard_DomainError("BRep_ImplicitIO: invalid record or stream failure");
 }
 
 void tag(std::istream& in, const char* expected)
@@ -120,7 +120,7 @@ void BRep_ImplicitIO::Write(const TopoDS_Face& face, Standard_OStream& stream)
   std::ostringstream out;
   out.imbue(std::locale::classic());
   out << std::setprecision(std::numeric_limits<double>::max_digits10);
-  out << "OCCT_IMPLICIT_FACE 1\n";
+  out << "OCCT_IMPLICIT_FACE " << (data->ExcludedDomains().empty() ? 1 : 2) << '\n';
   const auto& field = data->Field();
   // Exact C++ type, not IsKind(): derived classes may override the equation.
   if (typeid(*field) == typeid(Geom_ImplicitSphere))
@@ -142,6 +142,15 @@ void BRep_ImplicitIO::Write(const TopoDS_Face& face, Standard_OStream& stream)
   writePoint(out, data->Minimum());
   writePoint(out, data->Maximum());
   out << "TOLERANCE " << data->Tolerance() << '\n';
+  if (!data->ExcludedDomains().empty())
+  {
+    out << "EXCLUDED_DOMAINS " << data->ExcludedDomains().size() << '\n';
+    for (const auto& box : data->ExcludedDomains())
+    {
+      writePoint(out, box[0]);
+      writePoint(out, box[1]);
+    }
+  }
   out << "GEOMETRY_LOCATION\n";
   writeTransform(out, data->Location());
   out << "INSTANCE_LOCATION\n";
@@ -172,7 +181,8 @@ void BRep_ImplicitIO::Read(Standard_IStream& stream, TopoDS_Face& face)
   std::istringstream in(record);
   in.imbue(std::locale::classic());
   tag(in, "OCCT_IMPLICIT_FACE");
-  tag(in, "1");
+  int schema = 0;
+  require(bool(in >> schema) && (schema == 1 || schema == 2));
   std::string kind;
   require(bool(in >> kind));
   occ::handle<Geom_ImplicitField> field;
@@ -192,6 +202,18 @@ void BRep_ImplicitIO::Read(Standard_IStream& stream, TopoDS_Face& face)
   const gp_Pnt low = point(in), high = point(in);
   tag(in, "TOLERANCE");
   const double tolerance = number(in);
+  std::vector<BRep_TImplicitFace::DomainBox> excluded;
+  if (schema == 2)
+  {
+    tag(in, "EXCLUDED_DOMAINS");
+    int count = 0;
+    require(bool(in >> count) && count > 0 && count <= 64);
+    for (int i = 0; i < count; ++i)
+    {
+      const gp_Pnt a = point(in), b = point(in);
+      excluded.push_back({a, b});
+    }
+  }
   tag(in, "GEOMETRY_LOCATION");
   const TopLoc_Location geometry(readTransform(in));
   tag(in, "INSTANCE_LOCATION");
@@ -206,6 +228,12 @@ void BRep_ImplicitIO::Read(Standard_IStream& stream, TopoDS_Face& face)
 
   TopoDS_Face result;
   BRep_Builder().MakeImplicitFace(result, field, low, high, geometry, tolerance);
+  if (!excluded.empty())
+  {
+    occ::handle<BRep_TImplicitFace> data = new BRep_TImplicitFace(field, low, high, tolerance, excluded);
+    data->Location(geometry);
+    result.TShape(data);
+  }
   result.Location(instance, false); // Uniform scale/reflection is supported.
   result.Orientation(TopAbs_Orientation(orientation[0] - '0'));
   face = result;

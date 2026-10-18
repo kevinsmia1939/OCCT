@@ -14,7 +14,9 @@
 //! geometry/instance transformations and orientation. Meshes and shape flags
 //! are transient; location datum sharing is not preserved. Storage subtypes,
 //! child topology and
-//! custom fields are rejected rather than silently lost. Units are caller-owned.
+//! custom fields are rejected rather than silently lost. Schema 2 additionally
+//! stores closed domain-exclusion boxes; unrestricted output remains schema 1.
+//! Units are caller-owned. Restrictions are not geometric-validity certificates.
 class BRep_ImplicitIO
 {
 public:

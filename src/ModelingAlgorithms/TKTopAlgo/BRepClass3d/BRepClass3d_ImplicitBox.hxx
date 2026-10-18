@@ -114,6 +114,12 @@ public:
   Standard_EXPORT static CornerModel CheckCornerGerms(const TopoDS_Face&,
                                                        double theMaximumRadius = 0.1);
 
+  //! Checked uniform-cone neighborhoods contain no 2-D zero set, only their
+  //! exact corner. Remove BOTH signs from a regularized implicit surface face;
+  //! a retained uniform corner belongs to caps, never to the implicit face.
+  Standard_EXPORT static std::vector<std::array<gp_Pnt, 2>> SurfaceCornerExclusions(
+    const TopoDS_Face&);
+
   //! Local membership, not a distance-tolerant whole-solid classifier. Reports
   //! closed inequalities separately from closure-of-interior regularization:
   //! an isolated zero corner belongs only to the former. Outside the checked
