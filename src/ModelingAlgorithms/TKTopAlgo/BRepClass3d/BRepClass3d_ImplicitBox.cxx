@@ -1575,16 +1575,39 @@ std::map<int, RootKey> rootLabels(const std::map<int, gp_Pnt>& points,
                                   const gp_Pnt&                low,
                                   const gp_Pnt&                high,
                                   double                       reserve,
-                                  std::array<int, 12>&         counts)
+                                  std::array<int, 12>&         counts,
+                                  const BRepClass3d_ImplicitBox::CornerModel* corners = nullptr)
 {
   std::array<std::vector<std::pair<double, int>>, 12> groups;
+  std::map<int, RootKey> labels;
+  std::set<int> seenCorners;
   for (const auto& entry : points)
   {
+    if (corners)
+    {
+      int corner = 0;
+      bool exact = true;
+      for (int axis = 0; axis < 3; ++axis)
+      {
+        if (entry.second.Coord(axis + 1) == high.Coord(axis + 1))
+          corner |= 1 << axis;
+        else if (entry.second.Coord(axis + 1) != low.Coord(axis + 1))
+          exact = false;
+      }
+      if (exact)
+      {
+        const auto& germ = corners->Corners[size_t(corner)];
+        require(germ.ExactZero && germ.Kind == BRepClass3d_ImplicitBox::CornerKind::SplitCone
+                  && seenCorners.insert(corner).second,
+                "Trim anchor lacks a unique checked split-corner identity");
+        labels.emplace(entry.first, RootKey{12 + corner, 0}); // Edges 0..11; corners 12..19.
+        continue; // A corner is NOT one root on each of its three incident edges.
+      }
+    }
     const int edge = physicalEdge(entry.second, low, high, reserve);
     if (edge >= 0)
       groups[size_t(edge)].emplace_back(entry.second.Coord(edge / 4 + 1), entry.first);
   }
-  std::map<int, RootKey> labels;
   for (int edge = 0; edge < 12; ++edge)
   {
     auto& group = groups[size_t(edge)];
@@ -1661,8 +1684,6 @@ BRepClass3d_ImplicitBox::TrimAttachment BRepClass3d_ImplicitBox::CheckTrimAttach
   size_t          maximumCells,
   size_t          maximumTests)
 {
-  require(source.Policy == CornerPolicy::Reject,
-          "Corner-aware native trim-cycle attachment is not implemented");
   if (resolution < 4 || resolution > 64 || (resolution & (resolution - 1)) || maximumDepth < 0
       || maximumDepth > 16 || !maximumCells || maximumCells > 10000000 || !maximumTests
       || maximumTests > 10000000)
@@ -1704,7 +1725,8 @@ BRepClass3d_ImplicitBox::TrimAttachment BRepClass3d_ImplicitBox::CheckTrimAttach
                 std::move(sides),
                 face.Orientation() == TopAbs_FORWARD ? Operation::BoxMinusField : Operation::Common,
                 data->Tolerance(),
-                512 * std::numeric_limits<double>::epsilon() * magnitude);
+                512 * std::numeric_limits<double>::epsilon() * magnitude,
+                copy.Policy);
     const auto complement =
       CheckCapAttachment(opposite, resolution, maximumDepth, maximumCells, maximumTests);
     report.ComplementCapsAttached = complement.Resolved;
@@ -1715,6 +1737,9 @@ BRepClass3d_ImplicitBox::TrimAttachment BRepClass3d_ImplicitBox::CheckTrimAttach
     }
     const auto&       ref   = retained.Reference;
     const auto&       other = complement.Reference;
+    require(ref.Surface.Policy == copy.Policy && other.Surface.Policy == copy.Policy
+              && ref.Surface.Resolution == other.Surface.Resolution,
+            "Dual material references use different policies or grids");
     const auto&       loops = ref.Surface.BoundaryLoops;
     std::set<Segment> boundaryEdges;
     for (const auto& loop : loops)
@@ -1781,7 +1806,15 @@ BRepClass3d_ImplicitBox::TrimAttachment BRepClass3d_ImplicitBox::CheckTrimAttach
       labels.push_back(std::move(line));
     }
     std::array<int, 12> refCounts{}, sourceCounts{};
-    const auto          referenceRoots = rootLabels(refAnchors, low, high, reserve, refCounts);
+    CornerModel corners;
+    const CornerModel* cornerModel = nullptr;
+    if (copy.Policy == CornerPolicy::Regularized)
+    {
+      corners = CheckCornerGerms(face, data->Tolerance());
+      require(corners.Resolved, "Trim attachment corner identities unresolved");
+      cornerModel = &corners;
+    }
+    const auto referenceRoots = rootLabels(refAnchors, low, high, reserve, refCounts, cornerModel);
     Map                 aEdges, bEdges, aVertices;
     TopExp::MapShapes(face, TopAbs_EDGE, aEdges);
     TopExp::MapShapes(opposite.Faces.back(), TopAbs_EDGE, bEdges);
@@ -1789,9 +1822,10 @@ BRepClass3d_ImplicitBox::TrimAttachment BRepClass3d_ImplicitBox::CheckTrimAttach
     std::map<int, gp_Pnt> sourcePoints;
     for (int i = 1; i <= aVertices.Extent(); ++i)
       sourcePoints.emplace(i - 1, BRep_Tool::Pnt(TopoDS::Vertex(aVertices(i))));
-    const auto sourceRoots = rootLabels(sourcePoints, low, high, reserve, sourceCounts);
+    const auto sourceRoots = rootLabels(sourcePoints, low, high, reserve, sourceCounts, cornerModel);
     require(refCounts == sourceCounts, "Native/reference ordered box-root counts differ");
-    require(int(referenceRoots.size()) == copy.BoxEdgeRootCount,
+    require(int(referenceRoots.size()) == copy.BoxEdgeRootCount + corners.SplitCount
+              && referenceRoots.size() == sourceRoots.size(),
             "Native/reference box-root anchors differ");
     std::map<ArcKey, int>                            arcIds;
     std::vector<std::vector<std::pair<ArcKey, int>>> referenceKeys;

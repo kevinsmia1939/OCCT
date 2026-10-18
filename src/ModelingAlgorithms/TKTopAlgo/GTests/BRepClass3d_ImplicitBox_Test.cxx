@@ -459,7 +459,6 @@ TEST(BRepClass3d_ImplicitBox, CornerStoredGraphAndCapsAttachWithoutPromotingNati
       EXPECT_GT(sign * BRep_ImplicitTool::Value(face, caps.Witnesses[i]), 0);
       EXPECT_GT(caps.Clearances[i], caps.RequiredClearance);
     }
-    EXPECT_THROW(Ops::CheckTrimAttachment(source), Standard_NotImplemented);
     EXPECT_THROW(Ops::BuildNativeShells(source), Standard_NotImplemented);
     EXPECT_THROW(Ops::BuildNativeSolids(source), Standard_NotImplemented);
     BRepClass3d_ImplicitBoxIO::Write(source, after);
@@ -501,6 +500,78 @@ TEST(BRepClass3d_ImplicitBox, CornerAttachmentReorderingBudgetsAndSourceImmutabi
   EXPECT_FALSE(reordered.SeamBoundVerified);
   BRepClass3d_ImplicitBoxIO::Write(source, after);
   EXPECT_EQ(before.str(), after.str());
+}
+
+TEST(BRepClass3d_ImplicitBox, CornerTrimCyclesAttachWithSharedCornerAndEdgeAnchors)
+{
+  using Ops = BRepClass3d_ImplicitBox;
+  const auto face = topologyField(gp_Pnt(), gp_Pnt(10, 10, 10), 0);
+  const auto operand = BRepPrimAPI_MakeBox(10, 10, 10).Shape();
+  for (auto operation : {Ops::Operation::Common, Ops::Operation::BoxMinusField})
+  {
+    const auto source = Ops::Build(face, operand, operation, .1, 512, Ops::CornerPolicy::Regularized);
+    std::ostringstream before, after;
+    BRepClass3d_ImplicitBoxIO::Write(source, before);
+    const auto report = Ops::CheckTrimAttachment(source);
+    ASSERT_TRUE(report.Resolved) << report.Reason;
+    EXPECT_TRUE(report.CapRegionsAttached && report.ComplementCapsAttached);
+    EXPECT_EQ(report.ReferenceArcCount, 18);
+    EXPECT_EQ(report.ReferenceWireCount, 1);
+    EXPECT_EQ(report.ReferenceSurfaceComponentCount, 1);
+    EXPECT_EQ(report.WireReferenceLoops, std::vector<int>({0}));
+    EXPECT_EQ(report.WireSurfaceComponents, std::vector<int>({0}));
+    EXPECT_EQ(report.SurfaceComponentEuler, std::vector<int>({-3}));
+    EXPECT_EQ(report.SurfaceComponentShells, std::vector<int>({0}));
+    EXPECT_EQ(report.SurfaceComponentRegions, std::vector<int>({0}));
+    std::set<int> arcs(report.SeamReferenceArcs.begin(), report.SeamReferenceArcs.end());
+    EXPECT_EQ(arcs.size(), 18u);
+    EXPECT_EQ(*arcs.begin(), 0);
+    EXPECT_EQ(*arcs.rbegin(), 17);
+    EXPECT_EQ(report.RetainedCaps.Reference.Surface.Resolution, 31);
+    EXPECT_EQ(report.RetainedCaps.Reference.Surface.FixedCornerCount, 8);
+    EXPECT_THROW(Ops::BuildNativeShells(source), Standard_NotImplemented);
+    BRepClass3d_ImplicitBoxIO::Write(source, after);
+    EXPECT_EQ(before.str(), after.str());
+    EXPECT_TRUE(source.SeamBoundVerified);
+  }
+}
+
+TEST(BRepClass3d_ImplicitBox, CornerTrimAttachmentRestoreCyclicStartsAndFailureLimits)
+{
+  using Ops = BRepClass3d_ImplicitBox;
+  const auto source = Ops::Build(topologyField(gp_Pnt(), gp_Pnt(10, 10, 10), 0),
+    BRepPrimAPI_MakeBox(10, 10, 10).Shape(), Ops::Operation::Common,
+    .1, 512, Ops::CornerPolicy::Regularized);
+  std::ostringstream before;
+  BRepClass3d_ImplicitBoxIO::Write(source, before);
+  std::istringstream input(before.str());
+  Ops::Boundary restored;
+  BRepClass3d_ImplicitBoxIO::Read(input, restored);
+  const auto originalFace = restored.Faces.back();
+  const auto data = occ::down_cast<BRep_TImplicitFace>(originalFace.TShape());
+  BRep_Builder builder;
+  TopoDS_Face rotated;
+  builder.MakeImplicitFace(rotated, data->Field(), data->Minimum(), data->Maximum(),
+                           TopLoc_Location(), data->Tolerance());
+  for (TopoDS_Iterator it(originalFace); it.More(); it.Next())
+  {
+    std::vector<TopoDS_Shape> edges;
+    for (TopoDS_Iterator use(it.Value()); use.More(); use.Next()) edges.push_back(use.Value());
+    ASSERT_GT(edges.size(), 1u);
+    std::rotate(edges.begin(), edges.begin() + 1, edges.end());
+    TopoDS_Wire wire;
+    builder.MakeWire(wire);
+    for (const auto& edge : edges) builder.Add(wire, edge);
+    builder.Add(rotated, wire);
+  }
+  restored.Faces.back() = rotated;
+  builder.MakeCompound(restored.Shape);
+  for (const auto& face : restored.Faces) builder.Add(restored.Shape, face);
+  EXPECT_TRUE(Ops::CheckTrimAttachment(restored).Resolved);
+  EXPECT_FALSE(restored.SeamBoundVerified);
+  EXPECT_FALSE(Ops::CheckTrimAttachment(restored, 32, 16, 1).Resolved);
+  EXPECT_FALSE(Ops::CheckTrimAttachment(restored, 32, 16, 4000000, 1).Resolved);
+  EXPECT_THROW(Ops::CheckTrimAttachment(restored, 3), Standard_DomainError);
 }
 
 TEST(BRepClass3d_ImplicitBox, ClosedRegionReferenceBothOperationsAndComplementaryVolume)
