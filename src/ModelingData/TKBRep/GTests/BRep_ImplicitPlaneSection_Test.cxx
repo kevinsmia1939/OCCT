@@ -82,6 +82,137 @@ TEST(BRep_ImplicitPlaneSection, RegularGyroidGeometricBoundsAndConnectivity)
   }
 }
 
+TEST(BRep_ImplicitPlaneSection, ExactLatticeNodesTraceAllDefaultCubeFacesAndKeepPointContacts)
+{
+  const auto face = gyroid(0);
+  std::ostringstream before, after;
+  BRep_ImplicitIO::Write(face, before);
+  const double k = 2 * std::acos(-1.) / 10;
+  for (int axis = 1; axis <= 3; ++axis)
+    for (int high = 0; high < 2; ++high)
+    {
+      gp_Pnt origin;
+      origin.SetCoord(axis, high ? 10 : 0);
+      gp_Vec normal, u;
+      normal.SetCoord(axis, 1);
+      u.SetCoord(axis % 3 + 1, 1);
+      BRep_ImplicitPlaneSection::Settings s;
+      s.Frame = gp_Ax2(origin, gp_Dir(normal), gp_Dir(u));
+      s.UMinimum = s.VMinimum = 0;
+      s.UMaximum = s.VMaximum = 10;
+      s.AllowExactLatticeNodes = true;
+      const auto result = BRep_ImplicitPlaneSection::Trace(face, s);
+      ASSERT_TRUE(result.Resolved) << axis << " " << high << ": " << result.UnresolvedCells
+                                  << " ambiguous=" << result.AmbiguousCells
+                                  << " graph=" << result.GraphDefects;
+      ASSERT_EQ(result.Curves.size(), 3u);
+      ASSERT_EQ(result.PointContacts.size(), 2u);
+      EXPECT_GT(result.ExactLatticeNodeCount, 0);
+      EXPECT_LE(result.GeometricBound, .1);
+      EXPECT_LE(result.MaximumRootBracket, .1 / 16);
+      const auto v = gp_Vec(s.Frame.YDirection());
+      EXPECT_EQ(result.PointContacts[0].Distance(origin), 0);
+      EXPECT_EQ(result.PointContacts[1].Distance(origin.Translated(u * 10 + v * 10)), 0);
+      int cornerEnds = 0;
+      for (const auto& curve : result.Curves)
+      {
+        ASSERT_FALSE(curve.Closed);
+        ASSERT_GE(curve.Points.size(), 2u);
+        for (const auto& p : {curve.Points.front(), curve.Points.back()})
+          cornerEnds += p.Distance(origin.Translated(u * 10)) == 0
+                     || p.Distance(origin.Translated(v * 10)) == 0;
+        for (const auto& p : curve.Points)
+          EXPECT_LE(std::abs(BRep_ImplicitTool::Value(face, p)), result.MaximumResidual + 1.e-13);
+      }
+      EXPECT_EQ(cornerEnds, 2);
+      // Independent complete slice families v=(-atan(sin(k*u))+m*pi)/k.
+      // These check geometric coverage, not just residuals at traced samples.
+      for (int sample = 0; sample <= 100; ++sample)
+        for (int turn = 0; turn <= 2; ++turn)
+        {
+          const double x = sample * .1;
+          const double y = (-std::atan(std::sin(k * x)) + turn * std::acos(-1.)) / k;
+          if (y < 0 || y > 10)
+            continue;
+          const auto p = origin.Translated(u * x + v * y);
+          double nearest = 1.e100;
+          for (const auto& curve : result.Curves)
+            for (size_t i = 1; i < curve.Points.size(); ++i)
+            {
+              const auto a = curve.Points[i - 1];
+              const gp_Vec ab(a, curve.Points[i]);
+              const double t = std::clamp(gp_Vec(a, p).Dot(ab) / ab.SquareMagnitude(), 0., 1.);
+              nearest = std::min(nearest, p.Distance(a.Translated(ab * t)));
+            }
+          for (const auto& contact : result.PointContacts)
+            nearest = std::min(nearest, p.Distance(contact));
+          EXPECT_LE(nearest, result.GeometricBound + 1.e-12);
+        }
+    }
+  BRep_ImplicitPlaneSection::Settings tiny;
+  tiny.Frame = gp_Ax2(gp_Pnt(-.125, -.125, 0), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+  tiny.UMinimum = tiny.VMinimum = 0;
+  tiny.UMaximum = tiny.VMaximum = .25;
+  tiny.AllowExactLatticeNodes = true;
+  const auto crossing = BRep_ImplicitPlaneSection::Trace(face, tiny);
+  ASSERT_TRUE(crossing.Resolved);
+  ASSERT_EQ(crossing.Curves.size(), 1u);
+  EXPECT_TRUE(crossing.PointContacts.empty());
+  int originUses = 0;
+  for (const auto& p : crossing.Curves.front().Points)
+    originUses += p.Distance(gp_Pnt()) == 0;
+  EXPECT_EQ(originUses, 1); // One shared interior vertex, not four coincident roots.
+  tiny.Frame = gp_Ax2(gp_Pnt(), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+  const auto contact = BRep_ImplicitPlaneSection::Trace(face, tiny);
+  ASSERT_TRUE(contact.Resolved);
+  EXPECT_TRUE(contact.Curves.empty());
+  ASSERT_EQ(contact.PointContacts.size(), 1u);
+  EXPECT_EQ(contact.PointContacts.front().Distance(gp_Pnt()), 0);
+  tiny.Frame = gp_Ax2(gp_Pnt(0, 10, 0), gp_Dir(0, 0, -1), gp_Dir(1, 0, 0));
+  tiny.UMaximum = tiny.VMaximum = 10;
+  const auto reversed = BRep_ImplicitPlaneSection::Trace(face, tiny);
+  ASSERT_TRUE(reversed.Resolved);
+  ASSERT_EQ(reversed.Curves.size(), 3u);
+  ASSERT_EQ(reversed.PointContacts.size(), 2u);
+  EXPECT_EQ(reversed.PointContacts[0].Distance(gp_Pnt(10, 10, 0)), 0);
+  EXPECT_EQ(reversed.PointContacts[1].Distance(gp_Pnt()), 0);
+  BRep_ImplicitIO::Write(face, after);
+  EXPECT_EQ(before.str(), after.str());
+}
+
+TEST(BRep_ImplicitPlaneSection, LatticeModeRefusesUnknownZerosRoundedAffineMapsAndPlacements)
+{
+  auto s = settings();
+  s.Frame = gp_Ax2(gp_Pnt(), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+  s.UMinimum = s.VMinimum = 0;
+  s.UMaximum = s.VMaximum = 10;
+  s.MaximumCells = 64;
+  s.AllowExactLatticeNodes = true;
+  const auto budget = BRep_ImplicitPlaneSection::Trace(gyroid(0), s);
+  EXPECT_FALSE(budget.Resolved);
+  EXPECT_GT(budget.UnresolvedCells, 0);
+  s.Frame = gp_Ax2(gp_Pnt(.1, 0, 0), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+  s.UMinimum = -.1;
+  s.UMaximum = 9.9; // Rounded sum is 10, but the exact requested endpoint is not.
+  const auto rounded = BRep_ImplicitPlaneSection::Trace(gyroid(0), s);
+  EXPECT_FALSE(rounded.Resolved);
+  EXPECT_GT(rounded.AmbiguousCells, 0);
+  for (const auto& p : rounded.PointContacts)
+    EXPECT_NE(p.X(), 10);
+  s.Frame = gp_Ax2(gp_Pnt(), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+  s.UMinimum = 0;
+  s.UMaximum = std::nextafter(10., 0.);
+  EXPECT_FALSE(BRep_ImplicitPlaneSection::Trace(gyroid(0), s).Resolved);
+  s.UMaximum = 10;
+  s.Frame = gp_Ax2(gp_Pnt(), gp_Dir(0, 0, 1), gp_Dir(1, 1, 0));
+  EXPECT_THROW(BRep_ImplicitPlaneSection::Trace(gyroid(0), s), Standard_NotImplemented);
+  s.Frame = gp_Ax2(gp_Pnt(), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+  gp_Trsf shift;
+  shift.SetTranslation(gp_Vec(1.e-18, 0, 0));
+  EXPECT_THROW(BRep_ImplicitPlaneSection::Trace(TopoDS::Face(gyroid(0).Moved(TopLoc_Location(shift))), s),
+               Standard_NotImplemented);
+}
+
 TEST(BRep_ImplicitPlaneSection, EmptyVersusUnresolvedAndInvalid)
 {
   auto       s     = settings();

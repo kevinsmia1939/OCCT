@@ -19,6 +19,11 @@ public:
     double UMinimum = -1, UMaximum = 1, VMinimum = -1, VMaximum = 1;
     double DistanceTolerance = 0.1;              //!< Model length, NOT gyroid field units.
     int    MinimumCells = 4, MaximumCells = 512; //!< Powers of two, 4..512.
+    //! Explicit topology policy: recognize exact lattice nodes by identity,
+    //! with coordinate-monotone cell cones. Identity field placement and
+    //! coordinate-plane frames only; rounded affine identities do not count.
+    //! Consumers MUST handle PointContacts separately from one-dimensional curves.
+    bool AllowExactLatticeNodes = false;
   };
 
   struct Curve
@@ -29,13 +34,15 @@ public:
 
   struct Result
   {
-    bool               Resolved   = false; //!< ALL cells passed empty/regular-arc bounds.
+    bool               Resolved   = false; //!< ALL cells passed empty/regular-arc/isolated-corner bounds.
     int                Resolution = 0; //!< May be a non-dyadic fallback grid, within MaximumCells.
     int                UnresolvedCells = 0, PotentialCriticalCells = 0, AmbiguousCells = 0;
     int                GraphDefects    = 0; //!< Branching/interior-ended fragment vertices.
     double             GeometricBound  = 0; //!< Max accepted cell diagonal; partial if unresolved.
     double             MaximumResidual = 0; //!< Field units, diagnostic only.
     double             MaximumRootBracket = 0; //!< Model length.
+    int                ExactLatticeNodeCount = 0;
+    std::vector<gp_Pnt> PointContacts; //!< Certified isolated rectangle-corner zeros, not curves.
     std::vector<Curve> Curves;
   };
 

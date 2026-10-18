@@ -32,6 +32,14 @@ bool opposite(double a, double b)
   return std::signbit(a) != std::signbit(b);
 }
 
+bool exactSum(double a, double b, double sum)
+{
+  // TwoSum residual: an affine map rounded ONTO a lattice point is not an
+  // exact lattice identity of the requested parameter-space point.
+  const double part = sum - a;
+  return (a - (sum - part)) + (b - part) == 0;
+}
+
 struct Edge
 {
   int    State  = 0;
@@ -61,18 +69,47 @@ BRep_ImplicitPlaneSection::Result pass(const TopoDS_Face&                       
   const double        waveNumber = 2 * std::acos(-1.) / field.Period();
   std::vector<gp_Pnt> grid(width * width);
   std::vector<double> values(width * width);
+  std::vector<bool> exactZero(width * width, false);
   for (int j = 0; j <= n; ++j)
     for (int i = 0; i <= n; ++i)
     {
       const size_t index = size_t(j) * width + i;
-      grid[index]        = settings.Frame.Location().Translated(u * (settings.UMinimum + du * i)
-                                                                + v * (settings.VMinimum + dv * j));
+      const double x = i == n ? settings.UMaximum : settings.UMinimum + du * i;
+      const double y = j == n ? settings.VMaximum : settings.VMinimum + dv * j;
+      grid[index]        = settings.Frame.Location().Translated(u * x + v * y);
       values[index]      = BRep_ImplicitTool::Value(face, grid[index]);
+      if (settings.AllowExactLatticeNodes)
+      {
+        double value;
+        gp_Vec gradient;
+        bool exactMap = true;
+        for (int axis = 1; axis <= 3; ++axis)
+        {
+          const double offset = u.Coord(axis) != 0 ? u.Coord(axis) * x : v.Coord(axis) * y;
+          exactMap &= exactSum(settings.Frame.Location().Coord(axis), offset, grid[index].Coord(axis));
+        }
+        exactZero[index] = exactMap && field.LatticeJet(grid[index], value, gradient) && value == 0;
+      }
     }
   std::vector<gp_Pnt>                       vertices;
   std::vector<bool>                         boundary;
   std::vector<std::pair<size_t, size_t>>    segments;
   std::map<std::pair<size_t, size_t>, Edge> edgeCache;
+  const size_t invalidVertex = std::numeric_limits<size_t>::max();
+  std::vector<size_t> nodeVertex(grid.size(), invalidVertex);
+  std::vector<bool> isolatedContact(grid.size(), false);
+  if (settings.AllowExactLatticeNodes)
+    for (size_t index = 0; index < grid.size(); ++index)
+      if (exactZero[index])
+      {
+        nodeVertex[index] = vertices.size();
+        vertices.push_back(grid[index]);
+        boundary.push_back(index / width == 0 || index / width == size_t(n)
+                           || index % width == 0 || index % width == size_t(n));
+        result.MaximumResidual = std::max(result.MaximumResidual, std::abs(values[index]));
+        values[index] = 0; // Analytic identity only, never a near-zero residual snap.
+        ++result.ExactLatticeNodeCount;
+      }
   auto                                      edge = [&](size_t a, size_t b) {
     const auto key   = std::minmax(a, b);
     const auto found = edgeCache.find(key);
@@ -130,7 +167,22 @@ BRep_ImplicitPlaneSection::Result pass(const TopoDS_Face&                       
         }
       }
     }
-    if (std::abs(fa) <= fieldReserve || std::abs(fb) <= fieldReserve)
+    if (exactZero[a] != exactZero[b])
+    {
+      const bool first = exactZero[a];
+      const double other = first ? fb : fa;
+      // A unique endpoint root needs monotonicity on the ENTIRE grid edge.
+      // Harmonic opposite-sign uniqueness is not an endpoint/tangency proof.
+      if (monotone && std::abs(other) > fieldReserve
+          && std::signbit(other) == std::signbit(first ? derivative : -derivative))
+      {
+        answer.State = 1;
+        answer.Vertex = nodeVertex[first ? a : b];
+      }
+      else
+        answer.State = 2;
+    }
+    else if (std::abs(fa) <= fieldReserve || std::abs(fb) <= fieldReserve)
       answer.State = 2; // Grid-aligned zero/near-zero: do not guess its connectivity.
     else if (!opposite(fa, fb)
              && (monotone || harmonicEmpty
@@ -202,6 +254,33 @@ BRep_ImplicitPlaneSection::Result pass(const TopoDS_Face&                       
         continue;
       const double uncertainty = hessian * diagonal * .5 + gradientReserve;
       const bool   regular = std::abs(g.Dot(u)) > uncertainty || std::abs(g.Dot(v)) > uncertainty;
+      if (settings.AllowExactLatticeNodes
+          && std::abs(g.Dot(u)) > uncertainty && std::abs(g.Dot(v)) > uncertainty)
+      {
+        int zero = -1, count = 0;
+        for (int k = 0; k < 4; ++k)
+          if (exactZero[corners[k]])
+          {
+            zero = k;
+            ++count;
+          }
+        if (count == 1)
+        {
+          const double gu = g.Dot(u) * (zero == 1 || zero == 2 ? -1 : 1);
+          const double gv = g.Dot(v) * (zero >= 2 ? -1 : 1);
+          if (std::signbit(gu) == std::signbit(gv))
+          {
+            // Both inward derivatives keep this sign throughout the cell.
+            // Thus only its exact zero corner meets F=0: no one-dimensional
+            // arc enters this quadrant. Other incident cells may have an arc.
+            const size_t node = corners[size_t(zero)];
+            const bool rectangleCorner = (node / width == 0 || node / width == size_t(n))
+                                      && (node % width == 0 || node % width == size_t(n));
+            isolatedContact[node] = rectangleCorner;
+            continue;
+          }
+        }
+      }
       std::array<size_t, 4> roots;
       int                   count     = 0;
       bool                  ambiguous = false;
@@ -210,7 +289,8 @@ BRep_ImplicitPlaneSection::Result pass(const TopoDS_Face&                       
         const auto crossing = edge(corners[k], corners[(k + 1) % 4]);
         ambiguous |= crossing.State == 2;
         if (crossing.State == 1)
-          roots[count++] = crossing.Vertex;
+          if (std::find(roots.begin(), roots.begin() + count, crossing.Vertex) == roots.begin() + count)
+            roots[count++] = crossing.Vertex; // A node shared by two cell edges is ONE root.
       }
       // A partial derivative of fixed nonzero sign rules out closed internal
       // components. Unique edge roots + two crossings then imply one arc.
@@ -240,6 +320,15 @@ BRep_ImplicitPlaneSection::Result pass(const TopoDS_Face&                       
   for (size_t i = 0; i < adjacent.size(); ++i)
     if (adjacent[i].size() > 2 || (adjacent[i].size() == 1 && !boundary[i]))
       ++result.GraphDefects;
+  if (settings.AllowExactLatticeNodes)
+    for (size_t node = 0; node < nodeVertex.size(); ++node)
+      if (nodeVertex[node] != invalidVertex && adjacent[nodeVertex[node]].empty())
+      {
+        if (isolatedContact[node])
+          result.PointContacts.push_back(grid[node]);
+        else
+          ++result.GraphDefects; // An unaccounted exact zero cannot disappear.
+      }
   std::vector<bool> used(segments.size(), false);
   auto              walk = [&](size_t start, size_t next) {
     Section::Curve curve;
@@ -303,6 +392,17 @@ BRep_ImplicitPlaneSection::Result BRep_ImplicitPlaneSection::Trace(const TopoDS_
             && std::isfinite(settings.VMaximum - settings.VMinimum),
           "Section span overflow");
   const gp_Trsf transform = (face.Location() * data->Location()).Transformation();
+  if (settings.AllowExactLatticeNodes)
+  {
+    for (int row = 1; row <= 3; ++row)
+      for (int column = 1; column <= 4; ++column)
+        if (transform.Value(row, column) != (row == column ? 1. : 0.))
+          throw Standard_NotImplemented("Exact lattice section nodes require identity field placement");
+    for (const auto& direction : {settings.Frame.XDirection(), settings.Frame.YDirection()})
+      for (int axis = 1; axis <= 3; ++axis)
+        if (direction.Coord(axis) != 0 && std::abs(direction.Coord(axis)) != 1)
+          throw Standard_NotImplemented("Exact lattice section nodes require a coordinate-plane frame");
+  }
   const double  scale     = std::abs(transform.ScaleFactor());
   require(std::isfinite(scale) && scale > 0, "Invalid section placement");
   const auto*  field = static_cast<const Geom_ImplicitGyroid*>(data->Field().get());
@@ -351,6 +451,15 @@ BRep_ImplicitPlaneSection::Result BRep_ImplicitPlaneSection::Trace(const TopoDS_
                   coordinateReserve);
     if (result.Resolved)
       return result;
+    if (settings.AllowExactLatticeNodes && n - 1 >= settings.MinimumCells)
+    {
+      // Odd grids avoid repeated unrecognized eighth-period samples without
+      // moving the rectangle, changing the field or enlarging the axis budget.
+      auto candidate = pass(face, settings, n - 1, *field, lipschitz, hessian,
+                            fieldReserve, gradientReserve, coordinateReserve);
+      if (candidate.Resolved)
+        return candidate;
+    }
   }
   // A dyadic sequence can repeatedly place a regular arc almost tangent to a
   // grid edge. Try bounded alternative uniform grids, with identical acceptance
