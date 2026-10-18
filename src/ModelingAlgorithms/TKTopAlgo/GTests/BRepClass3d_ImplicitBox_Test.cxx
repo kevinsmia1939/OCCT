@@ -350,6 +350,80 @@ void checkClosedReference(const BRepClass3d_ImplicitBox::RegionTopologyWitness& 
 }
 } // namespace
 
+TEST(BRepClass3d_ImplicitBox, CornerClosedReferenceSharesCapsWithoutIsolatedVolumeContacts)
+{
+  using Ops = BRepClass3d_ImplicitBox;
+  auto face = topologyField(gp_Pnt(), gp_Pnt(10, 10, 10), 0);
+  double total = 0;
+  for (bool reversed : {false, true})
+  {
+    if (reversed) face.Reverse();
+    const auto result = Ops::CheckRegionTopology(face, 32, 16, 4000000, Ops::CornerPolicy::Regularized);
+    ASSERT_TRUE(result.ClosedReferenceManifold) << result.Reason;
+    checkClosedReference(result);
+    EXPECT_EQ(result.Surface.Resolution, 31);
+    EXPECT_EQ(result.RegionCount, 1);
+    EXPECT_EQ(result.ComponentEuler, std::vector<int>({-2}));
+    EXPECT_NEAR(regionVolume(result), 500, 1e-8);
+    total += regionVolume(result);
+    const gp_Pnt excluded = reversed ? gp_Pnt(10, 10, 10) : gp_Pnt();
+    const gp_Pnt retained = reversed ? gp_Pnt() : gp_Pnt(10, 10, 10);
+    int retainedCount = 0;
+    for (size_t i = 0; i < result.Nodes.size(); ++i)
+    {
+      EXPECT_GT(result.Nodes[i].Distance(excluded), 0);
+      if (result.Nodes[i].Distance(retained) == 0)
+      {
+        ++retainedCount;
+        EXPECT_GE(i, result.Surface.Nodes.size()); // Cap-only corner, not a fake implicit face.
+      }
+    }
+    EXPECT_EQ(retainedCount, 1);
+    for (size_t i = 0; i < result.Surface.GridEdges.size(); ++i)
+      if (result.Surface.GridEdges[i][0] == result.Surface.GridEdges[i][1])
+      {
+        bool capUse = false;
+        for (size_t j = result.Surface.Triangles.size(); j < result.Triangles.size(); ++j)
+          for (int node : result.Triangles[j])
+            capUse |= node == int(i);
+        EXPECT_TRUE(capUse); // Same ID, not a second corner welded by position.
+      }
+    EXPECT_FALSE(Ops::CheckRegionTopology(face).ClosedReferenceManifold);
+    EXPECT_FALSE(Ops::CheckRegionTopology(face, 32, 16, 1, Ops::CornerPolicy::Regularized).ClosedReferenceManifold);
+  }
+  EXPECT_NEAR(total, 1000, 1e-8);
+}
+
+TEST(BRepClass3d_ImplicitBox, CornerClosedReferenceScalingRestoreAndSeparateMaterialRegions)
+{
+  using Ops = BRepClass3d_ImplicitBox;
+  for (double scale : {.1, 2.})
+  {
+    const gp_Pnt low(-10 * scale, 10 * scale, -10 * scale);
+    const gp_Pnt high(low.XYZ() + gp_XYZ(10, 10, 10) * scale);
+    auto face = topologyField(low, high, 0, scale);
+    std::ostringstream before, after;
+    BRep_ImplicitIO::Write(face, before);
+    std::istringstream input(before.str());
+    TopoDS_Face restored;
+    BRep_ImplicitIO::Read(input, restored);
+    const auto result = Ops::CheckRegionTopology(restored, 32, 16, 4000000, Ops::CornerPolicy::Regularized);
+    checkClosedReference(result);
+    EXPECT_EQ(result.RegionCount, 1);
+    EXPECT_EQ(result.ComponentEuler, std::vector<int>({-2}));
+    EXPECT_NEAR(regionVolume(result), 500 * scale * scale * scale, 1e-8);
+    BRep_ImplicitIO::Write(face, after);
+    EXPECT_EQ(before.str(), after.str());
+  }
+  auto face = topologyField(gp_Pnt(.3, .3, .3), gp_Pnt(12.3, 2.3, 2.3), 1.45);
+  face.Reverse();
+  const auto islands = Ops::CheckRegionTopology(face, 64, 16, 4000000, Ops::CornerPolicy::Regularized);
+  checkClosedReference(islands);
+  EXPECT_EQ(islands.RegionCount, 2);
+  EXPECT_EQ(islands.ComponentEuler, std::vector<int>({2, 2}));
+  EXPECT_EQ(islands.Surface.FixedCornerCount, 0);
+}
+
 TEST(BRepClass3d_ImplicitBox, ClosedRegionReferenceBothOperationsAndComplementaryVolume)
 {
   for (bool open : {false, true})

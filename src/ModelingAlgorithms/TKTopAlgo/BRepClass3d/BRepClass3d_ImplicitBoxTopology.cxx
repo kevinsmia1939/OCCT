@@ -600,13 +600,25 @@ BRepClass3d_ImplicitBox::RegionTopologyWitness BRepClass3d_ImplicitBox::CheckReg
   int                maximumDepth,
   size_t             maximumCells)
 {
+  return CheckRegionTopology(face, resolution, maximumDepth, maximumCells, CornerPolicy::Reject);
+}
+
+BRepClass3d_ImplicitBox::RegionTopologyWitness BRepClass3d_ImplicitBox::CheckRegionTopology(
+  const TopoDS_Face& face,
+  int                resolution,
+  int                maximumDepth,
+  size_t             maximumCells,
+  CornerPolicy       policy)
+{
   RegionTopologyWitness result;
-  result.Surface = CheckTopology(face, resolution, maximumDepth, maximumCells);
+  result.Surface = CheckTopology(face, resolution, maximumDepth, maximumCells, policy);
   if (!result.Surface.HomotopyResolved || !result.Surface.ReferenceManifold)
   {
     result.Reason = result.Surface.Reason;
     return result;
   }
+  resolution = result.Surface.Resolution;
+  const bool regularized = policy == CornerPolicy::Regularized;
   const auto   data  = occ::down_cast<BRep_TImplicitFace>(face.TShape());
   const auto&  field = *static_cast<const Geom_ImplicitGyroid*>(data->Field().get());
   const gp_Pnt low = data->Minimum(), high = data->Maximum();
@@ -633,21 +645,34 @@ BRepClass3d_ImplicitBox::RegionTopologyWitness BRepClass3d_ImplicitBox::CheckReg
     roots.emplace(Edge(edge[0], edge[1]), int(i));
   }
   std::map<int, int>    vertices;
-  std::map<int, double> values;
+  std::vector<double> values(size_t(side) * side * side,
+                             std::numeric_limits<double>::quiet_NaN());
   auto                  value = [&](int index) {
-    auto found = values.find(index);
-    if (found != values.end())
-      return found->second;
-    const double f = field.Value(point(index));
-    values.emplace(index, f);
+    if (std::isfinite(values[size_t(index)]))
+      return values[size_t(index)];
+    const auto p = point(index);
+    double f = field.Value(p);
+    const int coordinates[3] = {index % side, (index / side) % side, index / (side * side)};
+    if (regularized && (coordinates[0] == 0 || coordinates[0] == resolution)
+        && (coordinates[1] == 0 || coordinates[1] == resolution)
+        && (coordinates[2] == 0 || coordinates[2] == resolution))
+    {
+      double exact = 0;
+      gp_Vec gradient;
+      if (field.LatticeJet(p, exact, gradient) && exact == 0)
+        f = 0; // Same exact box-corner identity as the surface witness.
+    }
+    values[size_t(index)] = f;
     return f;
   };
   auto vertex = [&](int index) {
     auto found = vertices.find(index);
     if (found != vertices.end())
       return found->second;
-    const int n = int(result.Nodes.size());
-    result.Nodes.push_back(point(index));
+    const auto shared = roots.find({index, index});
+    const int n = shared != roots.end() ? shared->second : int(result.Nodes.size());
+    if (shared == roots.end())
+      result.Nodes.push_back(point(index));
     vertices.emplace(index, n);
     return n;
   };
@@ -676,6 +701,11 @@ BRepClass3d_ImplicitBox::RegionTopologyWitness BRepClass3d_ImplicitBox::CheckReg
                                corners[size_t(local[2])]};
             if (!highSide)
               std::swap(triangle[1], triangle[2]);
+            bool material = false;
+            for (int n : triangle)
+              material |= value(n) != 0 && ((value(n) < 0) == negative);
+            if (!material)
+              continue; // A zero contact alone is not a retained 2-D cap.
             if (result.Nodes.size() + 3 > 200000 || result.Triangles.size() + 2 > 400000)
             {
               result.Reason = "closed_reference_mesh_budget_exhausted";
@@ -685,10 +715,11 @@ BRepClass3d_ImplicitBox::RegionTopologyWitness BRepClass3d_ImplicitBox::CheckReg
             for (int edge = 0; edge < 3; ++edge)
             {
               const int  a = triangle[edge], b = triangle[(edge + 1) % 3];
-              const bool insideA = (value(a) < 0) == negative, insideB = (value(b) < 0) == negative;
-              if (insideA)
+              const double va = value(a), vb = value(b);
+              const bool insideA = (va < 0) == negative, insideB = (vb < 0) == negative;
+              if (va == 0 || insideA)
                 polygon.push_back(vertex(a));
-              if (insideA != insideB)
+              if (va != 0 && vb != 0 && insideA != insideB)
               {
                 const auto found = roots.find(std::minmax(a, b));
                 if (found == roots.end())
@@ -740,8 +771,9 @@ BRepClass3d_ImplicitBox::RegionTopologyWitness BRepClass3d_ImplicitBox::CheckReg
   for (long double volume : volumes)
     result.ComponentSignedVolumes.push_back(double(volume));
   // Within a tetrahedron a retained affine half-space is convex. Every
-  // nonempty retained cell/face contains a strictly retained grid vertex
-  // (nodal zeros were excluded). Joining same-sign vertices along the common
+  // nonempty retained VOLUME cell contains a strictly retained grid vertex.
+  // Zero vertices must NOT join components through a mere contact. Joining
+  // strict same-sign vertices along the common
   // tetrahedral 1-skeleton therefore gives VOLUME connectivity, not merely
   // connectivity of its possibly disconnected boundary shells.
   const size_t        gridSize = size_t(side) * side * side;
@@ -749,8 +781,8 @@ BRepClass3d_ImplicitBox::RegionTopologyWitness BRepClass3d_ImplicitBox::CheckReg
   std::vector<int>    parent(gridSize, -1);
   for (size_t i = 0; i < gridSize; ++i)
   {
-    nodal[i] = field.Value(point(int(i)));
-    if ((nodal[i] < 0) == negative)
+    nodal[i] = value(int(i));
+    if (nodal[i] != 0 && ((nodal[i] < 0) == negative))
       parent[i] = int(i);
   }
   auto representative = [&](int n) {
@@ -765,6 +797,7 @@ BRepClass3d_ImplicitBox::RegionTopologyWitness BRepClass3d_ImplicitBox::CheckReg
     {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {1, 1, 0}, {0, 0, 1}, {1, 0, 1}, {0, 1, 1}, {1, 1, 1}};
   constexpr int tets[6][4] =
     {{0, 1, 3, 7}, {0, 3, 2, 7}, {0, 2, 6, 7}, {0, 6, 4, 7}, {0, 4, 5, 7}, {0, 5, 1, 7}};
+  std::map<int, std::vector<int>> zeroNeighbors;
   for (int z = 0; z < resolution; ++z)
     for (int y = 0; y < resolution; ++y)
       for (int x = 0; x < resolution; ++x)
@@ -785,6 +818,10 @@ BRepClass3d_ImplicitBox::RegionTopologyWitness BRepClass3d_ImplicitBox::CheckReg
             else
               parent[size_t(representative(n))] = representative(anchor);
           }
+          if (anchor >= 0)
+            for (int local : tet)
+              if (nodal[size_t(cube[local])] == 0)
+                zeroNeighbors[cube[local]].push_back(anchor);
         }
       }
   std::map<int, int> regions;
@@ -793,10 +830,37 @@ BRepClass3d_ImplicitBox::RegionTopologyWitness BRepClass3d_ImplicitBox::CheckReg
       regions.emplace(representative(int(i)), 0);
   for (auto& entry : regions)
     entry.second = result.RegionCount++;
+  std::map<int, int> zeroRegions;
+  for (const auto& entry : zeroNeighbors)
+  {
+    int region = -1;
+    for (int neighbor : entry.second)
+    {
+      const int adjacent = regions.at(representative(neighbor));
+      if (region >= 0 && region != adjacent)
+      {
+        result.Reason = "closed_reference_corner_volume_link_unresolved";
+        return result;
+      }
+      region = adjacent;
+    }
+    zeroRegions.emplace(entry.first, region);
+  }
   std::vector<int> nodeRegion(result.Nodes.size(), -1);
   for (size_t i = 0; i < result.Surface.GridEdges.size(); ++i)
   {
     const auto& edge     = result.Surface.GridEdges[i];
+    if (edge[0] == edge[1])
+    {
+      const auto found = zeroRegions.find(edge[0]);
+      if (found == zeroRegions.end())
+      {
+        result.Reason = "closed_reference_corner_region_unresolved";
+        return result;
+      }
+      nodeRegion[i] = found->second;
+      continue;
+    }
     const int   retained = parent[size_t(edge[0])] >= 0 ? edge[0] : edge[1];
     if (parent[size_t(retained)] < 0)
     {
@@ -806,7 +870,20 @@ BRepClass3d_ImplicitBox::RegionTopologyWitness BRepClass3d_ImplicitBox::CheckReg
     nodeRegion[i] = regions.at(representative(retained));
   }
   for (const auto& entry : vertices)
-    nodeRegion[size_t(entry.second)] = regions.at(representative(entry.first));
+  {
+    if (nodal[size_t(entry.first)] == 0)
+    {
+      const auto found = zeroRegions.find(entry.first);
+      if (found == zeroRegions.end())
+      {
+        result.Reason = "closed_reference_cap_corner_region_unresolved";
+        return result;
+      }
+      nodeRegion[size_t(entry.second)] = found->second;
+    }
+    else
+      nodeRegion[size_t(entry.second)] = regions.at(representative(entry.first));
+  }
   result.ComponentRegions.assign(result.ComponentEuler.size(), -1);
   for (size_t i = 0; i < result.Triangles.size(); ++i)
   {

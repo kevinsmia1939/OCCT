@@ -281,6 +281,10 @@ public:
   //! native trim/cap correspondence or native shell/solid construction.
   Standard_EXPORT static RegionTopologyWitness CheckRegionTopology(const TopoDS_Face&,
     int theResolution = 32, int theMaximumDepth = 16, size_t theMaximumCells = 4000000);
+  //! Explicit corner-aware closed reference; zero nodes never join strict
+  //! volume components. Not stored native attachment or native solid validity.
+  Standard_EXPORT static RegionTopologyWitness CheckRegionTopology(const TopoDS_Face&,
+    int theResolution, int theMaximumDepth, size_t theMaximumCells, CornerPolicy);
 
   //! Check the whole BOX zero set against a common Freudenthal nodal-linear
   //! reference. On tetrahedra and true box-boundary strata, exclude homotopy
