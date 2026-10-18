@@ -5,6 +5,7 @@
 #include <BRep_ImplicitPlaneSection.hxx>
 #include <TopoDS_Compound.hxx>
 #include <TopoDS_Shell.hxx>
+#include <TopoDS_Solid.hxx>
 #include <vector>
 #include <array>
 #include <string>
@@ -145,6 +146,46 @@ public:
     std::vector<std::array<gp_Pnt,2>> ComponentDomains;
     Boundary Source; //!< Owned authoritative recipe/topology snapshot; not a mesh definition.
   };
+
+  struct CapGeometry
+  {
+    bool Resolved=false;
+    std::string Reason;
+    double MathematicalToCapsBound=0,CapsToMathematicalBound=0,EdgeVertexDeviation=0,BoundaryBound=0;
+    std::array<size_t,2> Cells{};
+    size_t SegmentTests=0;
+    int UnresolvedSide=-1,UnresolvedDirection=-1;
+    gp_Pnt UnresolvedMinimum,UnresolvedMaximum;
+  };
+
+  //! Whole planar-cap coverage in both directions, using actual lifted p-curves,
+  //! Bounded F-value exclusions and explicit retained mathematical cap witnesses.
+  //! Includes 3D edge/vertex residuals. No mesh or stored verification flags.
+  //! Numerical engineering bounds, NOT directed intervals or topology validation.
+  Standard_EXPORT static CapGeometry CheckCapGeometry(const Boundary&,
+    const std::vector<TopoDS_Face>& theCaps,double theTolerance=0.1,
+    int theMaximumDepth=16,size_t theMaximumCells=2000000,size_t theMaximumSegmentTests=8000000);
+
+  struct NativeSolids
+  {
+    bool Constructed=false,Validated=false;
+    std::string Reason;
+    double Tolerance=0.1,MaximumStoredTolerance=0;
+    NativeShells Boundary;
+    CapGeometry Geometry;
+    TopoDS_Compound Shape;
+    std::vector<TopoDS_Solid> Solids; //!< Retained material-region order, not shell order.
+  };
+
+  //! Fresh native face/shell/topology construction, whole cap/edge/vertex
+  //! geometric coverage and bounded stored tolerances gate actual native solids.
+  //! Validation is restricted implicit-aware numerical tolerance validity,
+  //! NOT generic UV BRepCheck/BOP qualification or a formal interval certificate.
+  Standard_EXPORT static NativeSolids BuildNativeSolids(const Boundary&,
+    double theTolerance=0.1,int theResolution=32,int theMaximumDepth=16,
+    size_t theMaximumCells=4000000,size_t theMaximumTests=2000000,
+    size_t theMaximumSeparatorCells=2000000,size_t theMaximumGeometryCells=2000000,
+    size_t theMaximumSegmentTests=8000000);
 
   //! Attach whole field faces, partitioning disconnected components only at
   //! checked F/L-zero-free axis planes, then assemble genuine native shells.

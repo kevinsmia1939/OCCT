@@ -648,6 +648,159 @@ TEST(BRepClass3d_ImplicitBox, NativeShellsEnclosedCavityAndEmptyFullRegions)
   }
 }
 
+TEST(BRepClass3d_ImplicitBox, NativeSolidsGatedByWholeCapGeometryBothOperations)
+{
+  for (bool open : {false, true})
+    for (auto operation : {BRepClass3d_ImplicitBox::Operation::Common,
+                           BRepClass3d_ImplicitBox::Operation::BoxMinusField})
+    {
+      const auto operand =
+        open ? BRepPrimAPI_MakeBox(gp_Pnt(-3.83, -4.07, -2.67), gp_Pnt(4.17, 3.93, 3.37)).Shape()
+             : box();
+      const auto source =
+        BRepClass3d_ImplicitBox::Build(field(open ? 0 : 1.45), operand, operation);
+      std::ostringstream before;
+      BRepClass3d_ImplicitBoxIO::Write(source, before);
+      const auto result = BRepClass3d_ImplicitBox::BuildNativeSolids(source);
+      ASSERT_TRUE(result.Constructed)
+        << open << " " << int(operation) << " " << result.Reason << " cells "
+        << result.Geometry.Cells[0] << "," << result.Geometry.Cells[1] << " segments "
+        << result.Geometry.SegmentTests;
+      EXPECT_TRUE(result.Validated);
+      EXPECT_TRUE(result.Geometry.Resolved);
+      EXPECT_LE(result.Geometry.BoundaryBound, .1);
+      EXPECT_GT(result.Geometry.Cells[0], 0u);
+      EXPECT_GT(result.Geometry.Cells[1], 0u);
+      EXPECT_LE(result.MaximumStoredTolerance, .1);
+      EXPECT_EQ(result.Solids.size(), 1u);
+      for (const auto& solid : result.Solids)
+      {
+        EXPECT_EQ(solid.ShapeType(), TopAbs_SOLID);
+        EXPECT_TRUE(solid.Closed());
+      }
+      std::ostringstream after;
+      BRepClass3d_ImplicitBoxIO::Write(source, after);
+      EXPECT_EQ(before.str(), after.str());
+    }
+}
+
+TEST(BRepClass3d_ImplicitBox, CapGeometryRejectsMissingAndExtraneousNativeCaps)
+{
+  using Ops                             = BRepClass3d_ImplicitBox;
+  const auto                     source = Ops::Build(field(), box(), Ops::Operation::BoxMinusField);
+  const std::vector<TopoDS_Face> caps(source.Faces.begin(), source.Faces.end() - 1);
+  const auto                     good = Ops::CheckCapGeometry(source, caps);
+  ASSERT_TRUE(good.Resolved) << good.Reason;
+  const auto missing = Ops::CheckCapGeometry(source, {});
+  EXPECT_FALSE(missing.Resolved);
+  auto         ghost = source;
+  const auto   old   = source.Faces.back();
+  const auto   data  = occ::down_cast<BRep_TImplicitFace>(old.TShape());
+  TopoDS_Face  changed;
+  BRep_Builder builder;
+  builder.MakeImplicitFace(changed,
+                           new Geom_ImplicitGyroid(10, 2),
+                           data->Minimum(),
+                           data->Maximum(),
+                           TopLoc_Location(),
+                           .1);
+  for (TopoDS_Iterator it(old, false, false); it.More(); it.Next())
+    builder.Add(changed, it.Value());
+  changed.Orientation(old.Orientation());
+  ghost.Faces.back() = changed;
+  builder.MakeCompound(ghost.Shape);
+  for (const auto& face : ghost.Faces)
+    builder.Add(ghost.Shape, face);
+  ghost.GeometricBound    = 0;
+  ghost.SeamBoundVerified = true;
+  const auto extra        = Ops::CheckCapGeometry(ghost, caps);
+  EXPECT_FALSE(extra.Resolved);
+  EXPECT_EQ(extra.UnresolvedDirection, 1);
+  const auto limited = Ops::CheckCapGeometry(source, caps, .1, 16, 1);
+  EXPECT_FALSE(limited.Resolved);
+  const auto segmentLimit = Ops::CheckCapGeometry(source, caps, .1, 16, 2000000, 1);
+  EXPECT_FALSE(segmentLimit.Resolved);
+  EXPECT_EQ(segmentLimit.SegmentTests, 1u);
+  EXPECT_EQ(segmentLimit.Reason, "Cap geometry segment budget exhausted");
+  EXPECT_THROW(Ops::CheckCapGeometry(source, caps, 0), Standard_DomainError);
+}
+
+TEST(BRepClass3d_ImplicitBox, NativeSolidsFullAndEmptyRetainMathematicalRegion)
+{
+  using Ops = BRepClass3d_ImplicitBox;
+  for (auto operation : {Ops::Operation::Common, Ops::Operation::BoxMinusField})
+  {
+    const auto source = Ops::Build(field(2), box(), operation);
+    const auto result = Ops::BuildNativeSolids(source, .1, 4);
+    ASSERT_TRUE(result.Validated) << result.Reason;
+    EXPECT_TRUE(result.Geometry.Resolved);
+    EXPECT_LE(result.Geometry.BoundaryBound, .1);
+    EXPECT_EQ(result.Solids.size(), operation == Ops::Operation::Common ? 1u : 0u);
+    EXPECT_FALSE(result.Shape.IsNull());
+    for (const auto& solid : result.Solids)
+      EXPECT_TRUE(BRepCheck_Analyzer(solid).IsValid()); // Only conventional box faces here.
+  }
+}
+
+TEST(BRepClass3d_ImplicitBox, NativeSolidsSeparateIslandsAndGroupCavityShells)
+{
+  using Ops = BRepClass3d_ImplicitBox;
+  const auto islands =
+    Ops::Build(field(),
+               BRepPrimAPI_MakeBox(gp_Pnt(-.31, -.37, 1.25), gp_Pnt(12.93, 2.91, 4)).Shape(),
+               Ops::Operation::BoxMinusField);
+  const auto result = Ops::BuildNativeSolids(islands, .1, 64);
+  ASSERT_TRUE(result.Validated) << result.Reason;
+  EXPECT_EQ(result.Solids.size(), 2u);
+  const auto cavity =
+    Ops::Build(field(),
+               BRepPrimAPI_MakeBox(gp_Pnt(.3, .3, .3), gp_Pnt(2.3, 2.3, 2.3)).Shape(),
+               Ops::Operation::Common);
+  const auto hollow = Ops::BuildNativeSolids(cavity);
+  ASSERT_TRUE(hollow.Validated) << hollow.Reason;
+  ASSERT_EQ(hollow.Solids.size(), 1u);
+  int shells = 0;
+  for (TopoDS_Iterator it(hollow.Solids[0]); it.More(); it.Next())
+    ++shells;
+  EXPECT_EQ(shells, 2);
+  const auto tight = Ops::BuildNativeSolids(islands, .01, 64);
+  EXPECT_FALSE(tight.Constructed);
+  EXPECT_FALSE(tight.Validated);
+  EXPECT_TRUE(tight.Shape.IsNull());
+  const auto budget = Ops::BuildNativeSolids(cavity, .1, 32, 16, 4000000, 2000000, 2000000, 1);
+  EXPECT_FALSE(budget.Constructed);
+  EXPECT_TRUE(budget.Shape.IsNull());
+}
+
+TEST(BRepClass3d_ImplicitBox, NativeSolidsScaledPeriodicTranslationAtFixedTolerance)
+{
+  using Ops = BRepClass3d_ImplicitBox;
+  for (double scale : {.5, 2.})
+  {
+    // Integer-period coordinate translations preserve the gyroid equation.
+    auto point = [scale](double x, double y, double z) {
+      return gp_Pnt((x + 20) * scale, (y - 10) * scale, (z + 30) * scale);
+    };
+    TopoDS_Face face;
+    BRep_Builder().MakeImplicitFace(face,
+                                    new Geom_ImplicitGyroid(10 * scale, 1.45),
+                                    point(-5, -5, -5),
+                                    point(16, 16, 6),
+                                    TopLoc_Location(),
+                                    .1);
+    const auto operand = BRepPrimAPI_MakeBox(point(-.31, -.37, 1.25), point(2.93, 2.91, 4)).Shape();
+    for (auto operation : {Ops::Operation::Common, Ops::Operation::BoxMinusField})
+    {
+      const auto source = Ops::Build(face, operand, operation, .1);
+      const auto result = Ops::BuildNativeSolids(source, .1);
+      ASSERT_TRUE(result.Validated) << scale << " " << int(operation) << " " << result.Reason;
+      EXPECT_EQ(result.Solids.size(), 1u);
+      EXPECT_LE(result.Geometry.BoundaryBound, .1);
+      EXPECT_LE(result.MaximumStoredTolerance, .1);
+    }
+  }
+}
+
 TEST(BRepClass3d_ImplicitBox, CommonAndDirectionalCutShareOppositeSeamsAndCapPCurves)
 {
   const auto source  = field();
