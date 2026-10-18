@@ -26,6 +26,8 @@ set(OCCT_BRepClass3d_FILES
   BRepClass3d_ImplicitBoxGeometry.cxx
   BRepClass3d_ImplicitBoxIO.hxx
   BRepClass3d_ImplicitBoxIO.cxx
+  BRepClass3d_ImplicitSolidIO.hxx
+  BRepClass3d_ImplicitSolidIO.cxx
   BRepClass3d_SolidExplorer.cxx
   BRepClass3d_SolidExplorer.hxx
 )

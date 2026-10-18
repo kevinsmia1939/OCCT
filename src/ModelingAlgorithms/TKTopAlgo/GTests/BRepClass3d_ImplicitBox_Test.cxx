@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: LGPL-2.1-only WITH OCCT-exception-1.0
 #include <BRepClass3d_ImplicitBox.hxx>
 #include <BRepClass3d_ImplicitBoxIO.hxx>
+#include <BRepClass3d_ImplicitSolidIO.hxx>
 #include <BRepMesh_ImplicitBoundary.hxx>
+#include <BRepMesh_IncrementalMesh.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <BRep_ImplicitTool.hxx>
@@ -34,6 +36,9 @@
 #include <map>
 #include <limits>
 #include <Poly_Triangulation.hxx>
+#include <locale>
+#include <NCollection_IndexedMap.hxx>
+#include <TopTools_ShapeMapHasher.hxx>
 
 namespace
 {
@@ -798,6 +803,203 @@ TEST(BRepClass3d_ImplicitBox, NativeSolidsScaledPeriodicTranslationAtFixedTolera
       EXPECT_LE(result.Geometry.BoundaryBound, .1);
       EXPECT_LE(result.MaximumStoredTolerance, .1);
     }
+  }
+}
+
+TEST(BRepClass3d_ImplicitBox, NativeSolidTopologyIORestoresActualSharedGraphNotValidation)
+{
+  using Ops = BRepClass3d_ImplicitBox;
+  for (int fixture = 0; fixture < 6; ++fixture)
+  {
+    const bool open = fixture == 2 || fixture == 3;
+    const auto operand =
+      fixture == 4   ? BRepPrimAPI_MakeBox(gp_Pnt(-.31, -.37, 1.25), gp_Pnt(12.93, 2.91, 4)).Shape()
+      : fixture == 5 ? BRepPrimAPI_MakeBox(gp_Pnt(.3, .3, .3), gp_Pnt(2.3, 2.3, 2.3)).Shape()
+      : open ? BRepPrimAPI_MakeBox(gp_Pnt(-3.83, -4.07, -2.67), gp_Pnt(4.17, 3.93, 3.37)).Shape()
+             : box();
+    const auto operation = fixture == 1 || fixture == 3 || fixture == 4
+                             ? Ops::Operation::BoxMinusField
+                             : Ops::Operation::Common;
+    const auto source    = Ops::Build(field(open ? 0 : 1.45), operand, operation);
+    const auto value     = Ops::BuildNativeSolids(source, .1, fixture == 4 ? 64 : 32);
+    ASSERT_TRUE(value.Validated) << fixture << " " << value.Reason;
+    if (fixture == 0)
+      BRepMesh_IncrementalMesh(value.Boundary.Faces[0], .05);
+    std::vector<occ::handle<Poly_Triangulation>> caches;
+    for (const auto& face : value.Boundary.Faces)
+    {
+      TopLoc_Location location;
+      caches.push_back(BRep_Tool::Triangulation(face, location));
+    }
+    if (fixture == 0)
+      ASSERT_FALSE(caches[0].IsNull());
+    NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> originalParts;
+    TopExp::MapShapes(value.Shape, originalParts);
+    std::vector<std::array<bool, 3>> flags;
+    for (const auto& part : originalParts)
+      flags.push_back({part.Closed(), part.Checked(), part.Free()});
+    std::ostringstream before;
+    BRepClass3d_ImplicitBoxIO::Write(value.Boundary.Source, before);
+    std::ostringstream record;
+    BRepClass3d_ImplicitSolidIO::Write(value, record);
+    Ops::NativeSolids  loaded;
+    std::istringstream input(record.str());
+    BRepClass3d_ImplicitSolidIO::Read(input, loaded);
+    ASSERT_TRUE(loaded.Constructed);
+    EXPECT_FALSE(loaded.Validated);
+    EXPECT_FALSE(loaded.Geometry.Resolved);
+    EXPECT_FALSE(loaded.Boundary.TopologyValidated);
+    EXPECT_FALSE(loaded.Boundary.FacesAttached);
+    EXPECT_FALSE(loaded.Boundary.Source.SeamBoundVerified);
+    EXPECT_EQ(loaded.Reason, "restored_native_solids_unverified");
+    EXPECT_EQ(loaded.Solids.size(), value.Solids.size());
+    EXPECT_EQ(loaded.Boundary.Shells.size(), value.Boundary.Shells.size());
+    EXPECT_EQ(loaded.Boundary.FaceSources, value.Boundary.FaceSources);
+    EXPECT_EQ(loaded.Boundary.FaceComponents, value.Boundary.FaceComponents);
+    EXPECT_EQ(loaded.Boundary.FaceShells, value.Boundary.FaceShells);
+    EXPECT_EQ(loaded.Boundary.ShellRegions, value.Boundary.ShellRegions);
+    EXPECT_EQ(loaded.Boundary.ShellEuler, value.Boundary.ShellEuler);
+    ASSERT_EQ(loaded.Boundary.ComponentDomains.size(), value.Boundary.ComponentDomains.size());
+    for (size_t c = 0; c < value.Boundary.ComponentDomains.size(); ++c)
+      for (size_t end = 0; end < 2; ++end)
+        for (int axis = 1; axis <= 3; ++axis)
+          EXPECT_DOUBLE_EQ(loaded.Boundary.ComponentDomains[c][end].Coord(axis),
+                           value.Boundary.ComponentDomains[c][end].Coord(axis));
+    for (const auto& solid : loaded.Solids)
+    {
+      EXPECT_EQ(solid.ShapeType(), TopAbs_SOLID);
+      EXPECT_FALSE(solid.Closed());
+      EXPECT_FALSE(solid.Checked());
+    }
+    for (const auto& shell : loaded.Boundary.Shells)
+      EXPECT_FALSE(shell.Closed());
+    NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> edges;
+    TopExp::MapShapes(loaded.Shape, TopAbs_EDGE, edges);
+    for (const auto& edge : edges)
+    {
+      int uses = 0, balance = 0;
+      for (const auto& face : loaded.Boundary.Faces)
+        for (TopExp_Explorer it(face, TopAbs_EDGE); it.More(); it.Next())
+          if (it.Current().IsSame(edge))
+          {
+            ++uses;
+            balance += it.Current().Orientation() == TopAbs_FORWARD ? 1 : -1;
+          }
+      EXPECT_EQ(uses, 2);
+      EXPECT_EQ(balance, 0);
+    }
+    std::ostringstream saved, after;
+    BRepClass3d_ImplicitSolidIO::Write(loaded, saved);
+    EXPECT_EQ(saved.str(), record.str());
+    BRepClass3d_ImplicitBoxIO::Write(value.Boundary.Source, after);
+    EXPECT_EQ(before.str(), after.str());
+    if (fixture == 4)
+      EXPECT_EQ(loaded.Solids.size(), 2u);
+    if (fixture == 5)
+    {
+      EXPECT_EQ(loaded.Solids.size(), 1u);
+      EXPECT_EQ(loaded.Boundary.Shells.size(), 2u);
+    }
+    size_t partIndex = 0;
+    for (const auto& part : originalParts)
+    {
+      EXPECT_EQ(flags[partIndex],
+                (std::array<bool, 3>{part.Closed(), part.Checked(), part.Free()}));
+      ++partIndex;
+    }
+    for (size_t f = 0; f < value.Boundary.Faces.size(); ++f)
+    {
+      TopLoc_Location location;
+      EXPECT_EQ(caches[f], BRep_Tool::Triangulation(value.Boundary.Faces[f], location));
+      EXPECT_TRUE(BRep_Tool::Triangulation(loaded.Boundary.Faces[f], location).IsNull());
+    }
+  }
+}
+
+TEST(BRepClass3d_ImplicitBox, NativeSolidTopologyIORejectsCorruptionAtomically)
+{
+  using Ops = BRepClass3d_ImplicitBox;
+  const auto value =
+    Ops::BuildNativeSolids(Ops::Build(field(), box(), Ops::Operation::BoxMinusField));
+  ASSERT_TRUE(value.Validated) << value.Reason;
+  std::ostringstream output;
+  BRepClass3d_ImplicitSolidIO::Write(value, output);
+  const auto               valid = output.str();
+  std::vector<std::string> invalid{valid.substr(0, valid.size() - 1),
+                                   valid + "garbage",
+                                   "OCCT_IMPLICIT_SOLIDS 99 1 0 0 0 0 .1\n",
+                                   "OCCT_IMPLICIT_SOLIDS 1 16777217 0 0 0 0 .1\n"};
+  auto                     wire     = valid;
+  const std::string        wireTail = " 1 0\nSHELLS\n";
+  const auto               at       = wire.find(wireTail);
+  ASSERT_NE(at, std::string::npos);
+  wire.replace(at, wireTail.size(), " 2 0 0\nSHELLS\n");
+  invalid.push_back(wire); // One source wire cannot be assigned twice.
+  auto       shell  = valid;
+  const auto faceAt = shell.find("FACES\n");
+  ASSERT_NE(faceAt, std::string::npos);
+  shell.replace(faceAt, std::string("FACES\n0 -1 0").size(), "FACES\n0 -1 1");
+  invalid.push_back(shell);
+  auto       domain   = valid;
+  const auto domainAt = domain.find("COMPONENTS\n") + std::string("COMPONENTS\n").size();
+  domain.replace(domainAt, domain.find(' ', domainAt) - domainAt, "-1000");
+  invalid.push_back(domain);
+  auto destination = value;
+  for (const auto& text : invalid)
+  {
+    std::istringstream input(text);
+    EXPECT_THROW(BRepClass3d_ImplicitSolidIO::Read(input, destination), Standard_DomainError);
+    EXPECT_TRUE(destination.Validated);
+    EXPECT_TRUE(destination.Shape.IsSame(value.Shape));
+  }
+  auto unsupported                    = value;
+  unsupported.Boundary.FaceSources[0] = 99;
+  std::ostringstream unchanged;
+  unchanged << "untouched";
+  EXPECT_THROW(BRepClass3d_ImplicitSolidIO::Write(unsupported, unchanged), Standard_DomainError);
+  EXPECT_EQ(unchanged.str(), "untouched");
+  Ops::NativeSolids locked;
+  BRep_Builder().MakeCompound(locked.Shape);
+  locked.Shape.Locked(true);
+  std::istringstream input(valid);
+  EXPECT_THROW(BRepClass3d_ImplicitSolidIO::Read(input, locked), Standard_DomainError);
+  EXPECT_TRUE(locked.Shape.Locked());
+  auto loose = value.Boundary.Source.Faces[0];
+  loose.Free(true); // Noncanonical ownership must reject, not mutate it.
+  std::ostringstream frozen;
+  EXPECT_THROW(BRepClass3d_ImplicitSolidIO::Write(value, frozen), Standard_DomainError);
+  EXPECT_TRUE(loose.Free());
+  EXPECT_TRUE(frozen.str().empty());
+  loose.Free(false);
+}
+
+TEST(BRepClass3d_ImplicitBox, NativeSolidTopologyIOFullEmptyAndLocale)
+{
+  struct DecimalComma : std::numpunct<char>
+  {
+    char do_decimal_point() const override { return ','; }
+  };
+
+  using Ops = BRepClass3d_ImplicitBox;
+  for (auto operation : {Ops::Operation::Common, Ops::Operation::BoxMinusField})
+  {
+    const auto value = Ops::BuildNativeSolids(Ops::Build(field(2), box(), operation), .1, 4);
+    ASSERT_TRUE(value.Validated) << value.Reason;
+    std::ostringstream output;
+    output.imbue(std::locale(std::locale::classic(), new DecimalComma));
+    const auto precision = output.precision(3);
+    BRepClass3d_ImplicitSolidIO::Write(value, output);
+    EXPECT_EQ(output.precision(), 3);
+    output.precision(precision);
+    Ops::NativeSolids  restored;
+    std::istringstream input(output.str());
+    input.imbue(std::locale(std::locale::classic(), new DecimalComma));
+    BRepClass3d_ImplicitSolidIO::Read(input, restored);
+    EXPECT_TRUE(restored.Constructed);
+    EXPECT_FALSE(restored.Validated);
+    EXPECT_EQ(restored.Solids.size(), operation == Ops::Operation::Common ? 1u : 0u);
+    for (const auto& face : restored.Boundary.Faces)
+      EXPECT_FALSE(BRep_Tool::IsImplicit(face));
   }
 }
 
