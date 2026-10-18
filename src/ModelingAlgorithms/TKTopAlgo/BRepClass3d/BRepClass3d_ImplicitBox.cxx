@@ -37,6 +37,17 @@ namespace
 using Map       = NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher>;
 using Boundary  = BRepClass3d_ImplicitBox::Boundary;
 using Operation = BRepClass3d_ImplicitBox::Operation;
+using CornerPolicy = BRepClass3d_ImplicitBox::CornerPolicy;
+
+bool exactIdentity(const TopLoc_Location& location)
+{
+  const auto matrix = location.Transformation();
+  for (int row = 1; row <= 3; ++row)
+    for (int column = 1; column <= 4; ++column)
+      if (matrix.Value(row, column) != (row == column ? 1. : 0.))
+        return false;
+  return true;
+}
 
 void require(bool condition, const char* message)
 {
@@ -159,6 +170,85 @@ void roots(const Geom_ImplicitGyroid& field,
   roots(field, mid, last, hessian, bracket, reserve, out, budget, depth + 1);
 }
 
+// Endpoint zeros are anchored identities, not interior roots to duplicate on
+// each incident edge. A recognized midpoint is inserted once in edge order;
+// its two child intervals prove that no additional root was hidden beside it.
+void cornerRoots(const Geom_ImplicitGyroid& field, const gp_Pnt& first, const gp_Pnt& last,
+                 double hessian, double bracket, double reserve, double gradientReserve, std::vector<gp_Pnt>& out,
+                 int& budget, int depth = 0)
+{
+  require(--budget >= 0 && depth <= 32, "Corner-aware box-edge root budget exhausted");
+  const gp_Pnt mid((first.XYZ() + last.XYZ()) * .5);
+  const double length = first.Distance(last);
+  require(std::isfinite(length) && length > 0, "Corner-aware edge coordinate collapse");
+  double va = 0, vb = 0, vm = 0;
+  gp_Vec unused;
+  const bool za = field.LatticeJet(first, va, unused) && va == 0;
+  const bool zb = field.LatticeJet(last, vb, unused) && vb == 0;
+  const bool zm = field.LatticeJet(mid, vm, unused) && vm == 0;
+  const double fa = za ? 0 : field.Value(first), fb = zb ? 0 : field.Value(last);
+  const double fm = zm ? 0 : field.Value(mid);
+  require((za || std::abs(fa) > reserve) && (zb || std::abs(fb) > reserve),
+          "Unrecognized near-zero corner/edge subdivision node");
+  if (std::abs(fm) > field.LipschitzBound() * length * .5 + reserve)
+    return;
+  const double derivative = field.Gradient(mid).Dot(gp_Vec(first, last) / length);
+  const double slope = std::abs(derivative) - hessian * length * .5 - gradientReserve;
+  if (slope > 0)
+  {
+    require(!(za && zb), "Two endpoint zeros contradict edge monotonicity");
+    if (za || zb)
+    {
+      require(std::signbit(za ? fb : fa) == std::signbit(za ? derivative : -derivative),
+              "Endpoint zero contradicts the certified inward edge sign");
+      return;
+    }
+    if (std::signbit(fa) == std::signbit(fb))
+      return;
+    if (zm)
+      out.push_back(mid);
+    else
+    {
+      gp_Pnt a = first, b = last;
+      double va = fa;
+      for (int iteration = 0; iteration < 100 && a.Distance(b) > bracket; ++iteration)
+      {
+        const gp_Pnt p((a.XYZ() + b.XYZ()) * .5);
+        double exact = 0;
+        if (field.LatticeJet(p, exact, unused) && exact == 0)
+        {
+          a = b = p;
+          break;
+        }
+        const double value = field.Value(p);
+        if (std::abs(value) <= reserve)
+        {
+          require(2 * (std::abs(value) + reserve) / slope <= bracket,
+                  "Corner-edge root location uncertainty exceeds its bracket budget");
+          a = b = p; // A bounded location witness, NOT a newly recognized exact zero.
+          break;
+        }
+        if (std::signbit(va) != std::signbit(value))
+          b = p;
+        else
+        {
+          a = p;
+          va = value;
+        }
+      }
+      require(a.Distance(b) <= bracket, "Corner-edge root failed its distance bracket");
+      out.emplace_back((a.XYZ() + b.XYZ()) * .5);
+    }
+    return;
+  }
+  require(length > bracket && mid.Distance(first) > 0 && mid.Distance(last) > 0,
+          "Tangent/critical corner-edge interval unresolved");
+  cornerRoots(field, first, mid, hessian, bracket, reserve, gradientReserve, out, budget, depth + 1);
+  if (zm)
+    out.push_back(mid);
+  cornerRoots(field, mid, last, hessian, bracket, reserve, gradientReserve, out, budget, depth + 1);
+}
+
 int addArc(std::vector<Arc>&        arcs,
            const std::vector<Node>& nodes,
            int                      first,
@@ -269,6 +359,8 @@ BRepClass3d_ImplicitBox::PointClassification BRepClass3d_ImplicitBox::Classify(
   const gp_Pnt&   point,
   double          tolerance)
 {
+  require(boundary.Policy == CornerPolicy::Reject,
+          "Corner-aware regularized distance classification is not implemented");
   if (!std::isfinite(tolerance) || tolerance <= 0)
     throw Standard_DomainError("Classification distance tolerance must be finite and positive");
   require(!boundary.Faces.empty(), "Classification requires a constructed native mixed boundary");
@@ -518,7 +610,8 @@ Boundary construct(const TopoDS_Face&,
                    std::vector<Side>,
                    Operation,
                    double,
-                   double);
+                   double,
+                   CornerPolicy = CornerPolicy::Reject);
 } // namespace
 
 BRepClass3d_ImplicitBox::Boundary BRepClass3d_ImplicitBox::Build(const TopoDS_Face&  fieldFace,
@@ -527,15 +620,26 @@ BRepClass3d_ImplicitBox::Boundary BRepClass3d_ImplicitBox::Build(const TopoDS_Fa
                                                                  double              tolerance,
                                                                  int                 maximumCells)
 {
+  return Build(fieldFace, box, operation, tolerance, maximumCells, CornerPolicy::Reject);
+}
+
+BRepClass3d_ImplicitBox::Boundary BRepClass3d_ImplicitBox::Build(const TopoDS_Face& fieldFace,
+  const TopoDS_Shape& box, Operation operation, double tolerance, int maximumCells, CornerPolicy policy)
+{
   if (!std::isfinite(tolerance) || tolerance <= 0)
     throw Standard_DomainError("Mixed Boolean tolerance must be finite and positive");
   if (operation != Operation::Common && operation != Operation::BoxMinusField)
     throw Standard_DomainError("Unknown mixed Boolean operation");
+  if (policy != CornerPolicy::Reject && policy != CornerPolicy::Regularized)
+    throw Standard_DomainError("Unknown mixed corner policy");
   const auto data = occ::down_cast<BRep_TImplicitFace>(fieldFace.TShape());
   require(!data.IsNull() && typeid(*data) == typeid(BRep_TImplicitFace)
             && typeid(*data->Field()) == typeid(Geom_ImplicitGyroid)
-            && !TopoDS_Iterator(fieldFace).More() && fieldFace.Location().IsIdentity()
-            && data->Location().IsIdentity() && fieldFace.Orientation() == TopAbs_FORWARD,
+            && !TopoDS_Iterator(fieldFace).More()
+            && (policy == CornerPolicy::Regularized
+                  ? exactIdentity(fieldFace.Location() * data->Location())
+                  : fieldFace.Location().IsIdentity() && data->Location().IsIdentity())
+            && fieldFace.Orientation() == TopAbs_FORWARD,
           "Mixed box Boolean requires a childless identity-placed forward native gyroid");
   require(!box.IsNull() && box.ShapeType() == TopAbs_SOLID && box.Orientation() == TopAbs_FORWARD
             && BRepCheck_Analyzer(box).IsValid(),
@@ -568,6 +672,18 @@ BRepClass3d_ImplicitBox::Boundary BRepClass3d_ImplicitBox::Build(const TopoDS_Fa
     require(high.Coord(j) - low.Coord(j) > 4 * tolerance && low.Coord(j) >= data->Minimum().Coord(j)
               && high.Coord(j) <= data->Maximum().Coord(j),
             "Box must fit inside the field domain and exceed four tolerances per axis");
+  if (policy == CornerPolicy::Regularized)
+  {
+    require(exactIdentity(box.Location()), "Corner-aware input box must have identity placement");
+    for (const auto& vertex : vertices)
+    {
+      require(exactIdentity(vertex.Location()), "Corner-aware box vertices must be local identities");
+      const auto p = BRep_Tool::Pnt(TopoDS::Vertex(vertex));
+      for (int axis = 1; axis <= 3; ++axis)
+        require(p.Coord(axis) == low.Coord(axis) || p.Coord(axis) == high.Coord(axis),
+                "Corner-aware box recognition must not move a near-corner vertex");
+    }
+  }
   std::array<bool, 8> cornerSeen{};
   for (const auto& vertex : vertices)
   {
@@ -593,6 +709,18 @@ BRepClass3d_ImplicitBox::Boundary BRepClass3d_ImplicitBox::Build(const TopoDS_Fa
     TopoDS_Vertex a, b;
     TopExp::Vertices(e, a, b);
     const auto p = BRep_Tool::Pnt(a), q = BRep_Tool::Pnt(b);
+    if (policy == CornerPolicy::Regularized)
+    {
+      require(exactIdentity(e.Location()), "Corner-aware box edges need identity placement");
+      const auto line = curve.Line();
+      for (int axis = 1; axis <= 3; ++axis)
+      {
+        const bool varying = p.Coord(axis) != q.Coord(axis);
+        require(varying ? std::abs(line.Direction().Coord(axis)) == 1
+                        : line.Direction().Coord(axis) == 0 && line.Location().Coord(axis) == p.Coord(axis),
+                "Corner-aware box lines must agree exactly with coordinate-plane intersections");
+      }
+    }
     const auto first = curve.Value(curve.FirstParameter()),
                last  = curve.Value(curve.LastParameter());
     require(std::min(std::max(first.Distance(p), last.Distance(q)),
@@ -628,6 +756,14 @@ BRepClass3d_ImplicitBox::Boundary BRepClass3d_ImplicitBox::Build(const TopoDS_Fa
     require(!seen[size_t(index)], "Duplicate box side");
     seen[size_t(index)]     = true;
     const double coordinate = sign > 0 ? high.Coord(axis + 1) : low.Coord(axis + 1);
+    if (policy == CornerPolicy::Regularized)
+    {
+      require(exactIdentity(face.Location()) && plane.Location().Coord(axis + 1) == coordinate,
+              "Corner-aware box planes need exact intercepts and identity placement");
+      for (int j = 0; j < 3; ++j)
+        require(normal.Coord(j + 1) == (j == axis ? sign : 0),
+                "Corner-aware box planes must be exact coordinate planes");
+    }
     require(std::abs(plane.Location().Coord(axis + 1) - coordinate) <= recognition,
             "Box plane does not match an outward boundary");
     for (TopExp_Explorer it(face, TopAbs_VERTEX); it.More(); it.Next())
@@ -648,7 +784,7 @@ BRepClass3d_ImplicitBox::Boundary BRepClass3d_ImplicitBox::Build(const TopoDS_Fa
     sides.push_back(canonicalSide(axis, sign, source++, low, high, tolerance, maximumCells));
   }
 
-  return construct(fieldFace, low, high, std::move(sides), operation, tolerance, reserve);
+  return construct(fieldFace, low, high, std::move(sides), operation, tolerance, reserve, policy);
 }
 
 namespace
@@ -659,11 +795,13 @@ Boundary construct(const TopoDS_Face& fieldFace,
                    std::vector<Side>  sides,
                    Operation          operation,
                    double             tolerance,
-                   double             reserve)
+                   double             reserve,
+                   CornerPolicy       policy)
 {
   const auto   data = occ::down_cast<BRep_TImplicitFace>(fieldFace.TShape());
   BRep_Builder builder;
   Boundary     result;
+  result.Policy = policy;
   builder.MakeCompound(result.Shape);
   std::vector<Node> nodes;
   const double      precision = std::max(reserve, std::min(1.e-7, tolerance / 4096));
@@ -673,12 +811,29 @@ Boundary construct(const TopoDS_Face& fieldFace,
   const double fieldReserve =
     512 * std::numeric_limits<double>::epsilon() * (1 + std::abs(field.IsoValue()))
     + field.LipschitzBound() * reserve;
+  BRepClass3d_ImplicitBox::CornerModel cornerModel;
+  if (policy == CornerPolicy::Regularized)
+  {
+    TopoDS_Face boxed;
+    builder.MakeImplicitFace(boxed, data->Field(), low, high, TopLoc_Location(), tolerance);
+    cornerModel = BRepClass3d_ImplicitBox::CheckCornerGerms(boxed, tolerance);
+    require(cornerModel.Resolved, "Corner-aware box neighborhoods unresolved");
+    result.ExactCornerCount = cornerModel.ExactZeroCount;
+    for (const auto& corner : cornerModel.Corners)
+      if (corner.ExactZero
+          && (operation == Operation::Common
+                ? corner.Kind == BRepClass3d_ImplicitBox::CornerKind::PositiveCone
+                : corner.Kind == BRepClass3d_ImplicitBox::CornerKind::NegativeCone))
+        result.ExcludedCornerContacts.push_back(corner.Anchor);
+  }
   for (int c = 0; c < 8; ++c)
   {
     const gp_Pnt point(c & 1 ? high.X() : low.X(),
                        c & 2 ? high.Y() : low.Y(),
                        c & 4 ? high.Z() : low.Z());
-    require(std::abs(field.Value(point)) > fieldReserve, "Box corner on field is unresolved");
+    require(std::abs(field.Value(point)) > fieldReserve
+              || (policy == CornerPolicy::Regularized && cornerModel.Corners[size_t(c)].ExactZero),
+            "Box corner on field is unresolved");
     addNode(nodes, point, precision);
   }
   std::vector<Arc>     arcs;
@@ -692,14 +847,21 @@ Boundary construct(const TopoDS_Face& fieldFace,
       BoxEdge             edge{corner, corner | (1 << axis), {}, {}};
       std::vector<gp_Pnt> points;
       int                 budget = 65536;
-      roots(field,
+      if (policy == CornerPolicy::Regularized)
+        cornerRoots(field, nodes[size_t(edge.First)].Point, nodes[size_t(edge.Last)].Point,
+                    hessian, tolerance / 256, fieldReserve,
+                    hessian * 8 * reserve + 1024 * std::numeric_limits<double>::epsilon() * field.LipschitzBound(),
+                    points, budget);
+      else
+        roots(field,
             nodes[size_t(edge.First)].Point,
             nodes[size_t(edge.Last)].Point,
             hessian,
             tolerance / 256,
             fieldReserve,
             points,
-            budget);
+            budget,
+            0);
       std::vector<int> chain{edge.First};
       for (const auto& point : points)
       {
@@ -726,6 +888,7 @@ Boundary construct(const TopoDS_Face& fieldFace,
   std::vector<Use> implicitUses;
   for (auto& side : sides)
   {
+    side.Settings.AllowExactLatticeNodes = policy == CornerPolicy::Regularized;
     auto section = BRep_ImplicitPlaneSection::Trace(fieldFace, side.Settings);
     if (!section.Resolved)
     {
@@ -738,6 +901,30 @@ Boundary construct(const TopoDS_Face& fieldFace,
     const gp_Vec normal(side.Plane.Axis().Direction());
     gp_Pnt       center((low.XYZ() + high.XYZ()) * .5);
     center.SetCoord(side.Axis + 1, side.Plane.Location().Coord(side.Axis + 1));
+    auto cornerAt = [&](const gp_Pnt& p, bool entering) {
+      int found = -1;
+      for (int index = 0; index < 8; ++index)
+      {
+        const auto& corner = cornerModel.Corners[size_t(index)];
+        if (!corner.ExactZero || p.X() != corner.Anchor.X() || p.Y() != corner.Anchor.Y()
+            || p.Z() != corner.Anchor.Z())
+          continue;
+        const int a = (side.Axis + 1) % 3, b = (side.Axis + 2) % 3;
+        const bool positiveA = corner.InwardDerivativeLower[size_t(a)] > 0;
+        const bool positiveB = corner.InwardDerivativeLower[size_t(b)] > 0;
+        require((positiveA != positiveB) == entering,
+                "Corner face-contour incidence disagrees with checked derivative cone");
+        require(found < 0, "Duplicate exact corner identity");
+        found = index;
+      }
+      return found;
+    };
+    for (const auto& contact : section.PointContacts)
+    {
+      require(policy == CornerPolicy::Regularized && cornerAt(contact, false) >= 0,
+              "Plane contact lacks a checked canonical corner");
+      ++result.PlanarCornerContacts;
+    }
     for (const auto& edge : boxEdges)
     {
       const auto& a = nodes[size_t(edge.First)].Point;
@@ -760,6 +947,14 @@ Boundary construct(const TopoDS_Face& fieldFace,
       {
         auto endpoint = [&](gp_Pnt& point) {
           int found = -1;
+          if (policy == CornerPolicy::Regularized)
+            found = cornerAt(point, true);
+          if (found >= 0)
+          {
+            ++rootUses[size_t(found)];
+            ++result.CornerContourEnds;
+            return found; // Reuse the canonical corner vertex, never an edge-specific copy.
+          }
           for (const auto& edge : boxEdges)
           {
             const auto& a = nodes[size_t(edge.First)].Point;
@@ -845,6 +1040,11 @@ Boundary construct(const TopoDS_Face& fieldFace,
   for (size_t i = 0; i < rootUses.size(); ++i)
     if (nodes[i].RootEdge >= 0)
       require(rootUses[i] == 2, "Box-edge root must join exactly two adjacent face contours");
+  if (policy == CornerPolicy::Regularized)
+    for (size_t i = 0; i < 8; ++i)
+      if (cornerModel.Corners[i].ExactZero)
+        require(rootUses[i] == (cornerModel.Corners[i].Kind == BRepClass3d_ImplicitBox::CornerKind::SplitCone ? 2 : 0),
+                "Canonical corner must match its checked cross-face contour incidence");
   TopoDS_Face implicit;
   builder.MakeImplicitFace(implicit, data->Field(), low, high, TopLoc_Location(), tolerance);
   if (!negative)

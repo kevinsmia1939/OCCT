@@ -208,6 +208,8 @@ void validate(const Boundary& boundary)
 
 void BRepClass3d_ImplicitBoxIO::Write(const Boundary& boundary, Standard_OStream& output)
 {
+  if (boundary.Policy != BRepClass3d_ImplicitBox::CornerPolicy::Reject)
+    throw Standard_NotImplemented("Corner-aware boundary persistence requires an explicit policy-aware schema");
   validate(boundary);
   const auto&  face = boundary.Faces.back();
   const auto&  data = primitive(face);

@@ -20,6 +20,12 @@ public:
     BoxMinusField
   };
 
+  enum class CornerPolicy
+  {
+    Reject,
+    Regularized //!< Closure of 3-D interior; isolated closed-inequality contacts recorded separately.
+  };
+
   struct Boundary
   {
     TopoDS_Compound          Shape;
@@ -30,6 +36,9 @@ public:
     int    BoxEdgeRootCount  = 0;     //!< Shared roots, each used by two adjacent face contours.
     double GeometricBound    = 0;     //!< Seam bound ONLY, not a surface/solid certificate.
     bool   SeamBoundVerified = false; //!< True only after tracing, false after topology I/O.
+    CornerPolicy Policy = CornerPolicy::Reject;
+    int ExactCornerCount = 0, CornerContourEnds = 0, PlanarCornerContacts = 0;
+    std::vector<gp_Pnt> ExcludedCornerContacts; //!< Not vertices of regularized boundary topology.
   };
 
   enum class PointState
@@ -327,5 +336,12 @@ public:
                                         Operation           theOperation,
                                         double              theTolerance    = 0.1,
                                         int                 theMaximumCells = 512);
+
+  //! Explicit corner-aware boundary construction, not a native solid validator.
+  //! Regularized material differs from closed inequalities at isolated contacts.
+  //! Legacy distance classification/codec/solid consumers reject this policy
+  //! until their corner-aware counterparts are implemented; no silent promotion.
+  Standard_EXPORT static Boundary Build(const TopoDS_Face&, const TopoDS_Shape&,
+    Operation, double theTolerance, int theMaximumCells, CornerPolicy);
 };
 #endif

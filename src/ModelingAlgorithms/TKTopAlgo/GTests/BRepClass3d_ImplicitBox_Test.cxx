@@ -1056,6 +1056,95 @@ TEST(BRepClass3d_ImplicitBox, CommonAndDirectionalCutShareOppositeSeamsAndCapPCu
   EXPECT_TRUE(BRepCheck_Analyzer(operand).IsValid());
 }
 
+TEST(BRepClass3d_ImplicitBox, DefaultCornerBoundaryUsesSharedNativeTopology)
+{
+  using Ops = BRepClass3d_ImplicitBox;
+  const auto source = topologyField(gp_Pnt(0, 0, 0), gp_Pnt(10, 10, 10), 0);
+  const auto operand = BRepPrimAPI_MakeBox(10, 10, 10).Shape();
+  for (auto operation : {Ops::Operation::Common, Ops::Operation::BoxMinusField})
+  {
+    const auto result = Ops::Build(source, operand, operation, .1, 512,
+                                   Ops::CornerPolicy::Regularized);
+    EXPECT_EQ(result.Policy, Ops::CornerPolicy::Regularized);
+    EXPECT_EQ(result.ExactCornerCount, 8);
+    EXPECT_EQ(result.CornerContourEnds, 12);
+    EXPECT_EQ(result.PlanarCornerContacts, 12);
+    ASSERT_EQ(result.ExcludedCornerContacts.size(), 1u);
+    EXPECT_EQ(result.ExcludedCornerContacts.front().Distance(
+      operation == Ops::Operation::Common ? gp_Pnt(0, 0, 0) : gp_Pnt(10, 10, 10)), 0);
+    EXPECT_EQ(result.SeamCount, 18);
+    EXPECT_EQ(result.BoxEdgeRootCount, 12);
+    EXPECT_TRUE(result.SeamBoundVerified);
+    EXPECT_LE(result.GeometricBound, .1);
+    NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> edges, vertices;
+    TopExp::MapShapes(result.Shape, TopAbs_EDGE, edges);
+    TopExp::MapShapes(result.Shape, TopAbs_VERTEX, vertices);
+    EXPECT_EQ(edges.Extent(), 30);
+    EXPECT_EQ(vertices.Extent(), 19);
+    for (int i = 1; i <= edges.Extent(); ++i)
+    {
+      int uses = 0, balance = 0;
+      for (TopExp_Explorer it(result.Shape, TopAbs_EDGE); it.More(); it.Next())
+        if (edges(i).IsSame(it.Current()))
+        {
+          ++uses;
+          balance += it.Current().Orientation() == TopAbs_FORWARD ? 1 : -1;
+        }
+      EXPECT_EQ(uses, 2);
+      EXPECT_EQ(balance, 0);
+    }
+    for (const auto& face : result.Faces)
+      if (BRep_Tool::IsImplicit(face))
+        EXPECT_FALSE(BRep_Tool::HasParametricSurface(face));
+      else
+        EXPECT_TRUE(BRepCheck_Analyzer(face).IsValid());
+    // Legacy consumers must not silently lose the new material policy.
+    std::ostringstream record;
+    record << "unchanged";
+    EXPECT_THROW(BRepClass3d_ImplicitBoxIO::Write(result, record), Standard_NotImplemented);
+    EXPECT_EQ(record.str(), "unchanged");
+    EXPECT_THROW(Ops::Classify(result, gp_Pnt(0, 0, 0), .1), Standard_NotImplemented);
+  }
+  EXPECT_FALSE(TopoDS_Iterator(source).More());
+  EXPECT_TRUE(BRepCheck_Analyzer(operand).IsValid());
+  EXPECT_THROW(Ops::Build(source, operand, Ops::Operation::Common), Standard_NotImplemented);
+}
+
+TEST(BRepClass3d_ImplicitBox, CornerBoundaryRestoredIdentityScaleAndFailurePolicies)
+{
+  using Ops = BRepClass3d_ImplicitBox;
+  for (double scale : {.1, 1., 2.})
+  {
+    const gp_Pnt low(-10 * scale, -10 * scale, 10 * scale);
+    const gp_Pnt high(low.XYZ() + gp_XYZ(10, 10, 10) * scale);
+    const auto source = topologyField(low, high, 0, scale);
+    std::ostringstream before;
+    BRep_ImplicitIO::Write(source, before);
+    std::istringstream input(before.str());
+    TopoDS_Face restored;
+    BRep_ImplicitIO::Read(input, restored);
+    const auto operand = BRepPrimAPI_MakeBox(low, high).Shape();
+    const auto result = Ops::Build(restored, operand, Ops::Operation::Common, .1 * scale,
+                                   512, Ops::CornerPolicy::Regularized);
+    EXPECT_EQ(result.SeamCount, 18);
+    EXPECT_EQ(result.ExactCornerCount, 8);
+    EXPECT_LE(result.GeometricBound, .1 * scale);
+    EXPECT_THROW(Ops::Build(restored, operand, Ops::Operation::Common, .1 * scale,
+                            4, Ops::CornerPolicy::Regularized), Standard_NotImplemented);
+    std::ostringstream after;
+    BRep_ImplicitIO::Write(restored, after);
+    EXPECT_EQ(after.str(), before.str());
+    EXPECT_THROW(Ops::BuildNativeShells(result), Standard_NotImplemented);
+    EXPECT_THROW(Ops::BuildNativeSolids(result), Standard_NotImplemented);
+    gp_Trsf move;
+    move.SetTranslation(gp_Vec(1e-12, 0, 0));
+    auto placed = restored;
+    placed.Location(TopLoc_Location(move));
+    EXPECT_THROW(Ops::Build(placed, operand, Ops::Operation::Common, .1 * scale,
+                            512, Ops::CornerPolicy::Regularized), Standard_NotImplemented);
+  }
+}
+
 TEST(BRepClass3d_ImplicitBox, UnsupportedInputsRejectRatherThanReturnPartialBoundary)
 {
   using Ops = BRepClass3d_ImplicitBox;
