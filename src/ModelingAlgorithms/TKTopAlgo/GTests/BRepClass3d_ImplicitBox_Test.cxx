@@ -1098,11 +1098,20 @@ TEST(BRepClass3d_ImplicitBox, DefaultCornerBoundaryUsesSharedNativeTopology)
         EXPECT_FALSE(BRep_Tool::HasParametricSurface(face));
       else
         EXPECT_TRUE(BRepCheck_Analyzer(face).IsValid());
-    // Legacy consumers must not silently lose the new material policy.
+    // Policy-aware I/O retains the actual graph without claiming fresh bounds.
     std::ostringstream record;
-    record << "unchanged";
-    EXPECT_THROW(BRepClass3d_ImplicitBoxIO::Write(result, record), Standard_NotImplemented);
-    EXPECT_EQ(record.str(), "unchanged");
+    BRepClass3d_ImplicitBoxIO::Write(result, record);
+    EXPECT_EQ(record.str().find("OCCT_IMPLICIT_BOX_TOPOLOGY 2 "), 0u);
+    std::istringstream input(record.str());
+    Ops::Boundary restored;
+    BRepClass3d_ImplicitBoxIO::Read(input, restored);
+    EXPECT_EQ(restored.Policy, result.Policy);
+    EXPECT_EQ(restored.CornerContourEnds, result.CornerContourEnds);
+    EXPECT_FALSE(restored.SeamBoundVerified);
+    EXPECT_EQ(restored.ExcludedCornerContacts.front().Distance(result.ExcludedCornerContacts.front()), 0);
+    EXPECT_THROW(BRepMesh_ImplicitBoundary::Prepare(restored), Standard_NotImplemented);
+    EXPECT_THROW(BRepMesh_ImplicitBoundary::CheckCoverage(restored, {}), Standard_NotImplemented);
+    EXPECT_THROW(Ops::CheckCapGeometry(restored, {}), Standard_NotImplemented);
     EXPECT_THROW(Ops::Classify(result, gp_Pnt(0, 0, 0), .1), Standard_NotImplemented);
   }
   EXPECT_FALSE(TopoDS_Iterator(source).More());
@@ -1143,6 +1152,45 @@ TEST(BRepClass3d_ImplicitBox, CornerBoundaryRestoredIdentityScaleAndFailurePolic
     EXPECT_THROW(Ops::Build(placed, operand, Ops::Operation::Common, .1 * scale,
                             512, Ops::CornerPolicy::Regularized), Standard_NotImplemented);
   }
+}
+
+TEST(BRepClass3d_ImplicitBox, CornerTopologyIORejectsPolicyCorruptionAtomically)
+{
+  using Ops = BRepClass3d_ImplicitBox;
+  auto source = Ops::Build(topologyField(gp_Pnt(), gp_Pnt(10, 10, 10), 0),
+                           BRepPrimAPI_MakeBox(10, 10, 10).Shape(), Ops::Operation::Common,
+                           .1, 512, Ops::CornerPolicy::Regularized);
+  std::ostringstream record;
+  BRepClass3d_ImplicitBoxIO::Write(source, record);
+  const auto originalShape = source.Shape;
+  for (int change = 0; change < 4; ++change)
+  {
+    auto broken = source;
+    if (change == 0) --broken.ExactCornerCount;
+    if (change == 1) --broken.CornerContourEnds;
+    if (change == 2) --broken.PlanarCornerContacts;
+    if (change == 3) broken.ExcludedCornerContacts.front().SetX(1e-12);
+    std::ostringstream output;
+    output << "untouched";
+    EXPECT_THROW(BRepClass3d_ImplicitBoxIO::Write(broken, output), Standard_DomainError);
+    EXPECT_EQ(output.str(), "untouched");
+  }
+  for (int change = 0; change < 4; ++change)
+  {
+    auto text = record.str();
+    const auto marker = text.find(" 1 8 12 12 1\n");
+    ASSERT_NE(marker, std::string::npos);
+    if (change == 0) text.replace(marker, 13, " 0 8 12 12 1\n");
+    if (change == 1) text.replace(marker, 13, " 1 8 10 12 1\n");
+    if (change == 2) text += "trailing";
+    if (change == 3) text.resize(text.size() / 2);
+    std::istringstream input(text);
+    EXPECT_THROW(BRepClass3d_ImplicitBoxIO::Read(input, source), Standard_DomainError);
+    EXPECT_TRUE(source.Shape.IsSame(originalShape));
+  }
+  std::ostringstream after;
+  BRepClass3d_ImplicitBoxIO::Write(source, after);
+  EXPECT_EQ(after.str(), record.str());
 }
 
 TEST(BRepClass3d_ImplicitBox, UnsupportedInputsRejectRatherThanReturnPartialBoundary)

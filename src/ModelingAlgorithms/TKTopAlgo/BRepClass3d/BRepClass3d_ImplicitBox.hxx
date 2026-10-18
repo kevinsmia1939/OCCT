@@ -339,7 +339,7 @@ public:
 
   //! Explicit corner-aware boundary construction, not a native solid validator.
   //! Regularized material differs from closed inequalities at isolated contacts.
-  //! Legacy distance classification/codec/solid consumers reject this policy
+  //! Legacy distance classification/reference/solid consumers reject this policy
   //! until their corner-aware counterparts are implemented; no silent promotion.
   Standard_EXPORT static Boundary Build(const TopoDS_Face&, const TopoDS_Shape&,
     Operation, double theTolerance, int theMaximumCells, CornerPolicy);

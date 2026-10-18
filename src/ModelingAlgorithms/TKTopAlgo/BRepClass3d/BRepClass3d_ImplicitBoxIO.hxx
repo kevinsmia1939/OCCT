@@ -6,7 +6,8 @@
 #include <Standard_IStream.hxx>
 #include <Standard_OStream.hxx>
 
-//! Explicit schema-1 hybrid topology I/O. Not generic BRepTools/OCAF/STEP.
+//! Explicit schema-1/2 hybrid topology I/O. Not generic BRepTools/OCAF/STEP.
+//! Schema 2 retains regularized corner policy and checked contact identities.
 //! Persists the authoritative primitive and shared conventional cap/edge/wire
 //! graph, never a substitute UV surface, display mesh, pointer or recipe rebuild.
 //! Structural validation is NOT whole-solid/geometric-error certification.

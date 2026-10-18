@@ -1217,6 +1217,8 @@ BRepClass3d_ImplicitBox::Correspondence BRepClass3d_ImplicitBox::CheckCorrespond
   int             maximumCells,
   size_t          maximumComparisons)
 {
+  require(source.Policy == CornerPolicy::Reject,
+          "Corner-aware whole-domain trim correspondence is not implemented");
   if (maximumCells < 4 || maximumCells > 512 || (maximumCells & (maximumCells - 1))
       || !maximumComparisons || maximumComparisons > 10000000)
     throw Standard_DomainError("Invalid trim correspondence settings");

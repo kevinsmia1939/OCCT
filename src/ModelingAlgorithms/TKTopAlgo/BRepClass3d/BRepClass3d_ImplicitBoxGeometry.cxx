@@ -360,6 +360,8 @@ BRepClass3d_ImplicitBox::CapGeometry BRepClass3d_ImplicitBox::CheckCapGeometry(
   size_t                          maximumCells,
   size_t                          maximumSegments)
 {
+  require(source.Policy == CornerPolicy::Reject,
+          "Corner-aware cap geometry validation is not implemented");
   if (!std::isfinite(tolerance) || tolerance <= 0 || maximumDepth < 1 || maximumDepth > 24
       || !maximumCells || maximumCells > 10000000 || !maximumSegments || maximumSegments > 50000000
       || candidates.size() > 128)

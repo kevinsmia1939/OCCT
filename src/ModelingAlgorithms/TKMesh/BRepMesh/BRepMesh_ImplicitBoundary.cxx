@@ -140,6 +140,8 @@ BRepMesh_ImplicitBoundary::Result BRepMesh_ImplicitBoundary::Prepare(
   int                                      maximumNodes,
   int                                      maximumTriangles)
 {
+  require(source.Policy == BRepClass3d_ImplicitBox::CornerPolicy::Reject,
+          "Corner-aware native mesh constraints are not implemented");
   if (!std::isfinite(deflection) || deflection < 1.e-7 || maximumNodes < 3 || maximumNodes > 1000000
       || maximumTriangles < 1 || maximumTriangles > 2000000)
     throw Standard_DomainError("Invalid native mesh constraint settings");

@@ -6,6 +6,7 @@
 #include <BRepAdaptor_Surface.hxx>
 #include <Geom_ImplicitGyroid.hxx>
 #include <Standard_DomainError.hxx>
+#include <Standard_NotImplemented.hxx>
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -354,6 +355,8 @@ BRepMesh_ImplicitBoundary::Coverage BRepMesh_ImplicitBoundary::CheckCoverage(
   size_t                                   maximumCells,
   size_t                                   maximumPatches)
 {
+  if (source.Policy != BRepClass3d_ImplicitBox::CornerPolicy::Reject)
+    throw Standard_NotImplemented("Corner-aware clipped coverage is not implemented");
   if (!std::isfinite(tolerance) || tolerance <= 0 || maximumDepth < 1 || maximumDepth > 20
       || !maximumCells || maximumCells > 10000000 || !maximumPatches || maximumPatches > 4000000
       || mesh.Nodes.size() > 1000000

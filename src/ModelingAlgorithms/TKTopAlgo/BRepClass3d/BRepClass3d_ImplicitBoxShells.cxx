@@ -281,6 +281,8 @@ BRepClass3d_ImplicitBox::NativeShells BRepClass3d_ImplicitBox::BuildNativeShells
   size_t          maximumTests,
   size_t          maximumSeparatorCells)
 {
+  require(source.Policy == CornerPolicy::Reject,
+          "Corner-aware native shell attachment is not implemented");
   if (!maximumSeparatorCells || maximumSeparatorCells > 10000000)
     throw Standard_DomainError("Invalid native component separator budget");
   NativeShells       result;

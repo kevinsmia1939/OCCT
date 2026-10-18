@@ -117,7 +117,7 @@ Descriptor describe(const Ops::NativeSolids& value)
   require(value.Constructed && value.Boundary.ShellsConstructed && std::isfinite(value.Tolerance)
           && value.Tolerance > 0 && value.Solids.size() <= 128);
   const auto& b = value.Boundary;
-  require(!b.Source.Faces.empty());
+  require(b.Source.Policy == Ops::CornerPolicy::Reject && !b.Source.Faces.empty());
   const auto& original    = b.Source.Faces.back();
   const auto& fieldData   = implicit(original);
   const auto& field       = *static_cast<const Geom_ImplicitGyroid*>(fieldData.Field().get());

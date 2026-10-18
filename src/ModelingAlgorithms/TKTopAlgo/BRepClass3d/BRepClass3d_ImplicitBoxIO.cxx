@@ -105,6 +105,69 @@ void validate(const Boundary& boundary)
   TopExp::MapShapes(implicit, TopAbs_EDGE, nativeEdges);
   TopExp::MapShapes(implicit, TopAbs_VERTEX, nativeVertices);
   require(allEdges.Extent() <= 500000 && nativeEdges.Extent() == boundary.SeamCount);
+  const bool regularized = boundary.Policy == BRepClass3d_ImplicitBox::CornerPolicy::Regularized;
+  require(regularized || boundary.Policy == BRepClass3d_ImplicitBox::CornerPolicy::Reject);
+  BRepClass3d_ImplicitBox::CornerModel corners;
+  std::array<int, 8> cornerVertices{}, cornerEnds{};
+  if (regularized)
+  {
+    // Recheck the local mathematical identities, never retrace or recertify
+    // stored seam bounds. Geometry and topology remain the stored graph.
+    corners = BRepClass3d_ImplicitBox::CheckCornerGerms(implicit, data.Tolerance());
+    require(corners.Resolved && boundary.ExactCornerCount == corners.ExactZeroCount);
+    std::vector<gp_Pnt> excluded;
+    int contacts = 0;
+    for (const auto& corner : corners.Corners)
+      if (corner.ExactZero)
+      {
+        using Kind = BRepClass3d_ImplicitBox::CornerKind;
+        if (corner.Kind == (implicit.Orientation() == TopAbs_FORWARD
+                             ? Kind::PositiveCone : Kind::NegativeCone))
+          excluded.push_back(corner.Anchor);
+        for (int axis = 0; axis < 3; ++axis)
+          contacts += (corner.InwardDerivativeLower[size_t((axis + 1) % 3)] > 0)
+                      == (corner.InwardDerivativeLower[size_t((axis + 2) % 3)] > 0);
+      }
+    require(boundary.PlanarCornerContacts == contacts
+            && boundary.ExcludedCornerContacts.size() == excluded.size());
+    for (size_t i = 0; i < excluded.size(); ++i)
+      require(distance(boundary.ExcludedCornerContacts[i], excluded[i]) == 0);
+    Map vertices;
+    TopExp::MapShapes(boundary.Shape, TopAbs_VERTEX, vertices);
+    for (const auto& vertex : vertices)
+      for (size_t i = 0; i < 8; ++i)
+        if (distance(BRep_Tool::Pnt(TopoDS::Vertex(vertex)), corners.Corners[i].Anchor) == 0)
+          ++cornerVertices[i];
+    for (size_t i = 0; i < 8; ++i)
+    {
+      const auto membership = BRepClass3d_ImplicitBox::ClassifyCornerGerm(
+        implicit, int(i), corners.Corners[i].Anchor,
+        implicit.Orientation() == TopAbs_FORWARD ? BRepClass3d_ImplicitBox::Operation::Common
+                                                 : BRepClass3d_ImplicitBox::Operation::BoxMinusField,
+        data.Tolerance());
+      require(membership.Resolved && cornerVertices[i] == int(membership.RegularizedRetained));
+    }
+    for (const auto& edge : nativeEdges)
+    {
+      TopoDS_Vertex a, b;
+      TopExp::Vertices(TopoDS::Edge(edge), a, b);
+      for (const auto& vertex : {a, b})
+        for (size_t i = 0; i < 8; ++i)
+          if (distance(BRep_Tool::Pnt(vertex), corners.Corners[i].Anchor) == 0)
+            ++cornerEnds[i];
+    }
+    int ends = 0;
+    for (size_t i = 0; i < 8; ++i)
+    {
+      require(cornerEnds[i] == (corners.Corners[i].Kind
+                                == BRepClass3d_ImplicitBox::CornerKind::SplitCone ? 2 : 0));
+      ends += cornerEnds[i];
+    }
+    require(boundary.CornerContourEnds == ends);
+  }
+  else
+    require(boundary.ExactCornerCount == 0 && boundary.CornerContourEnds == 0
+            && boundary.PlanarCornerContacts == 0 && boundary.ExcludedCornerContacts.empty());
   int rootCount = 0;
   for (const auto& vertex : nativeVertices)
   {
@@ -114,7 +177,16 @@ void validate(const Boundary& boundary)
       sides += std::min(std::abs(p.Coord(axis) - data.Minimum().Coord(axis)),
                         std::abs(p.Coord(axis) - data.Maximum().Coord(axis)))
                <= precision;
-    require(sides >= 1 && sides <= 2);
+    require(sides >= 1 && sides <= (regularized ? 3 : 2));
+    if (sides == 3)
+    {
+      bool matched = false;
+      for (const auto& corner : corners.Corners)
+        matched |= corner.ExactZero
+                   && corner.Kind == BRepClass3d_ImplicitBox::CornerKind::SplitCone
+                   && distance(p, corner.Anchor) == 0;
+      require(matched);
+    }
     rootCount += sides == 2;
   }
   require(rootCount == boundary.BoxEdgeRootCount);
@@ -167,6 +239,12 @@ void validate(const Boundary& boundary)
       const double coordinate =
         normal.Coord(axis) > 0 ? data.Maximum().Coord(axis) : data.Minimum().Coord(axis);
       require(std::abs(plane.Location().Coord(axis) - coordinate) <= precision);
+      if (regularized)
+      {
+        require(plane.Location().Coord(axis) == coordinate);
+        for (int j = 1; j <= 3; ++j)
+          require(normal.Coord(j) == (j == axis ? (normal.Coord(axis) > 0 ? 1 : -1) : 0));
+      }
     }
     for (TopoDS_Iterator wire(face); wire.More(); wire.Next())
     {
@@ -208,8 +286,6 @@ void validate(const Boundary& boundary)
 
 void BRepClass3d_ImplicitBoxIO::Write(const Boundary& boundary, Standard_OStream& output)
 {
-  if (boundary.Policy != BRepClass3d_ImplicitBox::CornerPolicy::Reject)
-    throw Standard_NotImplemented("Corner-aware boundary persistence requires an explicit policy-aware schema");
   validate(boundary);
   const auto&  face = boundary.Faces.back();
   const auto&  data = primitive(face);
@@ -244,12 +320,22 @@ void BRepClass3d_ImplicitBoxIO::Write(const Boundary& boundary, Standard_OStream
   std::ostringstream record;
   record.imbue(std::locale::classic());
   record << std::setprecision(std::numeric_limits<double>::max_digits10)
-         << "OCCT_IMPLICIT_BOX_TOPOLOGY 1 " << m.size() << ' ' << t.size() << ' '
+         << "OCCT_IMPLICIT_BOX_TOPOLOGY "
+         << (boundary.Policy == BRepClass3d_ImplicitBox::CornerPolicy::Regularized ? 2 : 1)
+         << ' ' << m.size() << ' ' << t.size() << ' '
          << boundary.Faces.size() << ' ' << boundary.SeamCount << ' ' << boundary.BoxEdgeRootCount
-         << ' ' << boundary.GeometricBound << '\n';
+         << ' ' << boundary.GeometricBound;
+  if (boundary.Policy == BRepClass3d_ImplicitBox::CornerPolicy::Regularized)
+    record << " 1 " << boundary.ExactCornerCount << ' ' << boundary.CornerContourEnds
+           << ' ' << boundary.PlanarCornerContacts << ' ' << boundary.ExcludedCornerContacts.size();
+  record << '\n';
   for (int source : boundary.Sources)
     record << source << ' ';
-  record << '\n' << m << t;
+  record << '\n';
+  if (boundary.Policy == BRepClass3d_ImplicitBox::CornerPolicy::Regularized)
+    for (const auto& contact : boundary.ExcludedCornerContacts)
+      record << contact.X() << ' ' << contact.Y() << ' ' << contact.Z() << '\n';
+  record << m << t;
   const auto text = record.str();
   require(text.size() <= MaxBytes && bool(record));
   output.write(text.data(), std::streamsize(text.size()));
@@ -275,14 +361,34 @@ void BRepClass3d_ImplicitBoxIO::Read(Standard_IStream& input, Boundary& destinat
   Boundary    result;
   require(bool(record >> magic >> version >> mathSize >> topologySize >> faceCount
                >> result.SeamCount >> result.BoxEdgeRootCount >> result.GeometricBound));
-  require(magic == "OCCT_IMPLICIT_BOX_TOPOLOGY" && version == 1 && mathSize > 0 && mathSize <= 65536
+  require(magic == "OCCT_IMPLICIT_BOX_TOPOLOGY" && (version == 1 || version == 2) && mathSize > 0 && mathSize <= 65536
           && topologySize > 0 && topologySize <= MaxBytes && faceCount > 0 && faceCount <= 128
           && result.SeamCount >= 0 && result.SeamCount <= 500000 && result.BoxEdgeRootCount >= 0
-          && result.BoxEdgeRootCount <= 500000 && record.get() == '\n');
+          && result.BoxEdgeRootCount <= 500000);
+  if (version == 2)
+  {
+    int policy = 0, contacts = 0;
+    require(bool(record >> policy >> result.ExactCornerCount >> result.CornerContourEnds
+                        >> result.PlanarCornerContacts >> contacts));
+    require(policy == 1 && result.ExactCornerCount >= 0 && result.ExactCornerCount <= 8
+            && result.CornerContourEnds >= 0 && result.CornerContourEnds <= 24
+            && result.PlanarCornerContacts >= 0 && result.PlanarCornerContacts <= 24
+            && contacts >= 0 && contacts <= 8);
+    result.Policy = BRepClass3d_ImplicitBox::CornerPolicy::Regularized;
+    result.ExcludedCornerContacts.resize(size_t(contacts));
+  }
+  require(record.get() == '\n');
   result.Sources.resize(faceCount);
   for (int& source : result.Sources)
     require(bool(record >> source));
   require(record.get() == ' ' && record.get() == '\n');
+  for (auto& contact : result.ExcludedCornerContacts)
+  {
+    double x, y, z;
+    require(bool(record >> x >> y >> z) && std::isfinite(x) && std::isfinite(y) && std::isfinite(z)
+            && record.get() == '\n');
+    contact.SetCoord(x, y, z);
+  }
   std::string math(mathSize, '\0'), topology(topologySize, '\0');
   require(bool(record.read(math.data(), std::streamsize(mathSize))));
   require(bool(record.read(topology.data(), std::streamsize(topologySize)))
