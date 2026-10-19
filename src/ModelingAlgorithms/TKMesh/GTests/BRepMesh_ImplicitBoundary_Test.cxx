@@ -22,6 +22,7 @@
 #include <cmath>
 #include <limits>
 #include <map>
+#include <set>
 #include <sstream>
 
 namespace
@@ -148,6 +149,30 @@ TEST(BRepMesh_ImplicitBoundary, ExactTriangleAuditRejectsImproperContactsAndHand
   EXPECT_THROW(Mesher::Audit(mesh), Standard_DomainError); // index checks precede arithmetic limits
 }
 
+TEST(BRepMesh_ImplicitBoundary, SpatialAuditCullsCoplanarSparsePairsWithoutHidingContacts)
+{
+  using Mesher = BRepMesh_ImplicitBoundary;
+  Mesher::Result mesh;
+  for (int i = 0; i < 4096; ++i)
+  {
+    const int n = int(mesh.Nodes.size());
+    mesh.Nodes.push_back(gp_Pnt(0, 3 * i, 0));
+    mesh.Nodes.push_back(gp_Pnt(0, 3 * i + 1, 0));
+    mesh.Nodes.push_back(gp_Pnt(0, 3 * i, 1));
+    mesh.ImplicitTriangles.push_back({n, n + 1, n + 2});
+  }
+  const auto separated = Mesher::Audit(mesh, 1000, 100000);
+  EXPECT_EQ(separated.Status, Mesher::MeshAudit::State::Clear);
+  EXPECT_EQ(separated.PairTests, 0u);
+  EXPECT_LT(separated.BroadTests, 100000u);
+  const size_t last = mesh.Nodes.size() - 3;
+  for (size_t i = 0; i < 3; ++i) mesh.Nodes[last + i] = mesh.Nodes[i];
+  const auto contact = Mesher::Audit(mesh, 1000, 100000);
+  EXPECT_EQ(contact.Status, Mesher::MeshAudit::State::Contact);
+  EXPECT_EQ(contact.FirstTriangle, 0);
+  EXPECT_EQ(contact.SecondTriangle, 4095);
+}
+
 TEST(BRepMesh_ImplicitBoundary, NativeCandidateContactAuditDiagnostic)
 {
   using Mesher = BRepMesh_ImplicitBoundary;
@@ -198,6 +223,80 @@ void add(std::map<Key, Use>& uses, int a, int b)
   value.Balance += a < b ? 1 : -1;
 }
 } // namespace
+
+Ops::Boundary cornerBoundary(Ops::Operation operation)
+{
+  TopoDS_Face field;
+  BRep_Builder().MakeImplicitFace(field, new Geom_ImplicitGyroid(10, 0), gp_Pnt(),
+                                  gp_Pnt(10, 10, 10), TopLoc_Location(), .1);
+  return Ops::Build(field, BRepPrimAPI_MakeBox(10, 10, 10).Shape(), operation,
+                    .1, 512, Ops::CornerPolicy::Regularized);
+}
+
+TEST(BRepMesh_ImplicitBoundary, CornerCapConstraintsShareOnlyNativeCornerIdentities)
+{
+  using Mesher = BRepMesh_ImplicitBoundary;
+  for (const auto operation : {Ops::Operation::Common, Ops::Operation::BoxMinusField})
+  {
+    const auto source = cornerBoundary(operation);
+    std::ostringstream before;
+    BRepClass3d_ImplicitBoxIO::Write(source, before);
+    const auto prepared = Mesher::Prepare(source);
+    EXPECT_EQ(prepared.Policy, Ops::CornerPolicy::Regularized);
+    EXPECT_EQ(prepared.FixedCornerCount, 8);
+    ASSERT_EQ(prepared.Wires.size(), 1u);
+    EXPECT_EQ(prepared.Seams.size(), 18u);
+    std::set<int> corners;
+    for (int node : prepared.Wires[0])
+    {
+      const auto p = prepared.Nodes[size_t(node)];
+      if ((p.X() == 0 || p.X() == 10) && (p.Y() == 0 || p.Y() == 10)
+          && (p.Z() == 0 || p.Z() == 10)) corners.insert(node);
+    }
+    EXPECT_EQ(corners.size(), 6u);
+    EXPECT_FALSE(prepared.NativeSurfaceMeshed || prepared.SolidValidated);
+    for (const auto& face : source.Faces)
+    {
+      TopLoc_Location location;
+      EXPECT_TRUE(BRep_Tool::Triangulation(face, location).IsNull());
+    }
+    std::ostringstream after;
+    BRepClass3d_ImplicitBoxIO::Write(source, after);
+    EXPECT_EQ(before.str(), after.str());
+  }
+}
+
+TEST(BRepMesh_ImplicitBoundary, CornerFieldCandidateRetainsTrimCornersAndExcludesContacts)
+{
+  using Mesher = BRepMesh_ImplicitBoundary;
+  for (const auto operation : {Ops::Operation::Common, Ops::Operation::BoxMinusField})
+  {
+    const auto source = cornerBoundary(operation);
+    const auto mesh = Mesher::Tessellate(source);
+    EXPECT_TRUE(mesh.NativeSurfaceMeshed && mesh.MeshClosed);
+    EXPECT_FALSE(mesh.SurfaceCoverageVerified || mesh.SolidValidated);
+    EXPECT_EQ(mesh.Policy, Ops::CornerPolicy::Regularized);
+    EXPECT_EQ(mesh.FixedCornerCount, 8);
+    EXPECT_EQ(mesh.Cells % 2, 1);
+    EXPECT_LE(mesh.FieldDistanceBound, .1);
+    std::set<int> used;
+    for (const auto& t : mesh.ImplicitTriangles) for (int n : t) used.insert(n);
+    std::set<int> corners;
+    for (int n : used)
+    {
+      const auto p = mesh.Nodes[size_t(n)];
+      EXPECT_GT(p.Distance(gp_Pnt()), .1);
+      EXPECT_GT(p.Distance(gp_Pnt(10, 10, 10)), .1);
+      if ((p.X() == 0 || p.X() == 10) && (p.Y() == 0 || p.Y() == 10)
+          && (p.Z() == 0 || p.Z() == 10)) corners.insert(n);
+    }
+    EXPECT_EQ(corners.size(), 6u);
+    const auto audit = Mesher::Audit(mesh);
+    EXPECT_EQ(audit.Status, Mesher::MeshAudit::State::Clear)
+      << "broad=" << audit.BroadTests << " exact=" << audit.PairTests
+      << " caps=" << mesh.CapTriangles.size() << " field=" << mesh.ImplicitTriangles.size();
+  }
+}
 
 TEST(BRepMesh_ImplicitBoundary, CapsAndNativeWiresShareCanonicalSamplesAndOppositeIncidences)
 {

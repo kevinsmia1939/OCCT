@@ -314,31 +314,82 @@ BRepMesh_ImplicitBoundary::MeshAudit BRepMesh_ImplicitBoundary::Audit(const Resu
   }
   std::vector<size_t> order(triangles.size());
   std::iota(order.begin(), order.end(), 0);
-  std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
-    return boxes[a].Low[0] < boxes[b].Low[0];
-  });
-  for (size_t i = 0; i < order.size(); ++i)
-    for (size_t j = i + 1; j < order.size() && boxes[order[j]].Low[0] <= boxes[order[i]].High[0];
-         ++j)
-    {
-      if (result.BroadTests == maximumBroadTests)
-        return result;
-      ++result.BroadTests;
-      const size_t a = order[i], b = order[j];
-      if (boxes[a].High[1] < boxes[b].Low[1] || boxes[b].High[1] < boxes[a].Low[1]
-          || boxes[a].High[2] < boxes[b].Low[2] || boxes[b].High[2] < boxes[a].Low[2])
-        continue;
-      if (result.PairTests == maximumPairTests)
-        return result;
-      ++result.PairTests;
-      if (!clear(triangles[a], triangles[b], nodes))
+  struct Node
+  {
+    Box Bounds;
+    size_t Begin, End;
+    int Left = -1, Right = -1;
+  };
+  std::vector<Node> tree;
+  auto build = [&](auto&& self, size_t begin, size_t end) -> int {
+    Node node{boxes[order[begin]], begin, end};
+    for (size_t i = begin + 1; i < end; ++i)
+      for (int axis = 0; axis < 3; ++axis)
       {
-        result.Status         = MeshAudit::State::Contact;
-        result.FirstTriangle  = int(a);
-        result.SecondTriangle = int(b);
-        return result;
+        node.Bounds.Low[axis] = std::min(node.Bounds.Low[axis], boxes[order[i]].Low[axis]);
+        node.Bounds.High[axis] = std::max(node.Bounds.High[axis], boxes[order[i]].High[axis]);
       }
+    const int index = int(tree.size());
+    tree.push_back(node);
+    if (end - begin > 8)
+    {
+      int axis = 0;
+      for (int a = 1; a < 3; ++a)
+        if (node.Bounds.High[a] - node.Bounds.Low[a] > node.Bounds.High[axis] - node.Bounds.Low[axis])
+          axis = a;
+      const size_t middle = begin + (end - begin) / 2;
+      std::nth_element(order.begin() + begin, order.begin() + middle, order.begin() + end,
+        [&](size_t a, size_t b) {
+          return .5 * boxes[a].Low[axis] + .5 * boxes[a].High[axis]
+                 < .5 * boxes[b].Low[axis] + .5 * boxes[b].High[axis];
+        });
+      const int left = self(self, begin, middle), right = self(self, middle, end);
+      tree[size_t(index)].Left = left;
+      tree[size_t(index)].Right = right;
     }
+    return index;
+  };
+  build(build, 0, order.size());
+  const auto overlaps = [&](const Box& a, const Box& b) {
+    for (int axis = 0; axis < 3; ++axis)
+      if (a.High[axis] < b.Low[axis] || b.High[axis] < a.Low[axis]) return false;
+    return true;
+  };
+  auto visit = [&](auto&& self, int a, int b) -> bool {
+    if (result.BroadTests == maximumBroadTests) return false;
+    ++result.BroadTests; // Count node-box AND leaf-pair box comparisons.
+    const auto& x = tree[size_t(a)];
+    const auto& y = tree[size_t(b)];
+    if (!overlaps(x.Bounds, y.Bounds)) return true;
+    if (x.Left < 0 && y.Left < 0)
+    {
+      for (size_t i = x.Begin; i < x.End; ++i)
+        for (size_t j = a == b ? i + 1 : y.Begin; j < y.End; ++j)
+        {
+          if (result.BroadTests == maximumBroadTests) return false;
+          ++result.BroadTests;
+          const size_t first = order[i], second = order[j];
+          if (!overlaps(boxes[first], boxes[second])) continue;
+          if (result.PairTests == maximumPairTests) return false;
+          ++result.PairTests;
+          if (!clear(triangles[first], triangles[second], nodes))
+          {
+            result.Status = MeshAudit::State::Contact;
+            result.FirstTriangle = int(std::min(first, second));
+            result.SecondTriangle = int(std::max(first, second));
+            return false;
+          }
+        }
+      return true;
+    }
+    if (a == b)
+      return self(self, x.Left, x.Left) && self(self, x.Left, x.Right)
+             && self(self, x.Right, x.Right);
+    if (x.Left >= 0 && (y.Left < 0 || x.End - x.Begin >= y.End - y.Begin))
+      return self(self, x.Left, b) && self(self, x.Right, b);
+    return self(self, a, y.Left) && self(self, a, y.Right);
+  };
+  if (!visit(visit, 0, 0)) return result;
   result.Status = MeshAudit::State::Clear;
   return result;
 }

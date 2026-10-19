@@ -359,7 +359,8 @@ Result extract(const Result&              prepared,
                double                     tolerance,
                int                        cells,
                int                        maximumNodes,
-               int                        maximumTriangles)
+               int                        maximumTriangles,
+               const BRepClass3d_ImplicitBox::CornerModel* corners)
 {
   Result       result  = prepared;
   const auto   minimum = face.Minimum(), maximum = face.Maximum();
@@ -371,9 +372,9 @@ Result extract(const Result&              prepared,
   const double reserve   = 16384 * std::numeric_limits<double>::epsilon() * magnitude;
   require(tolerance > 4096 * reserve, "Native surface mesh coordinate precision exhausted");
   const double longest = std::max({extent.X(), extent.Y(), extent.Z()});
-  const int    nx      = std::max(1, int(std::ceil(cells * (extent.X() / longest))));
-  const int    ny      = std::max(1, int(std::ceil(cells * (extent.Y() / longest))));
-  const int    nz      = std::max(1, int(std::ceil(cells * (extent.Z() / longest))));
+  const int    nx      = corners ? cells : std::max(1, int(std::ceil(cells * (extent.X() / longest))));
+  const int    ny      = corners ? cells : std::max(1, int(std::ceil(cells * (extent.Y() / longest))));
+  const int    nz      = corners ? cells : std::max(1, int(std::ceil(cells * (extent.Z() / longest))));
   const int    sx = nx + 1, sy = ny + 1;
   const size_t gridSize = size_t(sx) * sy * (nz + 1);
   require(gridSize <= 2200000, "Native mesh grid sample budget exhausted");
@@ -381,14 +382,23 @@ Result extract(const Result&              prepared,
   const auto          id    = [&](int x, int y, int z) { return (z * sy + y) * sx + x; };
   const auto          point = [&](int node) {
     const int x = node % sx, y = (node / sx) % sy, z = node / (sx * sy);
-    return gp_Pnt(minimum.X() + extent.X() * (double(x) / nx),
-                  minimum.Y() + extent.Y() * (double(y) / ny),
-                  minimum.Z() + extent.Z() * (double(z) / nz));
+    return gp_Pnt(x == nx ? maximum.X() : minimum.X() + extent.X() * (double(x) / nx),
+                  y == ny ? maximum.Y() : minimum.Y() + extent.Y() * (double(y) / ny),
+                  z == nz ? maximum.Z() : minimum.Z() + extent.Z() * (double(z) / nz));
   };
   for (size_t node = 0; node < gridSize; ++node)
   {
     values[node] = field.Value(point(int(node)));
     require(std::isfinite(values[node]), "Nonfinite native mesh field sample");
+    if (corners)
+    {
+      const int x = int(node) % sx, y = (int(node) / sx) % sy, z = int(node) / (sx * sy);
+      if ((x == 0 || x == nx) && (y == 0 || y == ny) && (z == 0 || z == nz))
+      {
+        const int corner = (x == nx ? 1 : 0) | (y == ny ? 2 : 0) | (z == nz ? 4 : 0);
+        if (corners->Corners[size_t(corner)].ExactZero) values[node] = 0.;
+      }
+    }
   }
   std::unordered_map<unsigned long long, int> roots;
   std::vector<bool>                           boundary(result.Nodes.size(), false);
@@ -531,6 +541,19 @@ Result extract(const Result&              prepared,
   std::map<Key, Use> edges;
   for (const auto& t : result.ImplicitTriangles)
   {
+    for (const auto& box : face.ExcludedDomains())
+    {
+      bool disjoint = false;
+      for (int axis = 1; axis <= 3; ++axis)
+      {
+        const double a = result.Nodes[size_t(t[0])].Coord(axis);
+        const double b = result.Nodes[size_t(t[1])].Coord(axis);
+        const double c = result.Nodes[size_t(t[2])].Coord(axis);
+        disjoint |= std::max({a, b, c}) < box[0].Coord(axis) - reserve
+                 || std::min({a, b, c}) > box[1].Coord(axis) + reserve;
+      }
+      require(disjoint, "Candidate field triangle may enter an excluded corner neighborhood");
+    }
     const double distance = bound(result, t, field, hessian, tolerance, reserve, orientation);
     require(distance <= tolerance, "Native surface mesh field-distance bound unresolved");
     result.FieldDistanceBound = std::max(result.FieldDistanceBound, distance);
@@ -617,6 +640,13 @@ BRepMesh_ImplicitBoundary::Result BRepMesh_ImplicitBoundary::Tessellate(
   const auto face     = occ::down_cast<BRep_TImplicitFace>(source.Faces.back().TShape());
   const auto field    = occ::down_cast<Geom_ImplicitGyroid>(face->Field());
   require(!field.IsNull(), "Native surface mesher requires the supported gyroid");
+  BRepClass3d_ImplicitBox::CornerModel corners;
+  const bool regularized = source.Policy == BRepClass3d_ImplicitBox::CornerPolicy::Regularized;
+  if (regularized)
+  {
+    corners = BRepClass3d_ImplicitBox::CheckCornerGerms(source.Faces.back(), face->Tolerance());
+    require(corners.Resolved, "Native mesh corner identities unresolved");
+  }
   const double orientation = source.Faces.back().Orientation() == TopAbs_REVERSED ? -1. : 1.;
   std::string  diagnostics;
   for (int cells = 8; cells <= maximumCells; cells *= 2)
@@ -628,9 +658,10 @@ BRepMesh_ImplicitBoundary::Result BRepMesh_ImplicitBoundary::Tessellate(
                      *field,
                      orientation,
                      tolerance,
-                     cells,
+                     regularized ? cells - 1 : cells,
                      maximumNodes,
-                     maximumTriangles);
+                     maximumTriangles,
+                     regularized ? &corners : nullptr);
     }
     catch (const Standard_NotImplemented& error)
     {

@@ -76,6 +76,8 @@ public:
     bool   SurfaceCoverageVerified = false; //!< Sampling can miss components; always false.
     double FieldDistanceBound      = 0;     //!< Triangle-to-UNTRIMMED-field bound only.
     int    Cells                   = 0;     //!< Accepted longest-axis grid resolution.
+    BRepClass3d_ImplicitBox::CornerPolicy Policy = BRepClass3d_ImplicitBox::CornerPolicy::Reject;
+    int FixedCornerCount = 0; //!< Exact physical grid-corner identities, not welded nodes.
   };
 
   //! Mesh a validated private topology snapshot, preserving source caches.
