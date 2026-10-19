@@ -1279,9 +1279,20 @@ BRepClass3d_ImplicitBox::Correspondence BRepClass3d_ImplicitBox::CheckCorrespond
   int             maximumCells,
   size_t          maximumComparisons)
 {
+  return CheckCorrespondence(source, maximumCells, maximumComparisons, 32, 16, 4000000);
+}
+
+BRepClass3d_ImplicitBox::Correspondence BRepClass3d_ImplicitBox::CheckCorrespondence(
+  const Boundary& source, int maximumCells, size_t maximumComparisons,
+  int witnessResolution, int witnessDepth, size_t witnessCells)
+{
   if (maximumCells < 4 || maximumCells > 512 || (maximumCells & (maximumCells - 1))
       || !maximumComparisons || maximumComparisons > 10000000)
     throw Standard_DomainError("Invalid trim correspondence settings");
+  if (witnessResolution < 4 || witnessResolution > 64
+      || (witnessResolution & (witnessResolution - 1)) || witnessDepth < 0 || witnessDepth > 16
+      || !witnessCells || witnessCells > 10000000)
+    throw Standard_DomainError("Invalid correspondence homotopy settings");
   // Validate/private-copy the supported graph, without touching source caches.
   std::ostringstream record;
   BRepClass3d_ImplicitBoxIO::Write(source, record);
@@ -1292,7 +1303,7 @@ BRepClass3d_ImplicitBox::Correspondence BRepClass3d_ImplicitBox::CheckCorrespond
   const auto&    original   = copy.Faces.back();
   if (copy.Policy == CornerPolicy::Regularized)
   {
-    const auto witness = CheckTopology(original, 32, 16, 4000000, copy.Policy);
+    const auto witness = CheckTopology(original, witnessResolution, witnessDepth, witnessCells, copy.Policy);
     report.RegularityResolved = witness.HomotopyResolved && witness.ReferenceManifold;
     if (!report.RegularityResolved)
     {

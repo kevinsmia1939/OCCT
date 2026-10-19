@@ -553,6 +553,8 @@ BRepClass3d_ImplicitBox::NativeSolids BRepClass3d_ImplicitBox::BuildNativeSolids
       || maximumGeometryCells > 10000000 || !maximumSegments || maximumSegments > 50000000)
     throw Standard_DomainError("Invalid native solid geometry settings");
   NativeSolids result;
+  require(source.Policy == CornerPolicy::Reject,
+          "Corner-aware native solid geometric qualification is not implemented");
   result.Tolerance = tolerance;
   result.Boundary  = BuildNativeShells(source,
                                        resolution,

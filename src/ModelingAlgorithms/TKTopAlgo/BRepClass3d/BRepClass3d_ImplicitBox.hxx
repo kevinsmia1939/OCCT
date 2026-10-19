@@ -208,7 +208,7 @@ public:
     bool FacesAttached=false, ShellsConstructed=false, TopologyValidated=false;
     std::string Reason;
     size_t SeparatorCells=0;
-    int Separators=0;
+    int Separators=0, ReferenceResolution=0;
     TopoDS_Compound Shape;
     std::vector<TopoDS_Shell> Shells;
     std::vector<TopoDS_Face> Faces;
@@ -318,6 +318,10 @@ public:
   Standard_EXPORT static Correspondence CheckCorrespondence(const Boundary&,
                                                             int    theMaximumCells       = 512,
                                                             size_t theMaximumComparisons = 2000000);
+  //! Same graph checks with caller-owned fixed-corner homotopy settings.
+  Standard_EXPORT static Correspondence CheckCorrespondence(const Boundary&,
+    int theMaximumCells, size_t theMaximumComparisons, int theWitnessResolution,
+    int theWitnessDepth, size_t theWitnessCells);
 
   //! Mesh-independent, whole-domain regularity of an identity-placed native
   //! gyroid's box region. Projected gradients are bounded away from zero in

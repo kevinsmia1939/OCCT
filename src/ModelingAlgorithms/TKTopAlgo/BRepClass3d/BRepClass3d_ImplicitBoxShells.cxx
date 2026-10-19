@@ -45,6 +45,7 @@ struct Partition
   int                                    Resolution, MaximumDepth;
   size_t                                 MaximumCells;
   double                                 L, H, Reserve, FieldReserve;
+  const BRepClass3d_ImplicitBox::CornerModel* Corners = nullptr;
 
   double linear(const gp_Pnt& p) const
   {
@@ -67,6 +68,18 @@ struct Partition
                      : Original[0].Coord(a + 1)
                          + (Original[1].Coord(a + 1) - Original[0].Coord(a + 1)) * index[a]
                              / Resolution);
+      if (Corners)
+      {
+        int corner = 0;
+        bool physical = true;
+        for (int axis = 0; axis < 3; ++axis)
+        {
+          physical &= index[axis] == 0 || index[axis] == Resolution;
+          if (index[axis] == Resolution) corner |= 1 << axis;
+        }
+        if (physical && Corners->Corners[size_t(corner)].ExactZero)
+          return 0.;
+      }
       return Field.Value(q);
     };
     double result = (1 - fraction[order[0]]) * sample();
@@ -281,11 +294,10 @@ BRepClass3d_ImplicitBox::NativeShells BRepClass3d_ImplicitBox::BuildNativeShells
   size_t          maximumTests,
   size_t          maximumSeparatorCells)
 {
-  require(source.Policy == CornerPolicy::Reject,
-          "Corner-aware native shell attachment is not implemented");
   if (!maximumSeparatorCells || maximumSeparatorCells > 10000000)
     throw Standard_DomainError("Invalid native component separator budget");
   NativeShells       result;
+  result.Source.Policy = source.Policy;
   std::ostringstream output;
   BRepClass3d_ImplicitBoxIO::Write(source, output);
   std::istringstream input(output.str());
@@ -303,6 +315,13 @@ BRepClass3d_ImplicitBox::NativeShells BRepClass3d_ImplicitBox::BuildNativeShells
   const auto&  original   = copy.Faces.back();
   const auto   data       = occ::down_cast<BRep_TImplicitFace>(original.TShape());
   const auto&  field      = *static_cast<const Geom_ImplicitGyroid*>(data->Field().get());
+  result.ReferenceResolution = reference.Surface.Resolution;
+  CornerModel corners;
+  if (copy.Policy == CornerPolicy::Regularized)
+  {
+    corners = CheckCornerGerms(original, data->Tolerance());
+    require(corners.Resolved, "Native face corner restriction unresolved");
+  }
   const int    components = attachment.ReferenceSurfaceComponentCount;
   const size_t caps       = copy.Faces.size() - 1;
   try
@@ -354,7 +373,7 @@ BRepClass3d_ImplicitBox::NativeShells BRepClass3d_ImplicitBox::BuildNativeShells
                                proposals,
                                result.ComponentDomains,
                                result,
-                               resolution,
+                               reference.Surface.Resolution,
                                maximumDepth,
                                maximumSeparatorCells,
                                l,
@@ -362,7 +381,8 @@ BRepClass3d_ImplicitBox::NativeShells BRepClass3d_ImplicitBox::BuildNativeShells
                                reserve,
                                4096 * std::numeric_limits<double>::epsilon()
                                    * (1 + std::abs(field.IsoValue()))
-                                 + l * reserve};
+                                 + l * reserve,
+                               copy.Policy == CornerPolicy::Regularized ? &corners : nullptr};
     std::vector<int> ids;
     for (int c = 0; c < components; ++c)
       ids.push_back(c);
@@ -397,10 +417,50 @@ BRepClass3d_ImplicitBox::NativeShells BRepClass3d_ImplicitBox::BuildNativeShells
                                domain[1],
                                TopLoc_Location(),
                                data->Tolerance());
+      // The global fixed-corner homotopy identifies the entire 2-D F zero set,
+      // not merely its trim graph. Uniform-cone neighborhoods contain only an
+      // isolated zero and do not remove any 2-D part. Checked separator planes
+      // then partition whole components. Preserve the actual restriction in
+      // each component, clipping it without inventing a new corner germ.
+      std::vector<Box> exclusions;
+      for (const auto& box : data->ExcludedDomains())
+      {
+        Box clipped = box;
+        bool nonempty = true;
+        for (int axis = 1; axis <= 3; ++axis)
+        {
+          clipped[0].SetCoord(axis, std::max(box[0].Coord(axis), domain[0].Coord(axis)));
+          clipped[1].SetCoord(axis, std::min(box[1].Coord(axis), domain[1].Coord(axis)));
+          nonempty &= clipped[0].Coord(axis) < clipped[1].Coord(axis);
+        }
+        if (nonempty) exclusions.push_back(clipped);
+      }
+      if (!exclusions.empty())
+        face.TShape(new BRep_TImplicitFace(data->Field(), domain[0], domain[1],
+                                          data->Tolerance(), exclusions));
       int boundaries = 0;
       for (size_t i = 0; i < wires.size(); ++i)
         if (attachment.WireSurfaceComponents[i] == c)
         {
+          for (TopExp_Explorer edge(wires[i], TopAbs_EDGE); edge.More(); edge.Next())
+          {
+            TopLoc_Location location;
+            double first, last;
+            const auto curve = occ::down_cast<Geom_BSplineCurve>(
+              BRep_Tool::Curve(TopoDS::Edge(edge.Current()), location, first, last));
+            require(!curve.IsNull() && curve->Degree() == 1 && location.IsIdentity(),
+                    "Restricted native face requires stored linear B-spline seams");
+            for (int pole = 1; pole < curve->NbPoles(); ++pole)
+              for (const auto& box : exclusions)
+              {
+                bool disjoint = false;
+                const auto a = curve->Pole(pole), b = curve->Pole(pole + 1);
+                for (int axis = 1; axis <= 3; ++axis)
+                  disjoint |= std::max(a.Coord(axis), b.Coord(axis)) < box[0].Coord(axis) - reserve
+                           || std::min(a.Coord(axis), b.Coord(axis)) > box[1].Coord(axis) + reserve;
+                require(disjoint, "Native seam may enter an excluded corner neighborhood");
+              }
+          }
           builder.Add(face, wires[i]);
           ++boundaries;
         }

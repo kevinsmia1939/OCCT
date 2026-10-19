@@ -59,7 +59,8 @@ BRepClass3d_ImplicitBox::CapAttachment BRepClass3d_ImplicitBox::CheckCapAttachme
       || maximumTests > 10000000)
     throw Standard_DomainError("Invalid cap attachment witness budget");
   CapAttachment report;
-  const auto    graph        = CheckCorrespondence(source);
+  const auto    graph        = CheckCorrespondence(source, 512, 2000000,
+                                                    resolution, maximumDepth, maximumCells);
   report.StoredGraphResolved = graph.Resolved;
   if (!graph.Resolved)
   {
