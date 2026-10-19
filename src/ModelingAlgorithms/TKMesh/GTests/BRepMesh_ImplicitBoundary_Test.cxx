@@ -591,6 +591,170 @@ TEST(BRepMesh_ImplicitBoundary, ClippedCoverageBothDirectionsAndBooleanOperation
     }
 }
 
+TEST(BRepMesh_ImplicitBoundary, CornerCoverageUsesRegularizedSurfaceAndSideClosures)
+{
+  using Mesher = BRepMesh_ImplicitBoundary;
+  for (const auto operation : {Ops::Operation::Common, Ops::Operation::BoxMinusField})
+  {
+    const auto source = cornerBoundary(operation);
+    const auto mesh = Mesher::Tessellate(source);
+    std::ostringstream before;
+    BRepClass3d_ImplicitBoxIO::Write(source, before);
+    const auto report = Mesher::CheckCoverage(source, mesh);
+    std::cout << "corner coverage " << int(operation) << " resolved=" << report.Resolved
+              << " bounds=" << report.BoundaryToMeshBound << "," << report.MeshToBoundaryBound
+              << " cells=" << report.SpatialCells << " patches=" << report.TrianglePatches
+              << " triangle=" << report.UnresolvedTriangle
+              << " box=" << report.UnresolvedMinimum.X() << "," << report.UnresolvedMinimum.Y()
+              << "," << report.UnresolvedMinimum.Z() << std::endl;
+    ASSERT_TRUE(report.Resolved);
+    EXPECT_LE(report.BoundaryToMeshBound, .1);
+    EXPECT_LE(report.MeshToBoundaryBound, .1);
+    EXPECT_GT(report.BoundaryToMeshBound, 0);
+    EXPECT_GT(report.MeshToBoundaryBound, 0);
+    EXPECT_GT(report.RegularizedFieldCells, 0u);
+    EXPECT_GT(report.RegularizedCapCells, 0u);
+    // Independent central cap samples and harmonic z-roots, not the production
+    // derivative cones, octree or region classifier.
+    const double k = 2 * std::acos(-1.) / 10;
+    int roots = 0, capPoints = 0;
+    for (int i = 1; i < 6; ++i)
+      for (int j = 1; j < 6; ++j)
+      {
+        const double x = 10. * i / 6, y = 10. * j / 6;
+        const double a = std::sin(k * y), b = std::cos(k * x);
+        const double d = -std::sin(k * x) * std::cos(k * y);
+        if (std::hypot(a, b) > 1.e-8 && std::abs(d) < std::hypot(a, b))
+        {
+          const double angle = std::asin(d / std::hypot(a, b)), phase = std::atan2(a, b);
+          for (double branch : {angle, std::acos(-1.) - angle})
+            for (int turn = -2; turn <= 2; ++turn)
+            {
+              const double z = (branch - phase + 2 * std::acos(-1.) * turn) / k;
+              if (z > 0 && z < 10)
+              {
+                ++roots;
+                EXPECT_LE(referenceMeshDistance(gp_Pnt(x, y, z), mesh, false),
+                          report.BoundaryToMeshBound + 1.e-8);
+              }
+            }
+        }
+        for (int side = 0; side < 6; ++side)
+        {
+          const int axis = side / 2 + 1, u = axis % 3 + 1, v = u % 3 + 1;
+          gp_Pnt p;
+          p.SetCoord(axis, side % 2 ? 10 : 0);
+          p.SetCoord(u, x);
+          p.SetCoord(v, y);
+          const double value = std::sin(k * p.X()) * std::cos(k * p.Y())
+                               + std::sin(k * p.Y()) * std::cos(k * p.Z())
+                               + std::sin(k * p.Z()) * std::cos(k * p.X());
+          if ((operation == Ops::Operation::Common ? value : -value) < -1.e-8)
+          {
+            ++capPoints;
+            EXPECT_LE(referenceMeshDistance(p, mesh, true), report.BoundaryToMeshBound + 1.e-8);
+          }
+        }
+      }
+    EXPECT_GT(roots, 0);
+    EXPECT_GT(capPoints, 0);
+    // The retained uniform corner belongs to caps only. Neither uniform
+    // corner is part of the 2-D implicit face.
+    const auto retained = operation == Ops::Operation::Common ? gp_Pnt(10, 10, 10) : gp_Pnt();
+    EXPECT_LE(referenceMeshDistance(retained, mesh, true), report.BoundaryToMeshBound + 1.e-8);
+    std::ostringstream after;
+    BRepClass3d_ImplicitBoxIO::Write(source, after);
+    EXPECT_EQ(before.str(), after.str());
+    EXPECT_FALSE(mesh.SurfaceCoverageVerified || mesh.SolidValidated);
+  }
+}
+
+TEST(BRepMesh_ImplicitBoundary, CornerCoverageRestoredShiftedAndScaledSource)
+{
+  for (const auto operation : {Ops::Operation::Common, Ops::Operation::BoxMinusField})
+  {
+    TopoDS_Face field;
+    const gp_Pnt low(5, -5, 10), high(10, 0, 15);
+    BRep_Builder().MakeImplicitFace(field, new Geom_ImplicitGyroid(5, 0), low, high,
+                                    TopLoc_Location(), .1);
+    const auto source = Ops::Build(field, BRepPrimAPI_MakeBox(low, high).Shape(), operation,
+                                    .1, 512, Ops::CornerPolicy::Regularized);
+    std::ostringstream before;
+    BRepClass3d_ImplicitBoxIO::Write(source, before);
+    std::istringstream input(before.str());
+    Ops::Boundary restored;
+    BRepClass3d_ImplicitBoxIO::Read(input, restored);
+    ASSERT_FALSE(restored.SeamBoundVerified);
+    const auto mesh = BRepMesh_ImplicitBoundary::Tessellate(restored);
+    const auto report = BRepMesh_ImplicitBoundary::CheckCoverage(restored, mesh);
+    ASSERT_TRUE(report.Resolved);
+    EXPECT_LE(report.BoundaryToMeshBound, .1);
+    EXPECT_LE(report.MeshToBoundaryBound, .1);
+    EXPECT_GT(report.RegularizedFieldCells, 0u);
+    EXPECT_GT(report.RegularizedCapCells, 0u);
+    EXPECT_FALSE(restored.SeamBoundVerified || mesh.SeamBoundVerified);
+    std::ostringstream after;
+    BRepClass3d_ImplicitBoxIO::Write(restored, after);
+    EXPECT_EQ(before.str(), after.str());
+    for (const auto& face : restored.Faces)
+    {
+      TopLoc_Location location;
+      EXPECT_TRUE(BRep_Tool::Triangulation(face, location).IsNull());
+    }
+  }
+}
+
+TEST(BRepMesh_ImplicitBoundary, CornerCoverageRejectsLostSurfaceCapsAndIsolatedContactTriangles)
+{
+  using Mesher = BRepMesh_ImplicitBoundary;
+  for (const auto operation : {Ops::Operation::Common, Ops::Operation::BoxMinusField})
+  {
+    const auto source = cornerBoundary(operation);
+    const auto original = Mesher::Tessellate(source);
+    EXPECT_FALSE(Mesher::CheckCoverage(source, original, .1, 1).Resolved);
+    EXPECT_FALSE(Mesher::CheckCoverage(source, original, .1, 14, 1).Resolved);
+    EXPECT_FALSE(Mesher::CheckCoverage(source, original, .1, 14, 2000000, 1).Resolved);
+    auto mesh = original;
+    mesh.SurfaceCoverageVerified = mesh.SolidValidated = true;
+    mesh.ImplicitTriangles.clear();
+    EXPECT_FALSE(Mesher::CheckCoverage(source, mesh).Resolved);
+    mesh = original;
+    mesh.CapTriangles.clear();
+    EXPECT_FALSE(Mesher::CheckCoverage(source, mesh).Resolved);
+    mesh = original;
+    const int n = int(mesh.Nodes.size());
+    const double coordinate = operation == Ops::Operation::Common ? 0 : 10;
+    const double delta = coordinate == 0 ? .001 : -.001;
+    mesh.Nodes.insert(mesh.Nodes.end(), {gp_Pnt(coordinate, coordinate, coordinate),
+      gp_Pnt(coordinate + delta, coordinate, coordinate),
+      gp_Pnt(coordinate, coordinate + delta, coordinate)});
+    mesh.ImplicitTriangles.push_back({n, n + 1, n + 2});
+    const auto bad = Mesher::CheckCoverage(source, mesh);
+    EXPECT_FALSE(bad.Resolved);
+    EXPECT_EQ(bad.UnresolvedTriangle, int(mesh.CapTriangles.size() + mesh.ImplicitTriangles.size() - 1));
+    // The same raw zero is not a retained planar-area witness either.
+    // Tag the added triangle with an actual matching native cap plane.
+    mesh.ImplicitTriangles.pop_back();
+    int cap = -1;
+    for (size_t i = 0; i + 1 < source.Faces.size(); ++i)
+    {
+      const auto plane = BRepAdaptor_Surface(source.Faces[i]).Plane();
+      if (plane.Distance(mesh.Nodes[size_t(n)]) < 1.e-12
+          && plane.Distance(mesh.Nodes[size_t(n + 1)]) < 1.e-12
+          && plane.Distance(mesh.Nodes[size_t(n + 2)]) < 1.e-12)
+      {
+        cap = int(i);
+        break;
+      }
+    }
+    ASSERT_GE(cap, 0);
+    mesh.CapTriangles.push_back({{n, n + 1, n + 2}, cap});
+    const auto badCap = Mesher::CheckCoverage(source, mesh);
+    EXPECT_FALSE(badCap.Resolved);
+    EXPECT_EQ(badCap.UnresolvedTriangle, int(mesh.CapTriangles.size() - 1));
+  }
+}
+
 TEST(BRepMesh_ImplicitBoundary, CoverageRefusesMissingGeometryAndExhaustedBudgets)
 {
   const auto source = boundary(false, Ops::Operation::Common);

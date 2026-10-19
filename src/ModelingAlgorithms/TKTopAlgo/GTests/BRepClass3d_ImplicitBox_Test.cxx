@@ -1821,7 +1821,7 @@ TEST(BRepClass3d_ImplicitBox, DefaultCornerBoundaryUsesSharedNativeTopology)
     EXPECT_EQ(restored.CornerContourEnds, result.CornerContourEnds);
     EXPECT_FALSE(restored.SeamBoundVerified);
     EXPECT_EQ(restored.ExcludedCornerContacts.front().Distance(result.ExcludedCornerContacts.front()), 0);
-    EXPECT_THROW(BRepMesh_ImplicitBoundary::CheckCoverage(restored, {}), Standard_NotImplemented);
+    EXPECT_FALSE(BRepMesh_ImplicitBoundary::CheckCoverage(restored, {}).Resolved);
     EXPECT_EQ(Ops::Classify(result, gp_Pnt(0, 0, 0), .1).State,
               operation == Ops::Operation::Common ? Ops::PointState::Outside
                                                    : Ops::PointState::NearBoundary);

@@ -178,8 +178,61 @@ struct Checker
   int    MaximumDepth;
   size_t MaximumCells, MaximumPatches;
   Report Result;
+  const BRepClass3d_ImplicitBox::CornerModel* Corners = nullptr;
+  const std::vector<BRep_TImplicitFace::DomainBox>* Exclusions = nullptr;
 
-  double capWitness(const gp_Pnt& p, double available, int requestedSide) const
+  bool retainedCorner(int corner, int side) const
+  {
+    const auto& germ = Corners->Corners[size_t(corner)];
+    if (!germ.ExactZero || ((corner >> (side / 2)) & 1) != side % 2)
+      return false;
+    // Closure of strict retained area on this plane, not just F(anchor)==0.
+    for (int axis = 0; axis < 3; ++axis)
+      if (axis != side / 2)
+      {
+        const double upper = Direction > 0 ? germ.InwardDerivativeUpper[size_t(axis)]
+                                           : -germ.InwardDerivativeLower[size_t(axis)];
+        if (upper < -GradientReserve)
+          return true;
+      }
+    return false;
+  }
+
+  bool emptyRegularizedCell(const Box& box, int side) const
+  {
+    if (!Corners)
+      return false;
+    for (int c = 0; c < 8; ++c)
+    {
+      const auto& germ = Corners->Corners[size_t(c)];
+      if (!germ.ExactZero || (side >= 0 && ((c >> (side / 2)) & 1) != side % 2))
+        continue;
+      double value = 0;
+      gp_Vec gradient, reach;
+      if (!Field.LatticeJet(germ.Anchor, value, gradient) || value != 0)
+        throw Standard_NotImplemented("Coverage corner lost its exact lattice identity");
+      for (int axis = 1; axis <= 3; ++axis)
+        reach.SetCoord(axis, std::max(std::abs(box.Low.Coord(axis) - germ.Anchor.Coord(axis)),
+                                     std::abs(box.High.Coord(axis) - germ.Anchor.Coord(axis))));
+      const double variation = H * (reach.Magnitude() + 8 * Reserve) + 4 * GradientReserve;
+      bool positive = std::isfinite(variation), negative = positive;
+      for (int axis = 0; axis < 3; ++axis)
+        if (side < 0 || axis != side / 2)
+        {
+          const double inward = gradient.Coord(axis + 1) * (c & (1 << axis) ? -1 : 1);
+          positive &= (side < 0 ? inward : Direction * inward) > variation;
+          negative &= inward < -variation;
+        }
+      // Global Hessian bound proves the derivative signs over the convex hull
+      // of anchor and cell. Uniform cones have only an isolated zero, no 2-D
+      // field face. On a cap, only the unretained cone excludes side closure.
+      if (positive || (side < 0 && negative))
+        return true;
+    }
+    return false;
+  }
+
+  double capWitness(const gp_Pnt& p, double available, int requestedSide)
   {
     double best = std::numeric_limits<double>::infinity();
     for (int side = 0; side < 6; ++side)
@@ -193,6 +246,17 @@ struct Checker
       base.SetCoord(axis, side % 2 ? High.Coord(axis) : Low.Coord(axis));
       if (p.Distance(base) + 8 * Reserve > available)
         continue;
+      if (Corners)
+        for (int c = 0; c < 8; ++c)
+          if (retainedCorner(c, side))
+          {
+            const double distance = p.Distance(Corners->Corners[size_t(c)].Anchor) + 8 * Reserve;
+            if (distance <= available && distance < best)
+            {
+              best = distance;
+              ++Result.CornerWitnesses;
+            }
+          }
       const auto test = [&](const gp_Pnt& q) {
         const double distance = p.Distance(q) + 8 * Reserve;
         if (distance <= available && Direction * Field.Value(q) < -FieldReserve)
@@ -230,16 +294,22 @@ struct Checker
            + FieldReserve;
   }
 
-  bool coverBox(const Box& box, const Tree& tree, int depth, bool cap)
+  bool coverBox(const Box& box, const Tree& tree, int depth, int side)
   {
     Result.UnresolvedMinimum = box.Low;
     Result.UnresolvedMaximum = box.High;
     if (Result.SpatialCells >= MaximumCells)
       return false;
     ++Result.SpatialCells;
+    if (emptyRegularizedCell(box, side))
+    {
+      if (side < 0) ++Result.RegularizedFieldCells;
+      else ++Result.RegularizedCapCells;
+      return true;
+    }
     const auto   p = midpoint(box.Low, box.High);
     const double r = radius(box) + 4 * Reserve, value = Field.Value(p), error = variation(p, r);
-    if ((!cap && std::abs(value) > error) || (cap && Direction * value > error))
+    if ((side < 0 && std::abs(value) > error) || (side >= 0 && Direction * value > error))
       return true;
     const double upper = tree.upper(p) + r;
     if (upper <= Tolerance)
@@ -267,7 +337,7 @@ struct Checker
       }
     }
     for (const auto& child : children)
-      if (!coverBox(child, tree, depth + 1, cap))
+      if (!coverBox(child, tree, depth + 1, side))
         return false;
     return true;
   }
@@ -311,6 +381,22 @@ struct Checker
           std::min({a.Coord(axis), b.Coord(axis), c.Coord(axis)}) - reach >= Low.Coord(axis)
           && std::max({a.Coord(axis), b.Coord(axis), c.Coord(axis)}) + reach <= High.Coord(axis);
       }
+      if (Exclusions)
+        for (const auto& box : *Exclusions)
+        {
+          bool disjoint = false;
+          for (int axis = 1; axis <= 3; ++axis)
+          {
+            const double reach = distance * std::abs(g.Coord(axis)) / g.Magnitude() + 8 * Reserve;
+            disjoint |= std::max({a.Coord(axis), b.Coord(axis), c.Coord(axis)}) + reach
+                          < box[0].Coord(axis)
+                        || std::min({a.Coord(axis), b.Coord(axis), c.Coord(axis)}) - reach
+                             > box[1].Coord(axis);
+          }
+          inside &= disjoint;
+          if (!disjoint)
+            ++Result.ExclusionSlabRejections;
+        }
       if (inside)
       {
         Result.MeshToBoundaryBound = std::max(Result.MeshToBoundaryBound, distance);
@@ -355,8 +441,6 @@ BRepMesh_ImplicitBoundary::Coverage BRepMesh_ImplicitBoundary::CheckCoverage(
   size_t                                   maximumCells,
   size_t                                   maximumPatches)
 {
-  if (source.Policy != BRepClass3d_ImplicitBox::CornerPolicy::Reject)
-    throw Standard_NotImplemented("Corner-aware clipped coverage is not implemented");
   if (!std::isfinite(tolerance) || tolerance <= 0 || maximumDepth < 1 || maximumDepth > 20
       || !maximumCells || maximumCells > 10000000 || !maximumPatches || maximumPatches > 4000000
       || mesh.Nodes.size() > 1000000
@@ -368,6 +452,13 @@ BRepMesh_ImplicitBoundary::Coverage BRepMesh_ImplicitBoundary::CheckCoverage(
   BRepClass3d_ImplicitBox::Boundary copy;
   BRepClass3d_ImplicitBoxIO::Read(input, copy);
   const auto   face  = occ::down_cast<BRep_TImplicitFace>(copy.Faces.back().TShape());
+  BRepClass3d_ImplicitBox::CornerModel corners;
+  if (copy.Policy == BRepClass3d_ImplicitBox::CornerPolicy::Regularized)
+  {
+    corners = BRepClass3d_ImplicitBox::CheckCornerGerms(copy.Faces.back(), face->Tolerance());
+    if (!corners.Resolved)
+      throw Standard_NotImplemented("Coverage corner regularization unresolved");
+  }
   const auto&  field = *static_cast<const Geom_ImplicitGyroid*>(face->Field().get());
   const auto   low = face->Minimum(), high = face->Maximum();
   const double k = 2 * std::acos(-1.) / field.Period(), h = 4 * k * k, l = field.LipschitzBound();
@@ -438,7 +529,9 @@ BRepMesh_ImplicitBoundary::Coverage BRepMesh_ImplicitBoundary::CheckCoverage(
                   maximumDepth,
                   maximumCells,
                   maximumPatches,
-                  {}};
+                  {},
+                  copy.Policy == BRepClass3d_ImplicitBox::CornerPolicy::Regularized ? &corners : nullptr,
+                  &face->ExcludedDomains()};
   int     index = 0;
   for (const auto& t : mesh.CapTriangles)
   {
@@ -462,7 +555,7 @@ BRepMesh_ImplicitBoundary::Coverage BRepMesh_ImplicitBoundary::CheckCoverage(
   }
   checker.Result.UnresolvedTriangle = -1;
   const Tree implicit(mesh, mesh.ImplicitTriangles, reserve);
-  if (!checker.coverBox({low, high}, implicit, 0, false))
+  if (!checker.coverBox({low, high}, implicit, 0, -1))
     return checker.Result;
   for (int side = 0; side < 6; ++side)
   {
@@ -471,7 +564,7 @@ BRepMesh_ImplicitBoundary::Coverage BRepMesh_ImplicitBoundary::CheckCoverage(
     box.Low.SetCoord(axis, side % 2 ? high.Coord(axis) : low.Coord(axis));
     box.High.SetCoord(axis, box.Low.Coord(axis));
     const Tree cap(mesh, std::move(caps[size_t(side)]), reserve);
-    if (!checker.coverBox(box, cap, 0, true))
+    if (!checker.coverBox(box, cap, 0, side))
       return checker.Result;
   }
   checker.Result.Resolved = true;

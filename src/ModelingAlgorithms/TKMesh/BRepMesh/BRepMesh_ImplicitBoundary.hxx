@@ -27,11 +27,15 @@ public:
     size_t SpatialCells = 0, TrianglePatches = 0;
     gp_Pnt UnresolvedMinimum, UnresolvedMaximum;
     int    UnresolvedTriangle = -1;
+    size_t RegularizedFieldCells = 0, RegularizedCapCells = 0;
+    size_t CornerWitnesses = 0, ExclusionSlabRejections = 0;
   };
 
   //! Adaptive whole-box/face coverage and triangle-to-CLIPPED-region witnesses.
   //! Ignores input metadata flags. Numerical reserves, NOT directed intervals,
   //! topology equivalence, contact checks or native-solid validation.
+  //! Regularized corners use fresh derivative cones to remove isolated zeros
+  //! from the field face/side closure; witness slabs respect face exclusions.
   Standard_EXPORT static Coverage CheckCoverage(const BRepClass3d_ImplicitBox::Boundary&,
                                                 const Result&,
                                                 double theTolerance      = 0.1,
