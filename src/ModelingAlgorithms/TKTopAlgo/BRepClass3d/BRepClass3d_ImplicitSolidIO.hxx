@@ -10,6 +10,8 @@
 //! Reuses the authoritative shared source cap/edge/wire graph, with explicit
 //! field-component domains, wire assignments and face/shell/material relations.
 //! Never rebuilds numerically, persists meshes or restores validation flags.
+//! Schema 1 keeps strict sources. Schema 2 retains regularized corner sources
+//! and derives component restrictions canonically from source/domain metadata.
 class BRepClass3d_ImplicitSolidIO
 {
 public:

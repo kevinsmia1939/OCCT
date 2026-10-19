@@ -46,11 +46,38 @@ const BRep_TImplicitFace& implicit(const TopoDS_Face& face)
 {
   const auto data = occ::down_cast<BRep_TImplicitFace>(face.TShape());
   require(!data.IsNull() && typeid(*data) == typeid(BRep_TImplicitFace) && !data->Field().IsNull()
-          && data->ExcludedDomains().empty()
           && typeid(*data->Field()) == typeid(Geom_ImplicitGyroid) && face.Location().IsIdentity()
           && data->Location().IsIdentity()
           && (face.Orientation() == TopAbs_FORWARD || face.Orientation() == TopAbs_REVERSED));
   return *data;
+}
+
+using Box = BRep_TImplicitFace::DomainBox;
+std::vector<Box> restrictions(const BRep_TImplicitFace& source, const Box& domain)
+{
+  std::vector<Box> result;
+  for (const auto& box : source.ExcludedDomains())
+  {
+    Box clipped = box;
+    bool nonempty = true;
+    for (int axis = 1; axis <= 3; ++axis)
+    {
+      clipped[0].SetCoord(axis, std::max(box[0].Coord(axis), domain[0].Coord(axis)));
+      clipped[1].SetCoord(axis, std::min(box[1].Coord(axis), domain[1].Coord(axis)));
+      nonempty &= clipped[0].Coord(axis) < clipped[1].Coord(axis);
+    }
+    if (nonempty) result.push_back(clipped);
+  }
+  return result;
+}
+
+void sameRestrictions(const std::vector<Box>& a, const std::vector<Box>& b)
+{
+  require(a.size() == b.size());
+  for (size_t i = 0; i < a.size(); ++i)
+    for (int end = 0; end < 2; ++end)
+      for (int axis = 1; axis <= 3; ++axis)
+        require(a[i][size_t(end)].Coord(axis) == b[i][size_t(end)].Coord(axis));
 }
 
 void identity(const TopoDS_Shape& shape, TopAbs_ShapeEnum type)
@@ -118,9 +145,12 @@ Descriptor describe(const Ops::NativeSolids& value)
   require(value.Constructed && value.Boundary.ShellsConstructed && std::isfinite(value.Tolerance)
           && value.Tolerance > 0 && value.Solids.size() <= 128);
   const auto& b = value.Boundary;
-  require(b.Source.Policy == Ops::CornerPolicy::Reject && !b.Source.Faces.empty());
+  require((b.Source.Policy == Ops::CornerPolicy::Reject
+           || b.Source.Policy == Ops::CornerPolicy::Regularized) && !b.Source.Faces.empty());
   const auto& original    = b.Source.Faces.back();
   const auto& fieldData   = implicit(original);
+  sameRestrictions(fieldData.ExcludedDomains(), b.Source.Policy == Ops::CornerPolicy::Regularized
+    ? Ops::SurfaceCornerExclusions(original) : std::vector<Box>{});
   const auto& field       = *static_cast<const Geom_ImplicitGyroid*>(fieldData.Field().get());
   const auto  sourceWires = children(original);
   Map         sourceWireMap;
@@ -167,6 +197,7 @@ Descriptor describe(const Ops::NativeSolids& value)
                 && lo >= fieldData.Minimum().Coord(a) && hi <= fieldData.Maximum().Coord(a)
                 && data.Minimum().Coord(a) == lo && data.Maximum().Coord(a) == hi);
       }
+      sameRestrictions(data.ExcludedDomains(), restrictions(fieldData, b.ComponentDomains[c]));
       for (const auto& wire : children(face))
       {
         require(wire.ShapeType() == TopAbs_WIRE);
@@ -227,7 +258,9 @@ void BRepClass3d_ImplicitSolidIO::Write(const Ops::NativeSolids& value, Standard
   std::ostringstream record;
   record.imbue(std::locale::classic());
   record << std::setprecision(std::numeric_limits<double>::max_digits10)
-         << "OCCT_IMPLICIT_SOLIDS 1 " << sourceText.size() << ' ' << b.Faces.size() << ' '
+         << "OCCT_IMPLICIT_SOLIDS "
+         << (b.Source.Policy == Ops::CornerPolicy::Regularized ? 2 : 1) << ' '
+         << sourceText.size() << ' ' << b.Faces.size() << ' '
          << b.ComponentDomains.size() << ' ' << b.Shells.size() << ' ' << value.Solids.size() << ' '
          << value.Tolerance << "\nFACES\n";
   for (size_t f = 0; f < b.Faces.size(); ++f)
@@ -271,7 +304,7 @@ void BRepClass3d_ImplicitSolidIO::Read(Standard_IStream& input, Ops::NativeSolid
   Ops::NativeSolids result;
   require(bool(record >> magic >> version >> sourceSize >> faces >> components >> shells >> regions
                >> result.Tolerance));
-  require(magic == "OCCT_IMPLICIT_SOLIDS" && version == 1 && sourceSize > 0
+  require(magic == "OCCT_IMPLICIT_SOLIDS" && (version == 1 || version == 2) && sourceSize > 0
           && sourceSize <= MaxSourceBytes && faces <= 128 && components <= faces && shells <= 128
           && regions <= shells && std::isfinite(result.Tolerance) && result.Tolerance > 0
           && record.get() == '\n');
@@ -313,6 +346,7 @@ void BRepClass3d_ImplicitSolidIO::Read(Standard_IStream& input, Ops::NativeSolid
   require(bool(record.read(source.data(), std::streamsize(sourceSize))) && record.peek() == EOF);
   std::istringstream sourceInput(source);
   BRepClass3d_ImplicitBoxIO::Read(sourceInput, b.Source);
+  require((version == 2) == (b.Source.Policy == Ops::CornerPolicy::Regularized));
   require(!b.Source.Faces.empty() && faces == b.Source.Faces.size() - 1 + components);
   const auto&  original    = b.Source.Faces.back();
   const auto&  data        = implicit(original);
@@ -328,6 +362,8 @@ void BRepClass3d_ImplicitSolidIO::Read(Standard_IStream& input, Ops::NativeSolid
                              b.ComponentDomains[c][1],
                              TopLoc_Location(),
                              data.Tolerance());
+    face.TShape(new BRep_TImplicitFace(data.Field(), b.ComponentDomains[c][0],
+      b.ComponentDomains[c][1], data.Tolerance(), restrictions(data, b.ComponentDomains[c])));
     for (int wire : wires[c])
     {
       require(size_t(wire) < sourceWires.size());

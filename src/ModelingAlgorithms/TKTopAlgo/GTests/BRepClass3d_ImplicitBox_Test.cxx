@@ -460,7 +460,6 @@ TEST(BRepClass3d_ImplicitBox, CornerStoredGraphAndCapsAttachWithoutPromotingNati
       EXPECT_GT(sign * BRep_ImplicitTool::Value(face, caps.Witnesses[i]), 0);
       EXPECT_GT(caps.Clearances[i], caps.RequiredClearance);
     }
-    EXPECT_THROW(Ops::BuildNativeSolids(source), Standard_NotImplemented);
     BRepClass3d_ImplicitBoxIO::Write(source, after);
     EXPECT_EQ(before.str(), after.str());
     EXPECT_TRUE(source.SeamBoundVerified);
@@ -922,7 +921,6 @@ TEST(BRepClass3d_ImplicitBox, CornerWholeFacesAndGenuineShellTopologyBothOperati
         gp_Pnt(c & 1 ? 10 : 0, c & 2 ? 10 : 0, c & 4 ? 10 : 0)), c != 0 && c != 7);
     TopLoc_Location location;
     EXPECT_TRUE(BRep_Tool::Triangulation(face, location).IsNull());
-    EXPECT_THROW(Ops::BuildNativeSolids(source), Standard_NotImplemented);
     std::ostringstream after;
     BRepClass3d_ImplicitBoxIO::Write(source, after);
     EXPECT_EQ(before.str(), after.str());
@@ -1159,7 +1157,6 @@ TEST(BRepClass3d_ImplicitBox, CornerCapGeometryBothDirectionsAndRetainedWitnesse
     EXPECT_GT(report.Cells[0], 0u);
     EXPECT_GT(report.Cells[1], 0u);
     EXPECT_GT(report.RegularizedEmptyCells, 0u);
-    EXPECT_THROW(Ops::BuildNativeSolids(source), Standard_NotImplemented);
     std::ostringstream after;
     BRepClass3d_ImplicitBoxIO::Write(source, after);
     EXPECT_EQ(before.str(), after.str());
@@ -1245,7 +1242,7 @@ TEST(BRepClass3d_ImplicitBox, CornerCapGeometryRetainedVersusExcludedCornerPatch
   EXPECT_GT(nearRetained.CornerWitnesses, 0u);
   EXPECT_LE(nearRetained.BoundaryBound, .1);
   // Geometric proximity alone permits a tiny redundant patch. It is NOT a
-  // topology certificate: native solid construction must still stay guarded.
+  // topology certificate: native solid construction must independently check topology.
   caps.back() = excluded;
   const auto nearExcluded = Ops::CheckCapGeometry(source, caps);
   EXPECT_FALSE(nearExcluded.Resolved);
@@ -1408,6 +1405,117 @@ TEST(BRepClass3d_ImplicitBox, NativeSolidsScaledPeriodicTranslationAtFixedTolera
       EXPECT_LE(result.MaximumStoredTolerance, .1);
     }
   }
+}
+
+TEST(BRepClass3d_ImplicitBox, CornerNativeSolidsAndRestrictedTopologyPersistence)
+{
+  using Ops = BRepClass3d_ImplicitBox;
+  for (const auto operation : {Ops::Operation::Common, Ops::Operation::BoxMinusField})
+  {
+    const auto source = Ops::Build(topologyField(gp_Pnt(), gp_Pnt(10, 10, 10), 0),
+      BRepPrimAPI_MakeBox(10, 10, 10).Shape(), operation, .1, 512, Ops::CornerPolicy::Regularized);
+    std::ostringstream before;
+    BRepClass3d_ImplicitBoxIO::Write(source, before);
+    const auto value = Ops::BuildNativeSolids(source);
+    ASSERT_TRUE(value.Constructed && value.Validated) << value.Reason;
+    EXPECT_TRUE(value.Boundary.TopologyValidated && value.Geometry.Resolved);
+    EXPECT_LE(value.Geometry.BoundaryBound, .1);
+    EXPECT_LE(value.MaximumStoredTolerance, .1);
+    ASSERT_EQ(value.Solids.size(), 1u);
+    EXPECT_EQ(value.Solids[0].ShapeType(), TopAbs_SOLID);
+    EXPECT_TRUE(value.Solids[0].Closed());
+    EXPECT_EQ(value.Boundary.ShellEuler, std::vector<int>({-2}));
+    std::ostringstream saved;
+    BRepClass3d_ImplicitSolidIO::Write(value, saved);
+    EXPECT_EQ(saved.str().find("OCCT_IMPLICIT_SOLIDS 2 "), 0u);
+    Ops::NativeSolids loaded;
+    std::istringstream input(saved.str());
+    BRepClass3d_ImplicitSolidIO::Read(input, loaded);
+    EXPECT_TRUE(loaded.Constructed);
+    EXPECT_FALSE(loaded.Validated || loaded.Geometry.Resolved || loaded.Boundary.TopologyValidated);
+    EXPECT_FALSE(loaded.Solids[0].Closed() || loaded.Boundary.Shells[0].Closed());
+    EXPECT_FALSE(loaded.Boundary.Source.SeamBoundVerified);
+    EXPECT_EQ(loaded.Boundary.Source.Policy, Ops::CornerPolicy::Regularized);
+    EXPECT_EQ(loaded.Boundary.ShellRegions, std::vector<int>({0}));
+    NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> edges, vertices;
+    TopExp::MapShapes(loaded.Shape, TopAbs_EDGE, edges);
+    TopExp::MapShapes(loaded.Shape, TopAbs_VERTEX, vertices);
+    EXPECT_EQ(edges.Extent(), 30); EXPECT_EQ(vertices.Extent(), 19);
+    const auto& face = loaded.Boundary.Faces.back();
+    EXPECT_FALSE(BRep_ImplicitTool::IsInDomain(face, gp_Pnt()));
+    EXPECT_FALSE(BRep_ImplicitTool::IsInDomain(face, gp_Pnt(10, 10, 10)));
+    EXPECT_TRUE(BRep_ImplicitTool::IsInDomain(face, gp_Pnt(10, 0, 0)));
+    EXPECT_EQ(face.Orientation(), source.Faces.back().Orientation());
+    std::ostringstream again;
+    BRepClass3d_ImplicitSolidIO::Write(loaded, again);
+    EXPECT_EQ(saved.str(), again.str());
+    std::ostringstream after;
+    BRepClass3d_ImplicitBoxIO::Write(source, after);
+    EXPECT_EQ(before.str(), after.str());
+    EXPECT_TRUE(source.SeamBoundVerified);
+  }
+}
+
+TEST(BRepClass3d_ImplicitBox, CornerNativeSolidIndependentGeometryDepthAndRefusal)
+{
+  using Ops = BRepClass3d_ImplicitBox;
+  const gp_Pnt low(-20, -20, 20), high(0, 0, 40);
+  const auto source = Ops::Build(topologyField(low, high, 0, 2),
+    BRepPrimAPI_MakeBox(low, high).Shape(), Ops::Operation::Common, .1, 512,
+    Ops::CornerPolicy::Regularized);
+  const auto limited = Ops::BuildNativeSolids(source);
+  EXPECT_FALSE(limited.Constructed || limited.Validated);
+  EXPECT_TRUE(limited.Boundary.TopologyValidated);
+  const auto deeper = Ops::BuildNativeSolids(source, .1, 32, 16, 4000000, 2000000,
+                                            2000000, 2000000, 8000000, 18);
+  ASSERT_TRUE(deeper.Validated) << deeper.Reason;
+  EXPECT_LE(deeper.Geometry.BoundaryBound, .1);
+  EXPECT_EQ(deeper.Boundary.ReferenceResolution, 31);
+  EXPECT_FALSE(Ops::BuildNativeSolids(source, .01).Constructed);
+  EXPECT_FALSE(Ops::BuildNativeSolids(source, .1, 32, 16, 4000000, 2000000,
+                                     2000000, 1, 8000000, 18).Constructed);
+  EXPECT_THROW(Ops::BuildNativeSolids(source, .1, 32, 16, 4000000, 2000000,
+                                     2000000, 2000000, 8000000, 0), Standard_DomainError);
+}
+
+TEST(BRepClass3d_ImplicitBox, CornerNativeSolidCodecRejectsLostRestrictionsAndPolicySpoof)
+{
+  using Ops = BRepClass3d_ImplicitBox;
+  const auto source = Ops::Build(topologyField(gp_Pnt(), gp_Pnt(10, 10, 10), 0),
+    BRepPrimAPI_MakeBox(10, 10, 10).Shape(), Ops::Operation::Common,
+    .1, 512, Ops::CornerPolicy::Regularized);
+  auto value = Ops::BuildNativeSolids(source);
+  ASSERT_TRUE(value.Validated) << value.Reason;
+  std::ostringstream saved;
+  BRepClass3d_ImplicitSolidIO::Write(value, saved);
+  auto corrupt = saved.str();
+  corrupt.replace(0, std::string("OCCT_IMPLICIT_SOLIDS 2").size(), "OCCT_IMPLICIT_SOLIDS 1");
+  const auto originalShape = value.Shape;
+  std::istringstream badInput(corrupt);
+  EXPECT_THROW(BRepClass3d_ImplicitSolidIO::Read(badInput, value), Standard_DomainError);
+  EXPECT_TRUE(value.Shape.IsSame(originalShape) && value.Validated);
+  const auto& old = value.Boundary.Faces.back();
+  const auto data = occ::down_cast<BRep_TImplicitFace>(old.TShape());
+  BRep_Builder builder;
+  TopoDS_Face stripped;
+  builder.MakeImplicitFace(stripped, data->Field(), data->Minimum(), data->Maximum(),
+                           TopLoc_Location(), data->Tolerance());
+  for (TopoDS_Iterator wire(old, false, false); wire.More(); wire.Next()) builder.Add(stripped, wire.Value());
+  value.Boundary.Faces.back() = stripped;
+  TopoDS_Shell shell;
+  builder.MakeShell(shell);
+  for (const auto& f : value.Boundary.Faces) builder.Add(shell, f);
+  value.Boundary.Shells[0] = shell;
+  builder.MakeCompound(value.Boundary.Shape);
+  builder.Add(value.Boundary.Shape, shell);
+  TopoDS_Solid solid;
+  builder.MakeSolid(solid); builder.Add(solid, shell);
+  value.Solids[0] = solid;
+  builder.MakeCompound(value.Shape); builder.Add(value.Shape, solid);
+  std::ostringstream untouched;
+  untouched << "sentinel";
+  EXPECT_THROW(BRepClass3d_ImplicitSolidIO::Write(value, untouched), Standard_DomainError);
+  EXPECT_EQ(untouched.str(), "sentinel");
 }
 
 TEST(BRepClass3d_ImplicitBox, NativeSolidTopologyIORestoresActualSharedGraphNotValidation)
@@ -1752,7 +1860,6 @@ TEST(BRepClass3d_ImplicitBox, CornerBoundaryRestoredIdentityScaleAndFailurePolic
     EXPECT_TRUE(shell.ShellsConstructed) << scale << " " << shell.Reason;
     EXPECT_TRUE(shell.TopologyValidated);
     EXPECT_EQ(shell.ShellEuler, std::vector<int>({-2}));
-    EXPECT_THROW(Ops::BuildNativeSolids(result), Standard_NotImplemented);
     gp_Trsf move;
     move.SetTranslation(gp_Vec(1e-12, 0, 0));
     auto placed = restored;

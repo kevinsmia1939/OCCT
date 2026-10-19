@@ -622,12 +622,20 @@ BRepClass3d_ImplicitBox::NativeSolids BRepClass3d_ImplicitBox::BuildNativeSolids
   size_t          maximumGeometryCells,
   size_t          maximumSegments)
 {
+  return BuildNativeSolids(source, tolerance, resolution, maximumDepth, maximumCells,
+    maximumTests, maximumSeparatorCells, maximumGeometryCells, maximumSegments, maximumDepth);
+}
+
+BRepClass3d_ImplicitBox::NativeSolids BRepClass3d_ImplicitBox::BuildNativeSolids(
+  const Boundary& source, double tolerance, int resolution, int maximumDepth,
+  size_t maximumCells, size_t maximumTests, size_t maximumSeparatorCells,
+  size_t maximumGeometryCells, size_t maximumSegments, int maximumGeometryDepth)
+{
   if (!std::isfinite(tolerance) || tolerance <= 0 || !maximumGeometryCells
-      || maximumGeometryCells > 10000000 || !maximumSegments || maximumSegments > 50000000)
+      || maximumGeometryCells > 10000000 || !maximumSegments || maximumSegments > 50000000
+      || maximumGeometryDepth < 1 || maximumGeometryDepth > 24)
     throw Standard_DomainError("Invalid native solid geometry settings");
   NativeSolids result;
-  require(source.Policy == CornerPolicy::Reject,
-          "Corner-aware native solid geometric qualification is not implemented");
   result.Tolerance = tolerance;
   result.Boundary  = BuildNativeShells(source,
                                        resolution,
@@ -662,7 +670,7 @@ BRepClass3d_ImplicitBox::NativeSolids BRepClass3d_ImplicitBox::BuildNativeSolids
   result.Geometry = CheckCapGeometry(result.Boundary.Source,
                                      caps,
                                      tolerance,
-                                     maximumDepth,
+                                     maximumGeometryDepth,
                                      maximumGeometryCells,
                                      maximumSegments);
   if (!result.Geometry.Resolved)

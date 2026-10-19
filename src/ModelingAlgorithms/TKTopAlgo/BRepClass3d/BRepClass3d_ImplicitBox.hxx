@@ -258,6 +258,12 @@ public:
     size_t theMaximumSeparatorCells=2000000,size_t theMaximumGeometryCells=2000000,
     size_t theMaximumSegmentTests=8000000);
 
+  //! Independent cap-geometry depth; reference depth remains limited to 16.
+  Standard_EXPORT static NativeSolids BuildNativeSolids(const Boundary&,
+    double theTolerance,int theResolution,int theMaximumDepth,
+    size_t theMaximumCells,size_t theMaximumTests,size_t theMaximumSeparatorCells,
+    size_t theMaximumGeometryCells,size_t theMaximumSegmentTests,int theMaximumGeometryDepth);
+
   //! Attach whole field faces, partitioning disconnected components only at
   //! checked F/L-zero-free axis planes, then assemble genuine native shells.
   //! Validate face attachment, oriented incidence, cyclic vertex links, Euler
