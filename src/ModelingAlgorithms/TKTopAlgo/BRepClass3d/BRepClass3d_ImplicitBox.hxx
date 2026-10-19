@@ -224,6 +224,7 @@ public:
     double MathematicalToCapsBound=0,CapsToMathematicalBound=0,EdgeVertexDeviation=0,BoundaryBound=0;
     std::array<size_t,2> Cells{};
     size_t SegmentTests=0;
+    size_t RegularizedEmptyCells=0, CornerWitnesses=0;
     int UnresolvedSide=-1,UnresolvedDirection=-1;
     gp_Pnt UnresolvedMinimum,UnresolvedMaximum;
   };

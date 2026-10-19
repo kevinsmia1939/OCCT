@@ -119,6 +119,58 @@ struct Checker
   double                     Tolerance, Reserve, FieldReserve, GradientReserve, H, L, Direction;
   int                        MaximumDepth;
   size_t                     MaximumCells, MaximumSegments;
+  const BRepClass3d_ImplicitBox::CornerModel* Corners = nullptr;
+
+  bool cornerOnSide(int corner, int side) const
+  {
+    return ((corner >> (side / 2)) & 1) == side % 2;
+  }
+
+  bool retainedCorner(int corner, int side) const
+  {
+    const auto& germ = Corners->Corners[size_t(corner)];
+    if (!germ.ExactZero || !cornerOnSide(corner, side)) return false;
+    // Closure of strict retained area ON THIS SIDE, not just 3-D membership.
+    // One strictly retained inward ray is sufficient; an isolated planar zero
+    // with two unretained inward directions is never a cap witness.
+    for (int axis = 0; axis < 3; ++axis)
+      if (axis != side / 2)
+      {
+        const double upper = Direction > 0 ? germ.InwardDerivativeUpper[size_t(axis)]
+                                           : -germ.InwardDerivativeLower[size_t(axis)];
+        if (upper < -GradientReserve) return true;
+      }
+    return false;
+  }
+
+  bool emptyRegularizedCell(const Box& box, int side) const
+  {
+    if (!Corners) return false;
+    for (int c = 0; c < 8; ++c)
+    {
+      const auto& germ = Corners->Corners[size_t(c)];
+      if (!germ.ExactZero || !cornerOnSide(c, side)) continue;
+      double value = 0;
+      gp_Vec gradient, radius;
+      require(Field.LatticeJet(germ.Anchor, value, gradient) && value == 0,
+              "Cap corner lost its exact lattice identity");
+      for (int axis = 1; axis <= 3; ++axis)
+        radius.SetCoord(axis, std::max(std::abs(box[0].Coord(axis) - germ.Anchor.Coord(axis)),
+                                       std::abs(box[1].Coord(axis) - germ.Anchor.Coord(axis))));
+      const double variation = H * (std::hypot(radius.X(), radius.Y(), radius.Z()) + 8 * Reserve)
+                               + 4 * GradientReserve;
+      bool unretained = std::isfinite(variation);
+      for (int axis = 0; axis < 3; ++axis)
+        if (axis != side / 2)
+          unretained &= Direction * gradient.Coord(axis + 1) * (c & (1 << axis) ? -1 : 1)
+                        > variation;
+      // The derivative cone is proved over the convex hull of anchor and cell,
+      // using the global Hessian bound. Its sole possible zero is the anchor;
+      // neither it nor any cell point belongs to closure of retained side area.
+      if (unretained) return true;
+    }
+    return false;
+  }
 
   double variation(const gp_Pnt& p, double r, int axis) const
   {
@@ -218,6 +270,17 @@ struct Checker
       return std::numeric_limits<double>::infinity();
     const auto base = projected(p, side);
     double     best = std::numeric_limits<double>::infinity();
+    if (Corners)
+      for (int c = 0; c < 8; ++c)
+        if (retainedCorner(c, side))
+        {
+          const double distance = p.Distance(Corners->Corners[size_t(c)].Anchor) + 8 * Reserve;
+          if (distance <= available && distance < best)
+          {
+            best = distance;
+            ++Result.CornerWitnesses;
+          }
+        }
     auto       test = [&](const gp_Pnt& q) {
       const double distance = p.Distance(q) + 8 * Reserve;
       if (distance <= available && Direction * Field.Value(q) < -FieldReserve)
@@ -255,6 +318,11 @@ struct Checker
       return false;
     }
     ++Result.Cells[size_t(direction)];
+    if (!native && emptyRegularizedCell(box, side))
+    {
+      ++Result.RegularizedEmptyCells;
+      return true;
+    }
     const double cu = (box[0].Coord(u + 1) + box[1].Coord(u + 1)) * .5,
                  cv = (box[0].Coord(v + 1) + box[1].Coord(v + 1)) * .5;
     gp_Pnt       p;
@@ -360,8 +428,6 @@ BRepClass3d_ImplicitBox::CapGeometry BRepClass3d_ImplicitBox::CheckCapGeometry(
   size_t                          maximumCells,
   size_t                          maximumSegments)
 {
-  require(source.Policy == CornerPolicy::Reject,
-          "Corner-aware cap geometry validation is not implemented");
   if (!std::isfinite(tolerance) || tolerance <= 0 || maximumDepth < 1 || maximumDepth > 24
       || !maximumCells || maximumCells > 10000000 || !maximumSegments || maximumSegments > 50000000
       || candidates.size() > 128)
@@ -492,6 +558,12 @@ BRepClass3d_ImplicitBox::CapGeometry BRepClass3d_ImplicitBox::CheckCapGeometry(
     report.Reason = "Edge/vertex deviation exhausts geometry tolerance";
     return report;
   }
+  CornerModel corners;
+  if (copy.Policy == CornerPolicy::Regularized)
+  {
+    corners = CheckCornerGerms(copy.Faces.back(), data->Tolerance());
+    require(corners.Resolved, "Cap corner regularization unresolved");
+  }
   Checker checker{field,
                   low,
                   high,
@@ -507,7 +579,8 @@ BRepClass3d_ImplicitBox::CapGeometry BRepClass3d_ImplicitBox::CheckCapGeometry(
                   copy.Faces.back().Orientation() == TopAbs_FORWARD ? 1. : -1.,
                   maximumDepth,
                   maximumCells,
-                  maximumSegments};
+                  maximumSegments,
+                  copy.Policy == CornerPolicy::Regularized ? &corners : nullptr};
   try
   {
     for (int side = 0; side < 6; ++side)

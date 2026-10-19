@@ -12,6 +12,7 @@
 #include <BRep_TImplicitFace.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <Geom2d_BSplineCurve.hxx>
+#include <Geom_Plane.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <ElSLib.hxx>
 #include <TopExp.hxx>
@@ -1141,6 +1142,157 @@ TEST(BRepClass3d_ImplicitBox, NativeSolidsGatedByWholeCapGeometryBothOperations)
     }
 }
 
+TEST(BRepClass3d_ImplicitBox, CornerCapGeometryBothDirectionsAndRetainedWitnesses)
+{
+  using Ops = BRepClass3d_ImplicitBox;
+  for (const auto operation : {Ops::Operation::Common, Ops::Operation::BoxMinusField})
+  {
+    const auto source = Ops::Build(topologyField(gp_Pnt(), gp_Pnt(10, 10, 10), 0),
+      BRepPrimAPI_MakeBox(10, 10, 10).Shape(), operation, .1, 512, Ops::CornerPolicy::Regularized);
+    const std::vector<TopoDS_Face> caps(source.Faces.begin(), source.Faces.end() - 1);
+    std::ostringstream before;
+    BRepClass3d_ImplicitBoxIO::Write(source, before);
+    const auto report = Ops::CheckCapGeometry(source, caps);
+    ASSERT_TRUE(report.Resolved) << report.Reason << " side " << report.UnresolvedSide
+      << " direction " << report.UnresolvedDirection;
+    EXPECT_LE(report.BoundaryBound, .1);
+    EXPECT_GT(report.Cells[0], 0u);
+    EXPECT_GT(report.Cells[1], 0u);
+    EXPECT_GT(report.RegularizedEmptyCells, 0u);
+    EXPECT_THROW(Ops::BuildNativeSolids(source), Standard_NotImplemented);
+    std::ostringstream after;
+    BRepClass3d_ImplicitBoxIO::Write(source, after);
+    EXPECT_EQ(before.str(), after.str());
+    EXPECT_TRUE(source.SeamBoundVerified);
+  }
+}
+
+TEST(BRepClass3d_ImplicitBox, CornerCapGeometryShiftAndScaleAtPhysicalTolerance)
+{
+  using Ops = BRepClass3d_ImplicitBox;
+  for (double scale : {.1, 2.})
+    for (const auto operation : {Ops::Operation::Common, Ops::Operation::BoxMinusField})
+    {
+      const gp_Pnt low(-10 * scale, -10 * scale, 10 * scale);
+      const gp_Pnt high(low.XYZ() + gp_XYZ(10, 10, 10) * scale);
+      const auto source = Ops::Build(topologyField(low, high, 0, scale),
+        BRepPrimAPI_MakeBox(low, high).Shape(), operation, std::min(.1, .1 * scale),
+        512, Ops::CornerPolicy::Regularized);
+      const std::vector<TopoDS_Face> caps(source.Faces.begin(), source.Faces.end() - 1);
+      // A 20-mm box needs two more binary subdivisions to retain the same
+      // physical coverage radius as the default 10-mm fixture. Do not loosen
+      // the 0.1-mm target to make a depth-exhausted proof pass.
+      const auto report = Ops::CheckCapGeometry(source, caps, .1, scale > 1 ? 18 : 16);
+      ASSERT_TRUE(report.Resolved) << scale << " " << report.Reason;
+      EXPECT_LE(report.BoundaryBound, .1); // Physical target, never F-residual units.
+      EXPECT_GT(report.RegularizedEmptyCells, 0u);
+    }
+}
+
+TEST(BRepClass3d_ImplicitBox, CornerCapGeometryRetainedVersusExcludedCornerPatches)
+{
+  using Ops = BRepClass3d_ImplicitBox;
+  const auto source = Ops::Build(topologyField(gp_Pnt(), gp_Pnt(10, 10, 10), 0),
+    BRepPrimAPI_MakeBox(10, 10, 10).Shape(), Ops::Operation::Common,
+    .1, 512, Ops::CornerPolicy::Regularized);
+  auto patch = [](bool upper) {
+    const double a = upper ? 10. : 0.;
+    const gp_Pln plane(gp_Ax3(gp_Pnt(0, 0, a), gp_Dir(0, 0, upper ? 1 : -1), gp_Dir(1, 0, 0)));
+    BRep_Builder builder;
+    TopoDS_Face face;
+    builder.MakeFace(face, new Geom_Plane(plane), 1.e-7);
+    double u, v;
+    ElSLib::Parameters(plane, gp_Pnt(a, a, a), u, v);
+    const gp_Pnt2d points[4] = {gp_Pnt2d(u, v), gp_Pnt2d(u + .01, v),
+      gp_Pnt2d(u + .01, v + .01), gp_Pnt2d(u, v + .01)};
+    TopoDS_Vertex vertices[4];
+    for (int i = 0; i < 4; ++i)
+      builder.MakeVertex(vertices[i], ElSLib::Value(points[i].X(), points[i].Y(), plane), 1.e-7);
+    TopoDS_Wire wire;
+    builder.MakeWire(wire);
+    for (int i = 0; i < 4; ++i)
+    {
+      const int j = (i + 1) % 4;
+      NCollection_Array1<gp_Pnt> poles(1, 2);
+      NCollection_Array1<gp_Pnt2d> uv(1, 2);
+      NCollection_Array1<double> knots(1, 2);
+      NCollection_Array1<int> multiplicities(1, 2);
+      poles(1) = BRep_Tool::Pnt(vertices[i]); poles(2) = BRep_Tool::Pnt(vertices[j]);
+      uv(1) = points[i]; uv(2) = points[j];
+      knots(1) = 0; knots(2) = 1; multiplicities(1) = multiplicities(2) = 2;
+      TopoDS_Edge edge;
+      builder.MakeEdge(edge, new Geom_BSplineCurve(poles, knots, multiplicities, 1), 1.e-7);
+      builder.Add(edge, vertices[i].Oriented(TopAbs_FORWARD));
+      builder.Add(edge, vertices[j].Oriented(TopAbs_REVERSED));
+      builder.UpdateVertex(vertices[i], 0., edge, 1.e-7);
+      builder.UpdateVertex(vertices[j], 1., edge, 1.e-7);
+      builder.Range(edge, 0, 1);
+      builder.UpdateEdge(edge, new Geom2d_BSplineCurve(uv, knots, multiplicities, 1), face, 1.e-7);
+      builder.Range(edge, face, 0, 1);
+      builder.Add(wire, edge);
+    }
+    wire.Closed(true);
+    builder.Add(face, wire);
+    return face;
+  };
+  const auto retained = patch(true), excluded = patch(false);
+  ASSERT_TRUE(BRepCheck_Analyzer(retained).IsValid());
+  ASSERT_TRUE(BRepCheck_Analyzer(excluded).IsValid());
+  auto caps = std::vector<TopoDS_Face>(source.Faces.begin(), source.Faces.end() - 1);
+  caps.push_back(retained);
+  const auto nearRetained = Ops::CheckCapGeometry(source, caps);
+  ASSERT_TRUE(nearRetained.Resolved) << nearRetained.Reason;
+  EXPECT_GT(nearRetained.CornerWitnesses, 0u);
+  EXPECT_LE(nearRetained.BoundaryBound, .1);
+  // Geometric proximity alone permits a tiny redundant patch. It is NOT a
+  // topology certificate: native solid construction must still stay guarded.
+  caps.back() = excluded;
+  const auto nearExcluded = Ops::CheckCapGeometry(source, caps);
+  EXPECT_FALSE(nearExcluded.Resolved);
+  EXPECT_EQ(nearExcluded.UnresolvedDirection, 1);
+}
+
+TEST(BRepClass3d_ImplicitBox, CornerCapGeometryMissingGhostRestoreAndBudgets)
+{
+  using Ops = BRepClass3d_ImplicitBox;
+  const auto fieldFace = topologyField(gp_Pnt(), gp_Pnt(10, 10, 10), 0);
+  const auto boxShape = BRepPrimAPI_MakeBox(10, 10, 10).Shape();
+  const auto source = Ops::Build(fieldFace, boxShape, Ops::Operation::Common,
+                                .1, 512, Ops::CornerPolicy::Regularized);
+  const std::vector<TopoDS_Face> caps(source.Faces.begin(), source.Faces.end() - 1);
+  EXPECT_FALSE(Ops::CheckCapGeometry(source, {}).Resolved);
+  auto wrong = caps;
+  const auto other = Ops::Build(fieldFace, boxShape, Ops::Operation::BoxMinusField,
+                               .1, 512, Ops::CornerPolicy::Regularized);
+  // An opposite-material cap containing the excluded uniform corner is not a
+  // mathematical witness merely because F(anchor) is exactly zero.
+  bool added = false;
+  for (size_t i = 0; i + 1 < other.Faces.size() && !added; ++i)
+    for (TopExp_Explorer v(other.Faces[i], TopAbs_VERTEX); v.More(); v.Next())
+      if (BRep_Tool::Pnt(TopoDS::Vertex(v.Current())).Distance(gp_Pnt()) == 0)
+      {
+        wrong.push_back(other.Faces[i]);
+        added = true;
+        break;
+      }
+  ASSERT_TRUE(added);
+  const auto ghost = Ops::CheckCapGeometry(source, wrong);
+  EXPECT_FALSE(ghost.Resolved);
+  EXPECT_EQ(ghost.UnresolvedDirection, 1);
+  EXPECT_FALSE(Ops::CheckCapGeometry(source, caps, .1, 16, 1).Resolved);
+  EXPECT_FALSE(Ops::CheckCapGeometry(source, caps, .1, 16, 2000000, 1).Resolved);
+  EXPECT_THROW(Ops::CheckCapGeometry(source, caps, 0), Standard_DomainError);
+  std::ostringstream output;
+  BRepClass3d_ImplicitBoxIO::Write(source, output);
+  Ops::Boundary restored;
+  std::istringstream input(output.str());
+  BRepClass3d_ImplicitBoxIO::Read(input, restored);
+  const std::vector<TopoDS_Face> loadedCaps(restored.Faces.begin(), restored.Faces.end() - 1);
+  const auto loaded = Ops::CheckCapGeometry(restored, loadedCaps);
+  EXPECT_TRUE(loaded.Resolved) << loaded.Reason;
+  EXPECT_FALSE(restored.SeamBoundVerified);
+}
+
 TEST(BRepClass3d_ImplicitBox, CapGeometryRejectsMissingAndExtraneousNativeCaps)
 {
   using Ops                             = BRepClass3d_ImplicitBox;
@@ -1563,7 +1715,6 @@ TEST(BRepClass3d_ImplicitBox, DefaultCornerBoundaryUsesSharedNativeTopology)
     EXPECT_EQ(restored.ExcludedCornerContacts.front().Distance(result.ExcludedCornerContacts.front()), 0);
     EXPECT_THROW(BRepMesh_ImplicitBoundary::Prepare(restored), Standard_NotImplemented);
     EXPECT_THROW(BRepMesh_ImplicitBoundary::CheckCoverage(restored, {}), Standard_NotImplemented);
-    EXPECT_THROW(Ops::CheckCapGeometry(restored, {}), Standard_NotImplemented);
     EXPECT_EQ(Ops::Classify(result, gp_Pnt(0, 0, 0), .1).State,
               operation == Ops::Operation::Common ? Ops::PointState::Outside
                                                    : Ops::PointState::NearBoundary);
