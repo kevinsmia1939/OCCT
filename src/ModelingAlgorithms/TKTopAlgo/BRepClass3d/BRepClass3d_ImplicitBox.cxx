@@ -49,6 +49,20 @@ bool exactIdentity(const TopLoc_Location& location)
   return true;
 }
 
+bool exactTranslation(const TopLoc_Location& location)
+{
+  const auto matrix = location.Transformation();
+  for (int row = 1; row <= 3; ++row)
+  {
+    for (int column = 1; column <= 3; ++column)
+      if (matrix.Value(row, column) != (row == column ? 1. : 0.))
+        return false;
+    if (!std::isfinite(matrix.Value(row, 4)))
+      return false;
+  }
+  return true;
+}
+
 void require(bool condition, const char* message)
 {
   if (!condition)
@@ -733,10 +747,10 @@ BRepClass3d_ImplicitBox::Boundary BRepClass3d_ImplicitBox::Build(const TopoDS_Fa
             "Box must fit inside the field domain and exceed four tolerances per axis");
   if (policy == CornerPolicy::Regularized)
   {
-    require(exactIdentity(box.Location()), "Corner-aware input box must have identity placement");
+    require(exactTranslation(box.Location()), "Corner-aware input box requires exact pure translation");
     for (const auto& vertex : vertices)
     {
-      require(exactIdentity(vertex.Location()), "Corner-aware box vertices must be local identities");
+      require(exactTranslation(vertex.Location()), "Corner-aware box vertices require pure translation");
       const auto p = BRep_Tool::Pnt(TopoDS::Vertex(vertex));
       for (int axis = 1; axis <= 3; ++axis)
         require(p.Coord(axis) == low.Coord(axis) || p.Coord(axis) == high.Coord(axis),
@@ -770,7 +784,7 @@ BRepClass3d_ImplicitBox::Boundary BRepClass3d_ImplicitBox::Build(const TopoDS_Fa
     const auto p = BRep_Tool::Pnt(a), q = BRep_Tool::Pnt(b);
     if (policy == CornerPolicy::Regularized)
     {
-      require(exactIdentity(e.Location()), "Corner-aware box edges need identity placement");
+      require(exactTranslation(e.Location()), "Corner-aware box edges require pure translation");
       const auto line = curve.Line();
       for (int axis = 1; axis <= 3; ++axis)
       {
@@ -817,8 +831,8 @@ BRepClass3d_ImplicitBox::Boundary BRepClass3d_ImplicitBox::Build(const TopoDS_Fa
     const double coordinate = sign > 0 ? high.Coord(axis + 1) : low.Coord(axis + 1);
     if (policy == CornerPolicy::Regularized)
     {
-      require(exactIdentity(face.Location()) && plane.Location().Coord(axis + 1) == coordinate,
-              "Corner-aware box planes need exact intercepts and identity placement");
+      require(exactTranslation(face.Location()) && plane.Location().Coord(axis + 1) == coordinate,
+              "Corner-aware box planes need exact world intercepts and pure translation");
       for (int j = 0; j < 3; ++j)
         require(normal.Coord(j + 1) == (j == axis ? sign : 0),
                 "Corner-aware box planes must be exact coordinate planes");

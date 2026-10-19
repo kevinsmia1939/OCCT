@@ -1831,6 +1831,50 @@ TEST(BRepClass3d_ImplicitBox, DefaultCornerBoundaryUsesSharedNativeTopology)
   EXPECT_THROW(Ops::Build(source, operand, Ops::Operation::Common), Standard_NotImplemented);
 }
 
+TEST(BRepClass3d_ImplicitBox, CornerBoundaryTranslatedOperandMatchesBakedGeometry)
+{
+  using Ops = BRepClass3d_ImplicitBox;
+  const gp_Pnt low(-10, -10, 10), high(0, 0, 20);
+  const auto field = topologyField(low, high, 0);
+  gp_Trsf translation;
+  translation.SetTranslation(gp_Vec(-10, -10, 10));
+  const auto box = BRepPrimAPI_MakeBox(10, 10, 10).Shape().Moved(TopLoc_Location(translation));
+  const auto baked = BRepPrimAPI_MakeBox(low, high).Shape();
+  const bool free = box.Free();
+  const auto originalLocation = box.Location();
+  for (const auto operation : {Ops::Operation::Common, Ops::Operation::BoxMinusField})
+  {
+    const auto result = Ops::Build(field, box, operation, .1, 512, Ops::CornerPolicy::Regularized);
+    const auto reference = Ops::Build(field, baked, operation, .1, 512, Ops::CornerPolicy::Regularized);
+    std::ostringstream record, expected;
+    BRepClass3d_ImplicitBoxIO::Write(result, record);
+    BRepClass3d_ImplicitBoxIO::Write(reference, expected);
+    EXPECT_EQ(record.str(), expected.str());
+    EXPECT_EQ(result.SeamCount, 18);
+    EXPECT_EQ(result.ExactCornerCount, 8);
+    const auto solid = Ops::BuildNativeSolids(result);
+    EXPECT_TRUE(solid.Constructed && solid.Validated) << solid.Reason;
+    EXPECT_LE(solid.Geometry.MathematicalToCapsBound, .1);
+    EXPECT_LE(solid.Geometry.CapsToMathematicalBound, .1);
+    EXPECT_EQ(box.Free(), free);
+    EXPECT_EQ(box.Location(), originalLocation);
+    for (TopExp_Explorer it(box, TopAbs_FACE); it.More(); it.Next())
+    {
+      TopLoc_Location location;
+      EXPECT_TRUE(BRep_Tool::Triangulation(TopoDS::Face(it.Current()), location).IsNull());
+    }
+  }
+  gp_Trsf rotation;
+  rotation.SetRotation(gp_Ax1(gp_Pnt(), gp_Dir(0, 0, 1)), 1.e-12);
+  EXPECT_THROW(Ops::Build(topologyField(gp_Pnt(-20, -20, -20), gp_Pnt(20, 20, 20), 0),
+                          box.Moved(TopLoc_Location(rotation)), Ops::Operation::Common,
+                          .1, 512, Ops::CornerPolicy::Regularized), Standard_NotImplemented);
+  // The field still has a separate identity-only mathematical-coordinate contract.
+  EXPECT_THROW(Ops::Build(TopoDS::Face(field.Moved(TopLoc_Location(translation))), box,
+                          Ops::Operation::Common, .1, 512, Ops::CornerPolicy::Regularized),
+               Standard_NotImplemented);
+}
+
 TEST(BRepClass3d_ImplicitBox, CornerBoundaryRestoredIdentityScaleAndFailurePolicies)
 {
   using Ops = BRepClass3d_ImplicitBox;
