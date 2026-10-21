@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Kavin Teenakul
 // SPDX-License-Identifier: LGPL-2.1-only WITH OCCT-exception-1.0
 #include <BRepClass3d_ImplicitBox.hxx>
+#include <BRepClass3d_ImplicitWork.hxx>
 #include <BRep_TImplicitFace.hxx>
 #include <Geom_ImplicitGyroid.hxx>
 #include <Standard_DomainError.hxx>
@@ -86,6 +87,7 @@ struct Checker
 
   bool check(const Simplex& cell, const gp_Vec& unit, double linearLower, int depth)
   {
+    BRepClass3d_ImplicitWork::Checkpoint();
     const int dimension        = cell.Count - 1;
     Result.UnresolvedDimension = dimension;
     gp_Pnt low = cell.Points[0], high = low;
@@ -317,6 +319,7 @@ BRepClass3d_ImplicitBox::TopologyWitness BRepClass3d_ImplicitBox::CheckTopology(
   size_t             maximumCells,
   CornerPolicy       policy)
 {
+  BRepClass3d_ImplicitWork::EnterPhase(BRepClass3d_ImplicitWork::Phase::Topology);
   if (resolution < 4 || resolution > 64 || (resolution & (resolution - 1)) || maximumDepth < 0
       || maximumDepth > 16 || !maximumCells || maximumCells > 10000000)
     throw Standard_DomainError("Invalid native box topology settings");
@@ -387,6 +390,7 @@ BRepClass3d_ImplicitBox::TopologyWitness BRepClass3d_ImplicitBox::CheckTopology(
     for (int y = 0; y <= resolution; ++y)
       for (int x = 0; x <= resolution; ++x)
       {
+        BRepClass3d_ImplicitWork::Checkpoint();
         const int index    = id(x, y, z);
         const int coord[3] = {x, y, z};
         gp_Pnt    p;
@@ -451,6 +455,7 @@ BRepClass3d_ImplicitBox::TopologyWitness BRepClass3d_ImplicitBox::CheckTopology(
     for (int y = 0; y < resolution; ++y)
       for (int x = 0; x < resolution; ++x)
       {
+        BRepClass3d_ImplicitWork::Checkpoint();
         int nodes[8];
         for (int i = 0; i < 8; ++i)
           nodes[i] = id(x + offsets[i][0], y + offsets[i][1], z + offsets[i][2]);

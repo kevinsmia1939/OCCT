@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Kavin Teenakul
 // SPDX-License-Identifier: LGPL-2.1-only WITH OCCT-exception-1.0
 #include <BRepClass3d_ImplicitBox.hxx>
+#include <BRepClass3d_ImplicitWork.hxx>
 #include <BRepClass3d_ImplicitBoxIO.hxx>
 #include <BRep_TImplicitFace.hxx>
 #include <BRep_ImplicitTool.hxx>
@@ -1210,6 +1211,7 @@ double curveBound(const CurveRecord&                       a,
   double bound = 0;
   while (i < a.Knots.size() || j < b.Knots.size())
   {
+    BRepClass3d_ImplicitWork::Checkpoint();
     const long double t = j == b.Knots.size()        ? a.Knots[i++]
                           : i == a.Knots.size()      ? b.Knots[j++]
                           : a.Knots[i] <= b.Knots[j] ? a.Knots[i++]
@@ -1713,6 +1715,7 @@ BRepClass3d_ImplicitBox::TrimAttachment BRepClass3d_ImplicitBox::CheckTrimAttach
   size_t          maximumCells,
   size_t          maximumTests)
 {
+  BRepClass3d_ImplicitWork::EnterPhase(BRepClass3d_ImplicitWork::Phase::TrimAttachment);
   if (resolution < 4 || resolution > 64 || (resolution & (resolution - 1)) || maximumDepth < 0
       || maximumDepth > 16 || !maximumCells || maximumCells > 10000000 || !maximumTests
       || maximumTests > 10000000)
@@ -1759,6 +1762,7 @@ BRepClass3d_ImplicitBox::TrimAttachment BRepClass3d_ImplicitBox::CheckTrimAttach
     const auto complement =
       CheckCapAttachment(opposite, resolution, maximumDepth, maximumCells, maximumTests);
     report.ComplementCapsAttached = complement.Resolved;
+    BRepClass3d_ImplicitWork::EnterPhase(BRepClass3d_ImplicitWork::Phase::TrimAttachment);
     if (!complement.Resolved)
     {
       report.Reason = "complement_caps_unresolved: " + complement.Reason;
@@ -1860,6 +1864,7 @@ BRepClass3d_ImplicitBox::TrimAttachment BRepClass3d_ImplicitBox::CheckTrimAttach
     std::vector<std::vector<std::pair<ArcKey, int>>> referenceKeys;
     for (size_t wire = 0; wire < loops.size(); ++wire)
     {
+      BRepClass3d_ImplicitWork::Checkpoint();
       const auto& loop  = loops[wire];
       const auto& line  = labels[wire];
       size_t      start = 0;

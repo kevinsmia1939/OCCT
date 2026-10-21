@@ -18,6 +18,8 @@ set(OCCT_BRepClass3d_FILES
   BRepClass3d_SignedDistance.cxx
   BRepClass3d_SignedDistance.hxx
   BRepClass3d_ImplicitBox.hxx
+  BRepClass3d_ImplicitWork.hxx
+  BRepClass3d_ImplicitWork.cxx
   BRepClass3d_ImplicitBox.cxx
   BRepClass3d_ImplicitBoxRegularity.cxx
   BRepClass3d_ImplicitBoxCorners.cxx

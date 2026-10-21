@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Kavin Teenakul
 // SPDX-License-Identifier: LGPL-2.1-only WITH OCCT-exception-1.0
 #include <BRepClass3d_ImplicitBox.hxx>
+#include <BRepClass3d_ImplicitWork.hxx>
 #include <BRepClass3d_ImplicitBoxIO.hxx>
 #include <BRep_TImplicitFace.hxx>
 #include <BRep_Tool.hxx>
@@ -93,6 +94,7 @@ struct Partition
 
   bool exclude(const Box& plane, int fixed, int depth, int& sign)
   {
+    BRepClass3d_ImplicitWork::Checkpoint();
     if (Result.SeparatorCells >= MaximumCells)
       return false;
     ++Result.SeparatorCells;
@@ -132,6 +134,7 @@ struct Partition
 
   bool divide(std::vector<int> components, const Box& domain)
   {
+    BRepClass3d_ImplicitWork::Checkpoint();
     if (components.empty())
       return true;
     if (components.size() == 1)
@@ -294,6 +297,7 @@ BRepClass3d_ImplicitBox::NativeShells BRepClass3d_ImplicitBox::BuildNativeShells
   size_t          maximumTests,
   size_t          maximumSeparatorCells)
 {
+  BRepClass3d_ImplicitWork::EnterPhase(BRepClass3d_ImplicitWork::Phase::Copying);
   if (!maximumSeparatorCells || maximumSeparatorCells > 10000000)
     throw Standard_DomainError("Invalid native component separator budget");
   NativeShells       result;
@@ -311,6 +315,7 @@ BRepClass3d_ImplicitBox::NativeShells BRepClass3d_ImplicitBox::BuildNativeShells
     return result;
   }
   const auto&  retained   = attachment.RetainedCaps;
+  BRepClass3d_ImplicitWork::EnterPhase(BRepClass3d_ImplicitWork::Phase::ShellAssembly);
   const auto&  reference  = retained.Reference;
   const auto&  original   = copy.Faces.back();
   const auto   data       = occ::down_cast<BRep_TImplicitFace>(original.TShape());

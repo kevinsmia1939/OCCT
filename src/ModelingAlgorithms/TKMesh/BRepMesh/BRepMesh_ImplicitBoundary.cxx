@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Kavin Teenakul
 // SPDX-License-Identifier: LGPL-2.1-only WITH OCCT-exception-1.0
 #include <BRepMesh_ImplicitBoundary.hxx>
+#include <BRepClass3d_ImplicitWork.hxx>
 #include <BRepClass3d_ImplicitBoxIO.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepMesh_Context.hxx>
@@ -140,6 +141,7 @@ BRepMesh_ImplicitBoundary::Result BRepMesh_ImplicitBoundary::Prepare(
   int                                      maximumNodes,
   int                                      maximumTriangles)
 {
+  BRepClass3d_ImplicitWork::EnterPhase(BRepClass3d_ImplicitWork::Phase::Meshing);
   if (!std::isfinite(deflection) || deflection < 1.e-7 || maximumNodes < 3 || maximumNodes > 1000000
       || maximumTriangles < 1 || maximumTriangles > 2000000)
     throw Standard_DomainError("Invalid native mesh constraint settings");
@@ -222,6 +224,7 @@ BRepMesh_ImplicitBoundary::Result BRepMesh_ImplicitBoundary::Prepare(
   std::map<Key, Use> capUses;
   for (size_t cap = 0; cap + 1 < copy.Faces.size(); ++cap)
   {
+    BRepClass3d_ImplicitWork::Checkpoint();
     const auto&     face = copy.Faces[cap];
     TopLoc_Location meshLocation;
     const auto      mesh = BRep_Tool::Triangulation(face, meshLocation);

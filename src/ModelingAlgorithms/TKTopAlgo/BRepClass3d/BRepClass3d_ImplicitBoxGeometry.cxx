@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Kavin Teenakul
 // SPDX-License-Identifier: LGPL-2.1-only WITH OCCT-exception-1.0
 #include <BRepClass3d_ImplicitBox.hxx>
+#include <BRepClass3d_ImplicitWork.hxx>
 #include <BRepClass3d_ImplicitBoxIO.hxx>
 #include <BRep_TImplicitFace.hxx>
 #include <BRep_Tool.hxx>
@@ -53,6 +54,7 @@ struct Polygon
 
   size_t index(size_t begin, size_t end)
   {
+    BRepClass3d_ImplicitWork::Checkpoint();
     Node node;
     node.Begin  = begin;
     node.End    = end;
@@ -200,6 +202,7 @@ struct Checker
       return std::max(0., std::sqrt(squared) - 8 * Reserve);
     };
     auto visit = [&](auto&& self, size_t id) -> void {
+      BRepClass3d_ImplicitWork::Checkpoint();
       const auto& node = cap.Nodes[id];
       const bool  ray  = p.Coord(v) >= node.Bounds[0].Coord(v) - 8 * Reserve
                          && p.Coord(v) <= node.Bounds[1].Coord(v) + 8 * Reserve
@@ -307,6 +310,7 @@ struct Checker
 
   bool visit(const Box& box, int side, const Polygon* native, int depth)
   {
+    BRepClass3d_ImplicitWork::Checkpoint();
     const int direction = native ? 1 : 0, axis = side / 2, u = (axis + 1) % 3, v = (axis + 2) % 3;
     Result.UnresolvedSide      = side;
     Result.UnresolvedDirection = direction;
@@ -428,6 +432,7 @@ BRepClass3d_ImplicitBox::CapGeometry BRepClass3d_ImplicitBox::CheckCapGeometry(
   size_t                          maximumCells,
   size_t                          maximumSegments)
 {
+  BRepClass3d_ImplicitWork::EnterPhase(BRepClass3d_ImplicitWork::Phase::Geometry);
   if (!std::isfinite(tolerance) || tolerance <= 0 || maximumDepth < 1 || maximumDepth > 24
       || !maximumCells || maximumCells > 10000000 || !maximumSegments || maximumSegments > 50000000
       || candidates.size() > 128)
@@ -631,6 +636,7 @@ BRepClass3d_ImplicitBox::NativeSolids BRepClass3d_ImplicitBox::BuildNativeSolids
   size_t maximumCells, size_t maximumTests, size_t maximumSeparatorCells,
   size_t maximumGeometryCells, size_t maximumSegments, int maximumGeometryDepth)
 {
+  BRepClass3d_ImplicitWork::Checkpoint();
   if (!std::isfinite(tolerance) || tolerance <= 0 || !maximumGeometryCells
       || maximumGeometryCells > 10000000 || !maximumSegments || maximumSegments > 50000000
       || maximumGeometryDepth < 1 || maximumGeometryDepth > 24)
@@ -679,6 +685,7 @@ BRepClass3d_ImplicitBox::NativeSolids BRepClass3d_ImplicitBox::BuildNativeSolids
     return result;
   }
   int regions = 0;
+  BRepClass3d_ImplicitWork::EnterPhase(BRepClass3d_ImplicitWork::Phase::SolidAssembly);
   for (int region : result.Boundary.ShellRegions)
     regions = std::max(regions, region + 1);
   BRep_Builder              builder;

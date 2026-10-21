@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Kavin Teenakul
 // SPDX-License-Identifier: LGPL-2.1-only WITH OCCT-exception-1.0
 #include <BRepMesh_ImplicitBoundary.hxx>
+#include <BRepClass3d_ImplicitWork.hxx>
 #include <BRep_TImplicitFace.hxx>
 #include <Geom_ImplicitGyroid.hxx>
 #include <Standard_DomainError.hxx>
@@ -95,6 +96,7 @@ double bound(const Result&              mesh,
              double                     reserve,
              double                     orientation)
 {
+  BRepClass3d_ImplicitWork::Checkpoint();
   const auto&  a = mesh.Nodes[size_t(t[0])];
   const auto&  b = mesh.Nodes[size_t(t[1])];
   const auto&  c = mesh.Nodes[size_t(t[2])];
@@ -254,6 +256,7 @@ void refine(Result&                    mesh,
       fixed.insert(key(wire[i - 1], wire[i]));
   for (int level = 0; level <= 8; ++level)
   {
+    BRepClass3d_ImplicitWork::Checkpoint();
     std::map<Key, int> split;
     for (const auto& t : mesh.ImplicitTriangles)
       if (!(bound(mesh, t, field, hessian, tolerance, reserve, orientation) <= tolerance))
@@ -270,6 +273,7 @@ void refine(Result&                    mesh,
             "Native mesh refinement node budget exhausted");
     for (auto& entry : split)
     {
+      BRepClass3d_ImplicitWork::Checkpoint();
       const gp_Pnt origin(
         (mesh.Nodes[size_t(entry.first.first)].XYZ() + mesh.Nodes[size_t(entry.first.second)].XYZ())
         * .5);
@@ -388,6 +392,7 @@ Result extract(const Result&              prepared,
   };
   for (size_t node = 0; node < gridSize; ++node)
   {
+    BRepClass3d_ImplicitWork::Checkpoint();
     values[node] = field.Value(point(int(node)));
     require(std::isfinite(values[node]), "Nonfinite native mesh field sample");
     if (corners)
@@ -468,6 +473,7 @@ Result extract(const Result&              prepared,
     for (int y = 0; y < ny; ++y)
       for (int x = 0; x < nx; ++x)
       {
+        BRepClass3d_ImplicitWork::Checkpoint();
         int nodes[8];
         for (int i = 0; i < 8; ++i)
           nodes[i] = id(x + offsets[i][0], y + offsets[i][1], z + offsets[i][2]);
@@ -594,6 +600,7 @@ Result extract(const Result&              prepared,
     std::vector<int> pending{adjacency.begin()->first};
     while (!pending.empty())
     {
+      BRepClass3d_ImplicitWork::Checkpoint();
       const int node = pending.back();
       pending.pop_back();
       if (!visited.insert(node).second)
@@ -634,6 +641,7 @@ BRepMesh_ImplicitBoundary::Result BRepMesh_ImplicitBoundary::Tessellate(
   int                                      maximumNodes,
   int                                      maximumTriangles)
 {
+  BRepClass3d_ImplicitWork::EnterPhase(BRepClass3d_ImplicitWork::Phase::Meshing);
   if (!std::isfinite(tolerance) || tolerance < 1.e-7 || maximumCells < 8 || maximumCells > 256)
     throw Standard_DomainError("Invalid native surface mesh settings");
   const auto prepared = Prepare(source, tolerance, maximumNodes, maximumTriangles);
@@ -651,6 +659,7 @@ BRepMesh_ImplicitBoundary::Result BRepMesh_ImplicitBoundary::Tessellate(
   std::string  diagnostics;
   for (int cells = 8; cells <= maximumCells; cells *= 2)
   {
+    BRepClass3d_ImplicitWork::Checkpoint();
     try
     {
       return extract(prepared,

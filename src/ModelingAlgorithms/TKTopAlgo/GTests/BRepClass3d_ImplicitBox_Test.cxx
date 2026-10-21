@@ -1,6 +1,9 @@
 // Copyright (c) 2026 Kavin Teenakul
 // SPDX-License-Identifier: LGPL-2.1-only WITH OCCT-exception-1.0
 #include <BRepClass3d_ImplicitBox.hxx>
+#include <BRepClass3d_ImplicitWork.hxx>
+#include <Standard_AbortiveTransaction.hxx>
+#include <thread>
 #include <BRepClass3d_ImplicitBoxIO.hxx>
 #include <BRepClass3d_ImplicitSolidIO.hxx>
 #include <BRepMesh_ImplicitBoundary.hxx>
@@ -1404,6 +1407,83 @@ TEST(BRepClass3d_ImplicitBox, NativeSolidsScaledPeriodicTranslationAtFixedTolera
       EXPECT_LE(result.Geometry.BoundaryBound, .1);
       EXPECT_LE(result.MaximumStoredTolerance, .1);
     }
+  }
+}
+
+TEST(BRepClass3d_ImplicitBox, WorkScopeRestoresAndIsThreadLocal)
+{
+  using Work = BRepClass3d_ImplicitWork;
+  struct Control : Work::Control
+  {
+    bool Cancelled = false;
+    bool IsCancelled() const override { return Cancelled; }
+  } outer, inner;
+  outer.Cancelled = true;
+  {
+    Work::Scope first(outer);
+    EXPECT_THROW(Work::Checkpoint(), Standard_AbortiveTransaction);
+    {
+      Work::Scope second(inner);
+      EXPECT_NO_THROW(Work::Checkpoint());
+    }
+    EXPECT_THROW(Work::Checkpoint(), Standard_AbortiveTransaction);
+    bool isolated = false;
+    std::thread worker([&] {
+      try { Work::Checkpoint(); isolated = true; }
+      catch (...) {}
+    });
+    worker.join();
+    EXPECT_TRUE(isolated);
+  }
+  EXPECT_NO_THROW(Work::Checkpoint());
+}
+
+TEST(BRepClass3d_ImplicitBox, WorkCancellationPreservesSourcesAndAllowsRetry)
+{
+  using Ops = BRepClass3d_ImplicitBox;
+  using Work = BRepClass3d_ImplicitWork;
+  struct StopInPhase : Work::Control
+  {
+    Work::Phase Target, Current = Work::Phase::Copying;
+    mutable size_t Checks = 0;
+    explicit StopInPhase(Work::Phase phase) : Target(phase) {}
+    bool IsCancelled() const override { return Current == Target && ++Checks >= 100; }
+    void EnterPhase(Work::Phase phase) override { Current = phase; }
+  };
+  for (const auto operation : {Ops::Operation::Common, Ops::Operation::BoxMinusField})
+  {
+    const auto source = Ops::Build(topologyField(gp_Pnt(), gp_Pnt(10, 10, 10), 0),
+      BRepPrimAPI_MakeBox(10, 10, 10).Shape(), operation, .1, 512, Ops::CornerPolicy::Regularized);
+    std::ostringstream before;
+    BRepClass3d_ImplicitBoxIO::Write(source, before);
+    for (const auto phase : {Work::Phase::Topology, Work::Phase::Geometry})
+    {
+      StopInPhase control(phase);
+      {
+        Work::Scope scope(control);
+        EXPECT_THROW(Ops::BuildNativeSolids(source), Standard_AbortiveTransaction);
+      }
+      EXPECT_GE(control.Checks, 100u);
+      EXPECT_EQ(control.Current, phase);
+      std::ostringstream after;
+      BRepClass3d_ImplicitBoxIO::Write(source, after);
+      EXPECT_EQ(before.str(), after.str());
+      EXPECT_TRUE(source.SeamBoundVerified);
+    }
+    {
+      StopInPhase control(Work::Phase::Meshing);
+      Work::Scope scope(control);
+      EXPECT_THROW(BRepMesh_ImplicitBoundary::Tessellate(source, .1), Standard_AbortiveTransaction);
+      EXPECT_GE(control.Checks, 100u);
+    }
+    const auto retry = Ops::BuildNativeSolids(source);
+    ASSERT_TRUE(retry.Constructed && retry.Validated) << retry.Reason;
+    EXPECT_LE(retry.Geometry.BoundaryBound, .1);
+    const auto mesh = BRepMesh_ImplicitBoundary::Tessellate(retry.Boundary.Source, .1);
+    EXPECT_TRUE(mesh.NativeSurfaceMeshed && mesh.MeshClosed);
+    std::ostringstream after;
+    BRepClass3d_ImplicitBoxIO::Write(source, after);
+    EXPECT_EQ(before.str(), after.str());
   }
 }
 

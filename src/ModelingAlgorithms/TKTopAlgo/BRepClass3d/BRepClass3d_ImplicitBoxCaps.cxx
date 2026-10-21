@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Kavin Teenakul
 // SPDX-License-Identifier: LGPL-2.1-only WITH OCCT-exception-1.0
 #include <BRepClass3d_ImplicitBox.hxx>
+#include <BRepClass3d_ImplicitWork.hxx>
 #include <BRepClass3d_ImplicitBoxIO.hxx>
 #include <BRepClass_FaceClassifier.hxx>
 #include <BRepAdaptor_Surface.hxx>
@@ -54,6 +55,7 @@ BRepClass3d_ImplicitBox::CapAttachment BRepClass3d_ImplicitBox::CheckCapAttachme
   size_t          maximumCells,
   size_t          maximumTests)
 {
+  BRepClass3d_ImplicitWork::EnterPhase(BRepClass3d_ImplicitWork::Phase::CapAttachment);
   if (resolution < 4 || resolution > 64 || (resolution & (resolution - 1)) || maximumDepth < 0
       || maximumDepth > 16 || !maximumCells || maximumCells > 10000000 || !maximumTests
       || maximumTests > 10000000)
@@ -80,6 +82,7 @@ BRepClass3d_ImplicitBox::CapAttachment BRepClass3d_ImplicitBox::CheckCapAttachme
     return report;
   }
   resolution = reference.Surface.Resolution;
+  BRepClass3d_ImplicitWork::EnterPhase(BRepClass3d_ImplicitWork::Phase::CapAttachment);
   report.ReferenceShellCount             = int(reference.ComponentEuler.size());
   report.ReferenceRegionCount            = reference.RegionCount;
   const int                        count = int(reference.Triangles.size());
@@ -124,6 +127,7 @@ BRepClass3d_ImplicitBox::CapAttachment BRepClass3d_ImplicitBox::CheckCapAttachme
   }
   while (!queue.empty())
   {
+    BRepClass3d_ImplicitWork::Checkpoint();
     const int i = queue.front();
     queue.pop();
     for (int j : neighbors[size_t(i)])
@@ -243,6 +247,7 @@ BRepClass3d_ImplicitBox::CapAttachment BRepClass3d_ImplicitBox::CheckCapAttachme
     int matched = -1;
     for (int index : group.Triangles)
     {
+      BRepClass3d_ImplicitWork::Checkpoint();
       if (report.WitnessTests >= maximumTests)
       {
         report.Reason = "cap_witness_budget_exhausted";
@@ -267,6 +272,7 @@ BRepClass3d_ImplicitBox::CapAttachment BRepClass3d_ImplicitBox::CheckCapAttachme
         double clearance = std::numeric_limits<double>::infinity();
         for (const auto& edge : segments[cap])
         {
+          BRepClass3d_ImplicitWork::Checkpoint();
           if (report.SegmentTests >= maximumTests)
           {
             report.Reason = "cap_clearance_budget_exhausted";
