@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only WITH OCCT-exception-1.0
 #include <BRepMesh_ImplicitBoundary.hxx>
 #include <BRepClass3d_ImplicitBoxIO.hxx>
+#include <BRepClass3d_ImplicitWork.hxx>
 #include <BRep_TImplicitFace.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <Geom_ImplicitGyroid.hxx>
@@ -78,6 +79,7 @@ class Tree
 
   int build(size_t first, size_t last)
   {
+    BRepClass3d_ImplicitWork::Checkpoint();
     Node node;
     node.First      = first;
     node.Last       = last;
@@ -124,6 +126,7 @@ class Tree
 
   void visit(int index, const gp_Pnt& p, double& best) const
   {
+    BRepClass3d_ImplicitWork::Checkpoint();
     const auto& node = myNodes[size_t(index)];
     if (lower(p, node.Bounds) > best)
       return;
@@ -296,6 +299,7 @@ struct Checker
 
   bool coverBox(const Box& box, const Tree& tree, int depth, int side)
   {
+    BRepClass3d_ImplicitWork::Checkpoint();
     Result.UnresolvedMinimum = box.Low;
     Result.UnresolvedMaximum = box.High;
     if (Result.SpatialCells >= MaximumCells)
@@ -344,6 +348,7 @@ struct Checker
 
   bool coverTriangle(const gp_Pnt& a, const gp_Pnt& b, const gp_Pnt& c, int depth, int capSide)
   {
+    BRepClass3d_ImplicitWork::Checkpoint();
     for (int axis = 1; axis <= 3; ++axis)
     {
       Result.UnresolvedMinimum.SetCoord(axis,
@@ -441,6 +446,7 @@ BRepMesh_ImplicitBoundary::Coverage BRepMesh_ImplicitBoundary::CheckCoverage(
   size_t                                   maximumCells,
   size_t                                   maximumPatches)
 {
+  BRepClass3d_ImplicitWork::EnterPhase(BRepClass3d_ImplicitWork::Phase::Coverage);
   if (!std::isfinite(tolerance) || tolerance <= 0 || maximumDepth < 1 || maximumDepth > 20
       || !maximumCells || maximumCells > 10000000 || !maximumPatches || maximumPatches > 4000000
       || mesh.Nodes.size() > 1000000
@@ -480,6 +486,7 @@ BRepMesh_ImplicitBoundary::Coverage BRepMesh_ImplicitBoundary::CheckCoverage(
           || p.Coord(axis) > high.Coord(axis) + reserve)
         throw Standard_DomainError("Coverage mesh point outside supported box");
   const auto validate = [&](const std::array<int, 3>& t) {
+    BRepClass3d_ImplicitWork::Checkpoint();
     for (int n : t)
       if (n < 0 || size_t(n) >= mesh.Nodes.size())
         throw Standard_DomainError("Invalid coverage mesh index");

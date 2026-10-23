@@ -1487,6 +1487,83 @@ TEST(BRepClass3d_ImplicitBox, WorkCancellationPreservesSourcesAndAllowsRetry)
   }
 }
 
+TEST(BRepClass3d_ImplicitBox, DisplayChecksCancelWithoutChangingCandidates)
+{
+  using Ops = BRepClass3d_ImplicitBox;
+  using Work = BRepClass3d_ImplicitWork;
+  struct Control : Work::Control
+  {
+    Work::Phase Current = Work::Phase::Copying;
+    Work::Phase Target;
+    mutable size_t Calls = 0;
+    size_t Limit = 0;
+    explicit Control(Work::Phase target) : Target(target) {}
+    bool IsCancelled() const override
+    {
+      if (Current != Target) return false;
+      ++Calls;
+      return Limit && Calls >= Limit;
+    }
+    void EnterPhase(Work::Phase phase) override { Current = phase; }
+  };
+  for (const auto operation : {Ops::Operation::Common, Ops::Operation::BoxMinusField})
+  {
+    const auto source = Ops::Build(topologyField(gp_Pnt(), gp_Pnt(10, 10, 10), 0),
+      BRepPrimAPI_MakeBox(10, 10, 10).Shape(), operation, .1, 512, Ops::CornerPolicy::Regularized);
+    const auto mesh = BRepMesh_ImplicitBoundary::Tessellate(source, .1);
+    const auto original = mesh;
+    std::ostringstream before;
+    BRepClass3d_ImplicitBoxIO::Write(source, before);
+    for (const auto phase : {Work::Phase::Coverage, Work::Phase::ContactAudit})
+    {
+      Control count(phase);
+      auto run = [&] {
+        if (phase == Work::Phase::Coverage)
+        {
+          const auto report = BRepMesh_ImplicitBoundary::CheckCoverage(source, mesh, .1);
+          EXPECT_TRUE(report.Resolved);
+          EXPECT_LE(report.BoundaryToMeshBound, .1);
+          EXPECT_LE(report.MeshToBoundaryBound, .1);
+        }
+        else
+        {
+          const auto report = BRepMesh_ImplicitBoundary::Audit(mesh);
+          EXPECT_EQ(report.Status, BRepMesh_ImplicitBoundary::MeshAudit::State::Clear);
+        }
+      };
+      {
+        Work::Scope scope(count);
+        run();
+      }
+      ASSERT_GT(count.Calls, 100u);
+      Control stop(phase);
+      stop.Limit = count.Calls / 2;
+      {
+        Work::Scope scope(stop);
+        EXPECT_THROW(run(), Standard_AbortiveTransaction);
+      }
+      EXPECT_EQ(stop.Current, phase);
+      EXPECT_EQ(stop.Calls, stop.Limit);
+      run(); // The interrupted scope must not poison a fresh retry.
+    }
+    std::ostringstream after;
+    BRepClass3d_ImplicitBoxIO::Write(source, after);
+    EXPECT_EQ(before.str(), after.str());
+    ASSERT_EQ(mesh.Nodes.size(), original.Nodes.size());
+    for (size_t i = 0; i < mesh.Nodes.size(); ++i)
+      EXPECT_TRUE(mesh.Nodes[i].IsEqual(original.Nodes[i], 0));
+    EXPECT_EQ(mesh.ImplicitTriangles, original.ImplicitTriangles);
+    ASSERT_EQ(mesh.CapTriangles.size(), original.CapTriangles.size());
+    for (size_t i = 0; i < mesh.CapTriangles.size(); ++i)
+    {
+      EXPECT_EQ(mesh.CapTriangles[i].Nodes, original.CapTriangles[i].Nodes);
+      EXPECT_EQ(mesh.CapTriangles[i].Cap, original.CapTriangles[i].Cap);
+    }
+    EXPECT_FALSE(mesh.SurfaceCoverageVerified);
+    EXPECT_FALSE(mesh.SolidValidated);
+  }
+}
+
 TEST(BRepClass3d_ImplicitBox, CornerNativeSolidsAndRestrictedTopologyPersistence)
 {
   using Ops = BRepClass3d_ImplicitBox;

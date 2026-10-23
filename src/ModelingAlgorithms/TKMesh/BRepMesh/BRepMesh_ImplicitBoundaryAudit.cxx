@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Kavin Teenakul
 // SPDX-License-Identifier: LGPL-2.1-only WITH OCCT-exception-1.0
 #include <BRepMesh_ImplicitBoundary.hxx>
+#include <BRepClass3d_ImplicitWork.hxx>
 #include <Standard_DomainError.hxx>
 #include <algorithm>
 #include <cmath>
@@ -235,6 +236,7 @@ BRepMesh_ImplicitBoundary::MeshAudit BRepMesh_ImplicitBoundary::Audit(const Resu
                                                                       size_t maximumPairTests,
                                                                       size_t maximumBroadTests)
 {
+  BRepClass3d_ImplicitWork::EnterPhase(BRepClass3d_ImplicitWork::Phase::ContactAudit);
   if (mesh.Nodes.empty() || mesh.Nodes.size() > 1000000
       || mesh.CapTriangles.size() + mesh.ImplicitTriangles.size() > 2000000 || !maximumPairTests
       || !maximumBroadTests || maximumPairTests > 10000000 || maximumBroadTests > 100000000)
@@ -242,6 +244,7 @@ BRepMesh_ImplicitBoundary::MeshAudit BRepMesh_ImplicitBoundary::Audit(const Resu
   if (mesh.CapTriangles.empty() && mesh.ImplicitTriangles.empty())
     throw Standard_DomainError("Empty native mesh audit");
   const auto validate = [&](const std::array<int, 3>& t) {
+    BRepClass3d_ImplicitWork::Checkpoint();
     for (int index : t)
       if (index < 0 || size_t(index) >= mesh.Nodes.size())
         throw Standard_DomainError("Invalid native mesh audit index");
@@ -273,9 +276,12 @@ BRepMesh_ImplicitBoundary::MeshAudit BRepMesh_ImplicitBoundary::Audit(const Resu
     return result;
   std::vector<Vector> nodes;
   for (const auto& p : mesh.Nodes)
+  {
+    BRepClass3d_ImplicitWork::Checkpoint();
     nodes.push_back({Integer(p.X(), minimumExponent),
                      Integer(p.Y(), minimumExponent),
                      Integer(p.Z(), minimumExponent)});
+  }
   std::vector<std::array<int, 3>> triangles;
   for (const auto& t : mesh.CapTriangles)
     triangles.push_back(t.Nodes);
@@ -291,6 +297,7 @@ BRepMesh_ImplicitBoundary::MeshAudit BRepMesh_ImplicitBoundary::Audit(const Resu
   std::vector<Box> boxes(triangles.size());
   for (size_t i = 0; i < triangles.size(); ++i)
   {
+    BRepClass3d_ImplicitWork::Checkpoint();
     const auto& t = triangles[i];
     for (int n : t)
       if (n < 0 || size_t(n) >= nodes.size())
@@ -322,6 +329,7 @@ BRepMesh_ImplicitBoundary::MeshAudit BRepMesh_ImplicitBoundary::Audit(const Resu
   };
   std::vector<Node> tree;
   auto build = [&](auto&& self, size_t begin, size_t end) -> int {
+    BRepClass3d_ImplicitWork::Checkpoint();
     Node node{boxes[order[begin]], begin, end};
     for (size_t i = begin + 1; i < end; ++i)
       for (int axis = 0; axis < 3; ++axis)
@@ -356,6 +364,7 @@ BRepMesh_ImplicitBoundary::MeshAudit BRepMesh_ImplicitBoundary::Audit(const Resu
     return true;
   };
   auto visit = [&](auto&& self, int a, int b) -> bool {
+    BRepClass3d_ImplicitWork::Checkpoint();
     if (result.BroadTests == maximumBroadTests) return false;
     ++result.BroadTests; // Count node-box AND leaf-pair box comparisons.
     const auto& x = tree[size_t(a)];

@@ -22,7 +22,9 @@ public:
     ShellAssembly,
     Geometry,
     SolidAssembly,
-    Meshing
+    Meshing,
+    Coverage,
+    ContactAudit
   };
 
   class Control
