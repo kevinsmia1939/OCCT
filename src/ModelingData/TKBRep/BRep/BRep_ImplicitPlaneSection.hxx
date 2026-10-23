@@ -24,6 +24,9 @@ public:
     //! coordinate-plane frames only; rounded affine identities do not count.
     //! Consumers MUST handle PointContacts separately from one-dimensional curves.
     bool AllowExactLatticeNodes = false;
+    //! Optional synchronous caller-thread checkpoint; may throw to cancel.
+    //! Never retained in results. Avoids a dependency on higher-level work controls.
+    void (*WorkCheckpoint)() = nullptr;
   };
 
   struct Curve

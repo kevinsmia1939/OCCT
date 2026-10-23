@@ -16,6 +16,12 @@
 
 namespace
 {
+void checkpoint(const BRep_ImplicitPlaneSection::Settings& settings)
+{
+  if (settings.WorkCheckpoint)
+    settings.WorkCheckpoint();
+}
+
 void require(bool value, const char* message)
 {
   if (!value)
@@ -57,6 +63,7 @@ BRep_ImplicitPlaneSection::Result pass(const TopoDS_Face&                       
                                        double                                     coordinateReserve)
 {
   using Section = BRep_ImplicitPlaneSection;
+  checkpoint(settings);
   Section::Result result;
   result.Resolution            = n;
   const size_t        width    = size_t(n) + 1;
@@ -74,6 +81,8 @@ BRep_ImplicitPlaneSection::Result pass(const TopoDS_Face&                       
     for (int i = 0; i <= n; ++i)
     {
       const size_t index = size_t(j) * width + i;
+      if (index % 256 == 0)
+        checkpoint(settings);
       const double x = i == n ? settings.UMaximum : settings.UMinimum + du * i;
       const double y = j == n ? settings.VMaximum : settings.VMinimum + dv * j;
       grid[index]        = settings.Frame.Location().Translated(u * x + v * y);
@@ -111,6 +120,7 @@ BRep_ImplicitPlaneSection::Result pass(const TopoDS_Face&                       
         ++result.ExactLatticeNodeCount;
       }
   auto                                      edge = [&](size_t a, size_t b) {
+    checkpoint(settings);
     const auto key   = std::minmax(a, b);
     const auto found = edgeCache.find(key);
     if (found != edgeCache.end())
@@ -237,6 +247,8 @@ BRep_ImplicitPlaneSection::Result pass(const TopoDS_Face&                       
     for (int i = 0; i < n; ++i)
     {
       const size_t                a       = size_t(j) * width + i;
+      if (a % 256 == 0)
+        checkpoint(settings);
       const std::array<size_t, 4> corners = {a, a + 1, a + 1 + width, a + width};
       const gp_Pnt                center((grid[a].XYZ() + grid[a + width + 1].XYZ()) * .5);
       const double                f = BRep_ImplicitTool::Value(face, center);
@@ -336,6 +348,7 @@ BRep_ImplicitPlaneSection::Result pass(const TopoDS_Face&                       
     curve.Points.push_back(vertices[start]);
     while (!used[next])
     {
+      checkpoint(settings);
       used[next]          = true;
       const auto& segment = segments[next];
       current             = segment.first == current ? segment.second : segment.first;

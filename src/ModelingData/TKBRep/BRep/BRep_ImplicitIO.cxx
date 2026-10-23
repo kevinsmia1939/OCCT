@@ -55,11 +55,20 @@ void writePoint(std::ostream& out, const gp_Pnt& p)
   out << p.X() << ' ' << p.Y() << ' ' << p.Z() << '\n';
 }
 
-gp_Trsf readTransform(std::istream& in)
+TopLoc_Location readLocation(std::istream& in)
 {
   double a[12];
   for (double& v : a)
     v = number(in);
+  bool identity = true;
+  for (int r = 0; r < 3; ++r)
+    for (int c = 0; c < 4; ++c)
+      identity &= a[r * 4 + c] == (r == c ? 1.0 : 0.0);
+  // Constructing a location from a matrix can create a nonempty identity datum.
+  // Preserve the empty identity location used by strict consumers explicitly.
+  // Compare the actual input coefficients, never snap a nearby placement.
+  if (identity)
+    return TopLoc_Location();
   double magnitude = 0;
   for (int r = 0; r < 3; ++r)
     for (int c = 0; c < 3; ++c)
@@ -96,7 +105,7 @@ gp_Trsf readTransform(std::istream& in)
       const double bound = c == 4 ? std::max(1.0, std::abs(v)) : scale;
       require(std::abs(v - a[(r - 1) * 4 + c - 1]) <= 1.e-12 * bound);
     }
-  return t;
+  return TopLoc_Location(t);
 }
 
 void writeTransform(std::ostream& out, const TopLoc_Location& location)
@@ -215,9 +224,9 @@ void BRep_ImplicitIO::Read(Standard_IStream& stream, TopoDS_Face& face)
     }
   }
   tag(in, "GEOMETRY_LOCATION");
-  const TopLoc_Location geometry(readTransform(in));
+  const TopLoc_Location geometry(readLocation(in));
   tag(in, "INSTANCE_LOCATION");
-  const TopLoc_Location instance(readTransform(in));
+  const TopLoc_Location instance(readLocation(in));
   tag(in, "ORIENTATION");
   std::string orientation;
   require(bool(in >> orientation));

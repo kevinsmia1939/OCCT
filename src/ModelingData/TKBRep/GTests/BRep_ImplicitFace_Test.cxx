@@ -151,6 +151,31 @@ TEST(BRep_ImplicitFace, PersistenceRoundTrip)
     }
 }
 
+TEST(BRep_ImplicitFace, PersistencePreservesExactIdentityWithoutSnappingNearbyPlacement)
+{
+  for (double translation : {0.0, 1.e-15})
+  {
+    TopoDS_Face source;
+    gp_Trsf transform;
+    if (translation != 0)
+      transform.SetTranslation(gp_Vec(translation, 0, 0));
+    BRep_Builder().MakeImplicitFace(source, new Geom_ImplicitGyroid(10, 1.45),
+                                    gp_Pnt(-5, -5, -5), gp_Pnt(6, 6, 6),
+                                    TopLoc_Location(transform), .1);
+    source.Location(TopLoc_Location(transform));
+    std::ostringstream record;
+    BRep_ImplicitIO::Write(source, record);
+    TopoDS_Face restored;
+    std::istringstream input(record.str());
+    BRep_ImplicitIO::Read(input, restored);
+    const auto* data = static_cast<const BRep_TImplicitFace*>(restored.TShape().get());
+    EXPECT_EQ(data->Location().IsIdentity(), translation == 0);
+    EXPECT_EQ(restored.Location().IsIdentity(), translation == 0);
+    EXPECT_DOUBLE_EQ(data->Location().Transformation().Value(1, 4), translation);
+    EXPECT_DOUBLE_EQ(restored.Location().Transformation().Value(1, 4), translation);
+  }
+}
+
 TEST(BRep_ImplicitFace, PersistenceRejectsWithoutDataLoss)
 {
   TopoDS_Face        face = sphereFace();

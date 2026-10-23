@@ -143,6 +143,7 @@ void roots(const Geom_ImplicitGyroid& field,
            int                        depth = 0)
 {
   require(--budget >= 0 && depth <= 32, "Box-edge root isolation budget exhausted");
+  BRepClass3d_ImplicitWork::Checkpoint();
   const gp_Pnt mid((first.XYZ() + last.XYZ()) * .5);
   const double length = first.Distance(last), fm = field.Value(mid);
   require(std::isfinite(length) && length > 0, "Box-edge coordinate collapse");
@@ -193,6 +194,7 @@ void cornerRoots(const Geom_ImplicitGyroid& field, const gp_Pnt& first, const gp
                  int& budget, int depth = 0)
 {
   require(--budget >= 0 && depth <= 32, "Corner-aware box-edge root budget exhausted");
+  BRepClass3d_ImplicitWork::Checkpoint();
   const gp_Pnt mid((first.XYZ() + last.XYZ()) * .5);
   const double length = first.Distance(last);
   require(std::isfinite(length) && length > 0, "Corner-aware edge coordinate collapse");
@@ -872,6 +874,7 @@ Boundary construct(const TopoDS_Face& fieldFace,
                    double             reserve,
                    CornerPolicy       policy)
 {
+  BRepClass3d_ImplicitWork::Checkpoint();
   const auto   data = occ::down_cast<BRep_TImplicitFace>(fieldFace.TShape());
   BRep_Builder builder;
   Boundary     result;
@@ -962,6 +965,8 @@ Boundary construct(const TopoDS_Face& fieldFace,
   std::vector<Use> implicitUses;
   for (auto& side : sides)
   {
+    BRepClass3d_ImplicitWork::Checkpoint();
+    side.Settings.WorkCheckpoint = &BRepClass3d_ImplicitWork::Checkpoint;
     side.Settings.AllowExactLatticeNodes = policy == CornerPolicy::Regularized;
     auto section = BRep_ImplicitPlaneSection::Trace(fieldFace, side.Settings);
     if (!section.Resolved)

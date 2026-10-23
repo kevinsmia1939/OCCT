@@ -14,12 +14,21 @@
 #include <Geom_ImplicitSphere.hxx>
 #include <Standard_DomainError.hxx>
 #include <Standard_NotImplemented.hxx>
+#include <Standard_AbortiveTransaction.hxx>
 #include <gtest/gtest.h>
 #include <cmath>
 #include <sstream>
 
 namespace
 {
+thread_local int workVisits = 0, cancelVisit = 0;
+void sectionCheckpoint()
+{
+  ++workVisits;
+  if (cancelVisit && workVisits == cancelVisit)
+    throw Standard_AbortiveTransaction("Cancelled plane section test");
+}
+
 TopoDS_Face gyroid(double iso = .21)
 {
   TopoDS_Face face;
@@ -43,6 +52,36 @@ BRep_ImplicitPlaneSection::Settings settings()
   return s;
 }
 } // namespace
+
+TEST(BRep_ImplicitPlaneSection, CallerCheckpointCancelsAndRetriesWithoutChangingGeometry)
+{
+  const auto face = gyroid();
+  auto config = settings();
+  config.WorkCheckpoint = &sectionCheckpoint;
+  workVisits = cancelVisit = 0;
+  const auto baseline = BRep_ImplicitPlaneSection::Trace(face, config);
+  ASSERT_TRUE(baseline.Resolved);
+  const int total = workVisits;
+  ASSERT_GT(total, 10);
+  workVisits = 0;
+  cancelVisit = total / 2;
+  EXPECT_THROW(BRep_ImplicitPlaneSection::Trace(face, config), Standard_AbortiveTransaction);
+  EXPECT_EQ(workVisits, cancelVisit);
+  workVisits = cancelVisit = 0;
+  const auto retry = BRep_ImplicitPlaneSection::Trace(face, config);
+  ASSERT_TRUE(retry.Resolved);
+  EXPECT_EQ(workVisits, total);
+  EXPECT_EQ(retry.Resolution, baseline.Resolution);
+  EXPECT_EQ(retry.GeometricBound, baseline.GeometricBound);
+  ASSERT_EQ(retry.Curves.size(), baseline.Curves.size());
+  for (size_t i = 0; i < retry.Curves.size(); ++i)
+  {
+    EXPECT_EQ(retry.Curves[i].Closed, baseline.Curves[i].Closed);
+    ASSERT_EQ(retry.Curves[i].Points.size(), baseline.Curves[i].Points.size());
+    for (size_t j = 0; j < retry.Curves[i].Points.size(); ++j)
+      EXPECT_EQ(retry.Curves[i].Points[j].SquareDistance(baseline.Curves[i].Points[j]), 0);
+  }
+}
 
 TEST(BRep_ImplicitPlaneSection, RegularGyroidGeometricBoundsAndConnectivity)
 {
