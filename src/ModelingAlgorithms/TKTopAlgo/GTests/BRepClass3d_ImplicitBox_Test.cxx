@@ -2032,6 +2032,46 @@ TEST(BRepClass3d_ImplicitBox, CornerBoundaryTranslatedOperandMatchesBakedGeometr
                Standard_NotImplemented);
 }
 
+TEST(BRepClass3d_ImplicitBox, DecimalTranslatedBoundaryPreservesExactVertexCoordinates)
+{
+  using Ops = BRepClass3d_ImplicitBox;
+  const auto face = topologyField(gp_Pnt(), gp_Pnt(20, 20, 20), 0);
+  gp_Trsf translation;
+  translation.SetTranslation(gp_Vec(1.31, 2.37, 0));
+  const auto box = BRepPrimAPI_MakeBox(10, 10, 10).Shape().Moved(TopLoc_Location(translation));
+  const auto coordinates = [](const TopoDS_Shape& shape)
+  {
+    NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> vertices;
+    TopExp::MapShapes(shape, TopAbs_VERTEX, vertices);
+    std::vector<std::array<double, 3>> result;
+    for (const auto& vertex : vertices)
+    {
+      const auto point = BRep_Tool::Pnt(TopoDS::Vertex(vertex));
+      result.push_back({point.X(), point.Y(), point.Z()});
+    }
+    std::sort(result.begin(), result.end());
+    return result;
+  };
+  const auto original = coordinates(box);
+  for (const auto operation : {Ops::Operation::Common, Ops::Operation::BoxMinusField})
+  {
+    const auto source = Ops::Build(face, box, operation, .1, 512, Ops::CornerPolicy::Regularized);
+    std::ostringstream output;
+    BRepClass3d_ImplicitBoxIO::Write(source, output);
+    Ops::Boundary restored;
+    std::istringstream input(output.str());
+    ASSERT_NO_THROW(BRepClass3d_ImplicitBoxIO::Read(input, restored));
+    EXPECT_EQ(coordinates(restored.Shape), coordinates(source.Shape));
+    EXPECT_FALSE(restored.SeamBoundVerified);
+    std::ostringstream again;
+    BRepClass3d_ImplicitBoxIO::Write(restored, again);
+    EXPECT_EQ(output.str(), again.str());
+    const auto solid = Ops::BuildNativeSolids(source);
+    EXPECT_TRUE(solid.Constructed && solid.Validated) << solid.Reason;
+    EXPECT_EQ(coordinates(box), original);
+  }
+}
+
 TEST(BRepClass3d_ImplicitBox, CornerBoundaryRestoredIdentityScaleAndFailurePolicies)
 {
   using Ops = BRepClass3d_ImplicitBox;

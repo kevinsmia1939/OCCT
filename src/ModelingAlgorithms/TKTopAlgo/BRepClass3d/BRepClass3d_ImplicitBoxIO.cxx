@@ -6,6 +6,7 @@
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <BRepTools.hxx>
+#include <BRepTools_ShapeSet.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepAdaptor_Surface.hxx>
@@ -34,11 +35,35 @@ constexpr size_t MaxBytes = 16 * 1024 * 1024;
 using Boundary            = BRepClass3d_ImplicitBox::Boundary;
 using Map                 = NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher>;
 
-void require(bool condition)
+void requireRecord(bool condition, const char* invariant)
 {
   if (!condition)
-    throw Standard_DomainError("Invalid native mixed-box topology record or stream");
+  {
+    const std::string message = std::string("Invalid native mixed-box topology record or stream: ")
+                                + invariant;
+    throw Standard_DomainError(message.c_str());
+  }
 }
+
+// Keep failed graph/stream invariants diagnosable without weakening validation.
+#define require(condition) requireRecord((condition), #condition)
+
+// TopTools_ShapeSet selects 15 significant digits for per-shape geometry.
+// Exact corner/plane identities need round-trip binary64 vertex coordinates.
+// Keep this policy local to native boundary records, without changing general
+// B-Rep persistence or introducing a new payload format.
+class ExactShapeSet : public BRepTools_ShapeSet
+{
+public:
+  ExactShapeSet() : BRepTools_ShapeSet(false, false) {}
+
+  void WriteGeometry(const TopoDS_Shape& shape, Standard_OStream& output) const override
+  {
+    const auto precision = output.precision(std::numeric_limits<double>::max_digits10);
+    BRepTools_ShapeSet::WriteGeometry(shape, output);
+    output.precision(precision);
+  }
+};
 
 const BRep_TImplicitFace& primitive(const TopoDS_Face& face)
 {
@@ -321,7 +346,11 @@ void BRepClass3d_ImplicitBoxIO::Write(const Boundary& boundary, Standard_OStream
   BRepTools::Clean(clean, true);
   std::ostringstream topology;
   topology.imbue(std::locale::classic());
-  BRepTools::Write(clean, topology, false, false, TopTools_FormatVersion_VERSION_3);
+  ExactShapeSet shapeSet;
+  shapeSet.SetFormatNb(TopTools_FormatVersion_VERSION_3);
+  shapeSet.Add(clean);
+  shapeSet.Write(topology);
+  shapeSet.Write(clean, topology);
   require(bool(topology));
   const auto         m = math.str(), t = topology.str();
   std::ostringstream record;
@@ -486,3 +515,5 @@ void BRepClass3d_ImplicitBoxIO::Read(Standard_IStream& input, Boundary& destinat
   result.SeamBoundVerified = false;
   destination              = std::move(result);
 }
+
+#undef require
