@@ -1,6 +1,9 @@
 // Copyright (c) 2026 Kavin Teenakul
 // SPDX-License-Identifier: LGPL-2.1-only WITH OCCT-exception-1.0
 #include <BRep_ImplicitCylinderSection.hxx>
+#include <BRep_TImplicitCylinderPatch.hxx>
+#include <BRep_ImplicitIO.hxx>
+#include <BRep_ImplicitSphereOps.hxx>
 #include <BRep_ImplicitTool.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
@@ -8,12 +11,16 @@
 #include <Geom_Circle.hxx>
 #include <TopExp.hxx>
 #include <Geom_ImplicitGyroid.hxx>
+#include <Geom_ImplicitSphere.hxx>
+#include <Standard_NotImplemented.hxx>
+#include <TopoDS_Wire.hxx>
 #include <Standard_AbortiveTransaction.hxx>
 #include <Standard_DomainError.hxx>
 #include <gtest/gtest.h>
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <sstream>
 
 namespace
 {
@@ -342,4 +349,89 @@ TEST(BRepImplicitCylinderSection, RingPrecisionCannotExceedRequestedTolerance)
   ASSERT_TRUE(result.Boundary.Section.Resolved);
   EXPECT_FALSE(result.Verified);
   EXPECT_TRUE(result.Rings[0].empty()); EXPECT_TRUE(result.Rings[1].empty());
+}
+
+TEST(BRepImplicitCylinderSection, CylinderRestrictionQueriesPlacementCopyAndPersistence)
+{
+  const auto source = field();
+  const gp_Ax2 frame(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+  const auto face = BRep_TImplicitCylinderPatch::Restrict(source, frame, 2, -1, 1);
+  EXPECT_TRUE(BRep_Tool::IsImplicit(face));
+  EXPECT_FALSE(BRep_Tool::HasParametricSurface(face));
+  EXPECT_TRUE(BRep_ImplicitTool::IsInDomain(face, gp_Pnt(2, 0, 0)));
+  EXPECT_TRUE(BRep_ImplicitTool::IsInDomain(face, gp_Pnt(0, 0, 1)));
+  EXPECT_FALSE(BRep_ImplicitTool::IsInDomain(face, gp_Pnt(1.5, 1.5, 0)));
+  EXPECT_FALSE(BRep_ImplicitTool::IsInDomain(face, gp_Pnt(0, 0, 1.01)));
+  EXPECT_TRUE(BRep_ImplicitTool::IsInDomain(source, gp_Pnt(1.5, 1.5, 0)));
+  EXPECT_EQ(BRep_ImplicitTool::Value(face, gp_Pnt(.3, .2, .1)),
+            BRep_ImplicitTool::Value(source, gp_Pnt(.3, .2, .1)));
+  const auto data = occ::down_cast<BRep_TImplicitCylinderPatch>(face.TShape());
+  const auto copy = occ::down_cast<BRep_TImplicitCylinderPatch>(data->EmptyCopy());
+  ASSERT_FALSE(copy.IsNull()); EXPECT_EQ(copy->Radius(), 2);
+  gp_Trsf pose; pose.SetRotation(gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(1, 2, 3)), .4);
+  pose.SetTranslationPart(gp_Vec(3, -4, 2));
+  auto placed = face; placed.Location(TopLoc_Location(pose));
+  EXPECT_TRUE(BRep_ImplicitTool::IsInDomain(placed, gp_Pnt(.4, .3, .2).Transformed(pose)));
+  EXPECT_FALSE(BRep_ImplicitTool::IsInDomain(placed, gp_Pnt(1.5, 1.5, 0).Transformed(pose)));
+  std::stringstream stream;
+  BRep_ImplicitIO::Write(placed, stream);
+  EXPECT_EQ(stream.str().find("OCCT_IMPLICIT_FACE 3\n"), 0u);
+  TopoDS_Face restored; BRep_ImplicitIO::Read(stream, restored);
+  ASSERT_FALSE(occ::down_cast<BRep_TImplicitCylinderPatch>(restored.TShape()).IsNull());
+  EXPECT_TRUE(BRep_ImplicitTool::IsInDomain(restored, gp_Pnt(.4, .3, .2).Transformed(pose)));
+  EXPECT_FALSE(BRep_ImplicitTool::IsInDomain(restored, gp_Pnt(1.5, 1.5, 0).Transformed(pose)));
+  std::stringstream primitive; BRep_ImplicitIO::Write(source, primitive);
+  EXPECT_EQ(primitive.str().find("OCCT_IMPLICIT_FACE 1\n"), 0u);
+  EXPECT_THROW(BRep_TImplicitCylinderPatch::Restrict(face, frame, 1, -1, 1), Standard_NotImplemented);
+  EXPECT_THROW(BRep_TImplicitCylinderPatch::Restrict(source, frame, -1, -1, 1), Standard_DomainError);
+  EXPECT_THROW(BRep_TImplicitCylinderPatch::Restrict(source, frame, 20, -1, 1), Standard_DomainError);
+  // Invalid cylinder records leave a pre-existing destination unchanged.
+  auto invalid = stream.str();
+  const auto at = invalid.find("2 -1 1\n"); ASSERT_NE(at, std::string::npos);
+  invalid.replace(at, 7, "-2 -1 1\n");
+  std::istringstream bad(invalid);
+  const auto before = restored.TShape();
+  EXPECT_THROW(BRep_ImplicitIO::Read(bad, restored), Standard_DomainError);
+  EXPECT_EQ(restored.TShape(), before);
+  TopoDS_Face withChild; withChild.TShape(data->EmptyCopy());
+  TopoDS_Wire wire; BRep_Builder().MakeWire(wire); BRep_Builder().Add(withChild, wire);
+  std::stringstream rejected; rejected << "prefix";
+  EXPECT_THROW(BRep_ImplicitIO::Write(withChild, rejected), Standard_NotImplemented);
+  EXPECT_EQ(rejected.str(), "prefix");
+  const gp_Ax2 oblique(gp_Pnt(.3, .2, .1), gp_Dir(1, 2, 3), gp_Dir(1, 0, 0));
+  const auto tilted = BRep_TImplicitCylinderPatch::Restrict(source, oblique, 1, -.7, .9);
+  const auto inside = oblique.Location().Translated(gp_Vec(oblique.Direction()) * .2
+                                                    + gp_Vec(oblique.XDirection()) * .3);
+  const auto outside = oblique.Location().Translated(gp_Vec(oblique.XDirection()) * 1.2);
+  EXPECT_TRUE(BRep_ImplicitTool::IsInDomain(tilted, inside));
+  EXPECT_FALSE(BRep_ImplicitTool::IsInDomain(tilted, outside));
+  std::stringstream obliqueRecord; BRep_ImplicitIO::Write(tilted, obliqueRecord);
+  TopoDS_Face tiltedRestored; BRep_ImplicitIO::Read(obliqueRecord, tiltedRestored);
+  EXPECT_TRUE(BRep_ImplicitTool::IsInDomain(tiltedRestored, inside));
+  EXPECT_FALSE(BRep_ImplicitTool::IsInDomain(tiltedRestored, outside));
+}
+
+TEST(BRepImplicitCylinderSection, CylinderRestrictionGuardsProjectionRaysAndGeometryLocation)
+{
+  TopoDS_Face sphere;
+  BRep_Builder().MakeImplicitFace(sphere, new Geom_ImplicitSphere(gp_Pnt(0, 0, 0), 1),
+    gp_Pnt(-3, -3, -3), gp_Pnt(3, 3, 3), TopLoc_Location(), .1);
+  const gp_Ax2 frame(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+  const auto clipped = BRep_TImplicitCylinderPatch::Restrict(sphere, frame, .5, -2, 2);
+  EXPECT_THROW(BRep_ImplicitSphereOps::Tessellate(clipped, .1), Standard_NotImplemented);
+  EXPECT_TRUE(BRep_ImplicitTool::Project(clipped, gp_Pnt(0, 0, 1.04)).Converged);
+  EXPECT_FALSE(BRep_ImplicitTool::Project(clipped, gp_Pnt(1.04, 0, 0)).Converged);
+  EXPECT_TRUE(BRep_ImplicitTool::IntersectRay(clipped, gp_Pnt(-3, 0, 0), gp_Vec(1, 0, 0), 0, 6, 256, .001).empty());
+  EXPECT_EQ(BRep_ImplicitTool::IntersectRay(clipped, gp_Pnt(0, 0, -3), gp_Vec(0, 0, 1), 0, 6, 256, .001).size(), 2);
+  gp_Trsf pose; pose.SetTranslation(gp_Vec(3, -4, 2));
+  TopoDS_Face geometryPlaced;
+  BRep_Builder().MakeImplicitFace(geometryPlaced, new Geom_ImplicitGyroid(10, .21),
+    gp_Pnt(-10, -10, -10), gp_Pnt(10, 10, 10), TopLoc_Location(pose), .1);
+  const auto restricted = BRep_TImplicitCylinderPatch::Restrict(geometryPlaced, frame, 2, -1, 1);
+  EXPECT_TRUE(BRep_ImplicitTool::IsInDomain(restricted, gp_Pnt(.4, .3, .2).Transformed(pose)));
+  EXPECT_FALSE(BRep_ImplicitTool::IsInDomain(restricted, gp_Pnt(1.5, 1.5, 0).Transformed(pose)));
+  std::stringstream record; BRep_ImplicitIO::Write(restricted, record);
+  TopoDS_Face restored; BRep_ImplicitIO::Read(record, restored);
+  EXPECT_TRUE(BRep_ImplicitTool::IsInDomain(restored, gp_Pnt(.4, .3, .2).Transformed(pose)));
+  EXPECT_FALSE(BRep_ImplicitTool::IsInDomain(restored, gp_Pnt(1.5, 1.5, 0).Transformed(pose)));
 }

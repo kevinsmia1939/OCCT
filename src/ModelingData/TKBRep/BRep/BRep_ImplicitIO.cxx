@@ -5,6 +5,7 @@
 #include <BRep_ImplicitIO.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_TImplicitFace.hxx>
+#include <BRep_TImplicitCylinderPatch.hxx>
 #include <Geom_ImplicitSphere.hxx>
 #include <Geom_ImplicitGyroid.hxx>
 #include <Standard_DomainError.hxx>
@@ -123,13 +124,16 @@ void writeTransform(std::ostream& out, const TopLoc_Location& location)
 void BRep_ImplicitIO::Write(const TopoDS_Face& face, Standard_OStream& stream)
 {
   const auto data = occ::down_cast<BRep_TImplicitFace>(face.TShape());
-  if (data.IsNull() || typeid(*data) != typeid(BRep_TImplicitFace) || TopoDS_Iterator(face).More())
+  const auto cylinder = occ::down_cast<BRep_TImplicitCylinderPatch>(data);
+  if (data.IsNull() || (typeid(*data) != typeid(BRep_TImplicitFace)
+                       && typeid(*data) != typeid(BRep_TImplicitCylinderPatch))
+      || TopoDS_Iterator(face).More())
     throw Standard_NotImplemented("BRep_ImplicitIO: requires a childless native implicit face");
 
   std::ostringstream out;
   out.imbue(std::locale::classic());
   out << std::setprecision(std::numeric_limits<double>::max_digits10);
-  out << "OCCT_IMPLICIT_FACE " << (data->ExcludedDomains().empty() ? 1 : 2) << '\n';
+  out << "OCCT_IMPLICIT_FACE " << (!cylinder.IsNull() ? 3 : data->ExcludedDomains().empty() ? 1 : 2) << '\n';
   const auto& field = data->Field();
   // Exact C++ type, not IsKind(): derived classes may override the equation.
   if (typeid(*field) == typeid(Geom_ImplicitSphere))
@@ -151,6 +155,15 @@ void BRep_ImplicitIO::Write(const TopoDS_Face& face, Standard_OStream& stream)
   writePoint(out, data->Minimum());
   writePoint(out, data->Maximum());
   out << "TOLERANCE " << data->Tolerance() << '\n';
+  if (!cylinder.IsNull())
+  {
+    out << "CYLINDER\n";
+    writePoint(out, cylinder->Frame().Location());
+    writePoint(out, gp_Pnt(cylinder->Frame().Direction().XYZ()));
+    writePoint(out, gp_Pnt(cylinder->Frame().XDirection().XYZ()));
+    out << cylinder->Radius() << ' ' << cylinder->HeightMinimum() << ' '
+        << cylinder->HeightMaximum() << '\n';
+  }
   if (!data->ExcludedDomains().empty())
   {
     out << "EXCLUDED_DOMAINS " << data->ExcludedDomains().size() << '\n';
@@ -191,7 +204,7 @@ void BRep_ImplicitIO::Read(Standard_IStream& stream, TopoDS_Face& face)
   in.imbue(std::locale::classic());
   tag(in, "OCCT_IMPLICIT_FACE");
   int schema = 0;
-  require(bool(in >> schema) && (schema == 1 || schema == 2));
+  require(bool(in >> schema) && (schema == 1 || schema == 2 || schema == 3));
   std::string kind;
   require(bool(in >> kind));
   occ::handle<Geom_ImplicitField> field;
@@ -212,6 +225,19 @@ void BRep_ImplicitIO::Read(Standard_IStream& stream, TopoDS_Face& face)
   tag(in, "TOLERANCE");
   const double tolerance = number(in);
   std::vector<BRep_TImplicitFace::DomainBox> excluded;
+  occ::handle<BRep_TImplicitCylinderPatch> cylinder;
+  if (schema == 3)
+  {
+    tag(in, "CYLINDER");
+    const gp_Pnt origin = point(in), axis = point(in), x = point(in);
+    const gp_Vec normal(axis.XYZ()), direction(x.XYZ());
+    require(std::abs(normal.Magnitude() - 1) <= 1.e-12
+            && std::abs(direction.Magnitude() - 1) <= 1.e-12
+            && std::abs(normal.Dot(direction)) <= 1.e-12);
+    const double radius = number(in), minimum = number(in), maximum = number(in);
+    cylinder = new BRep_TImplicitCylinderPatch(field, low, high,
+      gp_Ax2(origin, gp_Dir(normal), gp_Dir(direction)), radius, minimum, maximum, tolerance);
+  }
   if (schema == 2)
   {
     tag(in, "EXCLUDED_DOMAINS");
@@ -237,6 +263,11 @@ void BRep_ImplicitIO::Read(Standard_IStream& stream, TopoDS_Face& face)
 
   TopoDS_Face result;
   BRep_Builder().MakeImplicitFace(result, field, low, high, geometry, tolerance);
+  if (!cylinder.IsNull())
+  {
+    cylinder->Location(geometry);
+    result.TShape(cylinder);
+  }
   if (!excluded.empty())
   {
     occ::handle<BRep_TImplicitFace> data = new BRep_TImplicitFace(field, low, high, tolerance, excluded);

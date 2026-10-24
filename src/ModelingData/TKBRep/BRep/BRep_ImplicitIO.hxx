@@ -12,10 +12,11 @@
 //! Experimental, versioned single-field-face interchange, NOT BRepTools/OCAF.
 //! Schema 1 stores sphere/gyroid parameters, local domain, raw tolerance,
 //! geometry/instance transformations and orientation. Meshes and shape flags
-//! are transient; location datum sharing is not preserved. Storage subtypes,
+//! are transient; location datum sharing is not preserved. Unknown storage subtypes,
 //! child topology and
 //! custom fields are rejected rather than silently lost. Schema 2 additionally
 //! stores closed domain-exclusion boxes; unrestricted output remains schema 1.
+//! Schema 3 stores an explicit finite-cylinder restriction, without trim topology.
 //! Units are caller-owned. Restrictions are not geometric-validity certificates.
 class BRep_ImplicitIO
 {

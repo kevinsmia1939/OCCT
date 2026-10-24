@@ -6,6 +6,7 @@
 #include <BRep_TImplicitFace.hxx>
 #include <BRep_TImplicitSpherePatch.hxx>
 #include <BRep_TImplicitPlanePatch.hxx>
+#include <BRep_TImplicitCylinderPatch.hxx>
 #include <BRep_Tool.hxx>
 #include <Standard_DomainError.hxx>
 #include <Standard_TypeMismatch.hxx>
@@ -13,6 +14,7 @@
 #include <cmath>
 #include <array>
 #include <limits>
+#include <typeinfo>
 
 namespace
 {
@@ -21,6 +23,8 @@ const BRep_TImplicitFace& faceData(const TopoDS_Face& f)
   if (!BRep_Tool::IsImplicit(f))
     throw Standard_TypeMismatch("BRep_ImplicitTool requires a native implicit face");
   const auto& data = *static_cast<const BRep_TImplicitFace*>(f.TShape().get());
+  if (typeid(data) == typeid(BRep_TImplicitFace))
+    return data;
   if ((dynamic_cast<const BRep_TImplicitSpherePatch*>(&data)
        || dynamic_cast<const BRep_TImplicitPlanePatch*>(&data))
       && !data.Location().IsIdentity())
@@ -119,12 +123,16 @@ bool BRep_ImplicitTool::IsInDomain(const TopoDS_Face& f, const gp_Pnt& p)
         && local.Y() >= box[0].Y() && local.Y() <= box[1].Y()
         && local.Z() >= box[0].Z() && local.Z() <= box[1].Z())
       return false;
+  if (typeid(data) == typeid(BRep_TImplicitFace))
+    return true;
   if (const auto* patch = dynamic_cast<const BRep_TImplicitSpherePatch*>(&data))
     return gp_Vec(patch->Plane().Location(), local).Dot(gp_Vec(patch->Plane().Axis().Direction()))
            <= 0;
   if (const auto* patch = dynamic_cast<const BRep_TImplicitPlanePatch*>(&data))
     return gp_Vec(patch->Plane().Location(), local).Dot(gp_Vec(patch->Plane().Axis().Direction()))
            <= 0;
+  if (const auto* patch = dynamic_cast<const BRep_TImplicitCylinderPatch*>(&data))
+    return patch->Contains(local);
   return true;
 }
 
@@ -184,7 +192,7 @@ BRep_ImplicitTool::Projection BRep_ImplicitTool::Project(
   {
     if (!IsInDomain(f, a) || !IsInDomain(f, b))
       return false;
-    // Endpoint checks suffice for the convex box and patch halfspaces. Closed
+    // Endpoint checks suffice for convex boxes, cylinders and patch halfspaces. Closed
     // exclusion boxes also require a segment test, so a thin removed region
     // cannot hide between admissible endpoints.
     const auto inverse = placement(f).Inverted();
