@@ -3,6 +3,8 @@
 #include <BRep_ImplicitCylinderSection.hxx>
 #include <BRep_ImplicitTool.hxx>
 #include <BRep_Builder.hxx>
+#include <BRep_Tool.hxx>
+#include <Geom_Circle.hxx>
 #include <BRep_TImplicitFace.hxx>
 #include <Geom_ImplicitGyroid.hxx>
 #include <Standard_DomainError.hxx>
@@ -326,5 +328,96 @@ Section::BoundaryResult Section::TracePeriodicBoundary(const TopoDS_Face& face, 
     result.Roots.clear(); result.CurveRoots.clear();
     result.BoundaryIncidenceVerified = false;
   }
+  return result;
+}
+
+Section::RingResult Section::BuildBoundaryRings(const TopoDS_Face& face, const Settings& s)
+{
+  RingResult result;
+  result.Boundary = TracePeriodicBoundary(face, s);
+  if (!result.Boundary.BoundaryIncidenceVerified) return result;
+  const Chart chart {s};
+  const double turn = 2 * std::acos(-1.);
+  const auto data = occ::down_cast<BRep_TImplicitFace>(face.TShape());
+  const auto* field = static_cast<const Geom_ImplicitGyroid*>(data->Field().get());
+  const double scale = std::abs((face.Location() * data->Location()).Transformation().ScaleFactor());
+  const double lipschitz = field->LipschitzBound() / scale;
+  BRep_Builder builder;
+  bool verified = true;
+  for (int cap = 0; cap < 2; ++cap)
+  {
+    checkpoint(s);
+    const double height = cap == 0 ? s.HeightMinimum : s.HeightMaximum;
+    const gp_Pnt origin = s.Frame.Location().Translated(gp_Vec(s.Frame.Direction()) * height);
+    const occ::handle<Geom_Circle> circle = new Geom_Circle(
+      gp_Ax2(origin, s.Frame.Direction(), s.Frame.XDirection()), s.Radius);
+    std::vector<size_t> roots;
+    for (size_t i = 0; i < result.Boundary.Roots.size(); ++i)
+      if (result.Boundary.Roots[i].HeightBoundary == cap) roots.push_back(i + 1);
+    if (roots.size() % 2 != 0) { verified = false; break; }
+    std::vector<bool> signs;
+    const size_t count = roots.empty() ? 2 : roots.size();
+    std::array<TopoDS_Vertex, 2> synthetic;
+    const double magnitude = 1 + std::max({std::abs(origin.X()), std::abs(origin.Y()),
+                                           std::abs(origin.Z()), s.Radius});
+    const double precision = 1024 * std::numeric_limits<double>::epsilon() * magnitude
+                             * (1 + std::abs(s.AngleMinimum) + std::abs(s.AngleMaximum));
+    const double reserve = 1024 * std::numeric_limits<double>::epsilon()
+                             * (1 + std::abs(field->IsoValue())) + lipschitz * precision;
+    if (!std::isfinite(precision) || !std::isfinite(reserve) || precision > s.DistanceTolerance)
+    { verified = false; break; }
+    if (roots.empty())
+      for (int i = 0; i < 2; ++i)
+        builder.MakeVertex(synthetic[i], circle->Value(s.AngleMinimum + i * turn / 2), precision);
+    for (size_t i = 0; i < count; ++i)
+    {
+      checkpoint(s);
+      const size_t next = (i + 1) % count;
+      RingArc arc;
+      double first, last, low, high;
+      TopoDS_Vertex a, b;
+      if (roots.empty())
+      {
+        first = low = s.AngleMinimum + i * turn / 2;
+        last = high = first + turn / 2;
+        a = synthetic[i]; b = synthetic[next];
+      }
+      else
+      {
+        arc.LowerRoot = roots[i]; arc.UpperRoot = roots[next];
+        const auto& lower = result.Boundary.Roots[arc.LowerRoot - 1];
+        const auto& upper = result.Boundary.Roots[arc.UpperRoot - 1];
+        first = (lower.AngleFirst + lower.AngleLast) * .5;
+        last = (upper.AngleFirst + upper.AngleLast) * .5 + (next == 0 ? turn : 0);
+        low = lower.AngleLast;
+        high = upper.AngleFirst + (next == 0 ? turn : 0);
+        a = lower.Vertex; b = upper.Vertex;
+      }
+      if (!(high > low) || s.Radius * (high - low) <= precision)
+      { verified = false; break; }
+      const double sample = low + (high - low) * .5;
+      const double value = BRep_ImplicitTool::Value(face, chart.point(s.Radius * sample, height));
+      if (!std::isfinite(value) || std::abs(value) <= reserve)
+      { verified = false; break; }
+      arc.Negative = value < 0; signs.push_back(arc.Negative);
+      const double tolerance = std::max({precision, BRep_Tool::Tolerance(a), BRep_Tool::Tolerance(b)});
+      if (tolerance > s.DistanceTolerance) { verified = false; break; }
+      builder.MakeEdge(arc.Edge, circle, tolerance);
+      a.Orientation(TopAbs_FORWARD); b.Orientation(TopAbs_REVERSED);
+      builder.Add(arc.Edge, a); builder.Add(arc.Edge, b);
+      builder.UpdateVertex(a, first, arc.Edge, BRep_Tool::Tolerance(a));
+      builder.UpdateVertex(b, last, arc.Edge, BRep_Tool::Tolerance(b));
+      builder.Range(arc.Edge, first, last);
+      if (cap == 0) arc.Edge.Reverse();
+      result.Rings[cap].push_back(std::move(arc));
+    }
+    if (!verified) break;
+    for (size_t i = 0; i < signs.size(); ++i)
+      verified &= roots.empty() ? signs[i] == signs[(i + 1) % signs.size()]
+                                : signs[i] != signs[(i + 1) % signs.size()];
+    if (!verified) break;
+  }
+  if (!verified) for (auto& ring : result.Rings) ring.clear();
+  result.Verified = verified;
   return result;
 }

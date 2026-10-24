@@ -4,6 +4,9 @@
 #include <BRep_ImplicitTool.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
+#include <BRepCheck_Analyzer.hxx>
+#include <Geom_Circle.hxx>
+#include <TopExp.hxx>
 #include <Geom_ImplicitGyroid.hxx>
 #include <Standard_AbortiveTransaction.hxx>
 #include <Standard_DomainError.hxx>
@@ -236,4 +239,107 @@ TEST(BRepImplicitCylinderSection, EndCapRootsRetainOwnedVertexAndCurveIdentity)
   const auto failed = Section::TracePeriodicBoundary(face, s);
   EXPECT_FALSE(failed.Section.Resolved); EXPECT_FALSE(failed.BoundaryIncidenceVerified);
   EXPECT_TRUE(failed.Roots.empty()); EXPECT_TRUE(failed.CurveRoots.empty());
+}
+
+TEST(BRepImplicitCylinderSection, AnalyticRingArcsShareRootsAndPartitionSigns)
+{
+  const auto face = field();
+  auto s = settings();
+  s.Radius = .5; s.AngleMinimum = 3;
+  s.AngleMaximum = s.AngleMinimum + 2 * std::acos(-1.);
+  s.HeightMinimum = 0; s.HeightMaximum = .5;
+  const auto result = Section::BuildBoundaryRings(face, s);
+  ASSERT_TRUE(result.Verified);
+  for (int cap = 0; cap < 2; ++cap)
+  {
+    ASSERT_EQ(result.Rings[cap].size(), 2);
+    double total = 0;
+    for (const auto& arc : result.Rings[cap])
+    {
+      EXPECT_TRUE(BRepCheck_Analyzer(arc.Edge).IsValid());
+      EXPECT_EQ(arc.Edge.Orientation(), cap == 0 ? TopAbs_REVERSED : TopAbs_FORWARD);
+      double first, last;
+      const auto curve = BRep_Tool::Curve(arc.Edge, first, last);
+      ASSERT_FALSE(occ::down_cast<Geom_Circle>(curve).IsNull());
+      EXPECT_GT(last, first); total += last - first;
+      TopoDS_Vertex a, b; TopExp::Vertices(arc.Edge, a, b);
+      EXPECT_TRUE(a.IsSame(result.Boundary.Roots[arc.LowerRoot - 1].Vertex));
+      EXPECT_TRUE(b.IsSame(result.Boundary.Roots[arc.UpperRoot - 1].Vertex));
+      EXPECT_LE(curve->Value(first).Distance(BRep_Tool::Pnt(a)), BRep_Tool::Tolerance(a));
+      EXPECT_LE(curve->Value(last).Distance(BRep_Tool::Pnt(b)), BRep_Tool::Tolerance(b));
+      // Independent dense circle samples away from root uncertainty must agree.
+      const auto& lower = result.Boundary.Roots[arc.LowerRoot - 1];
+      const auto& upper = result.Boundary.Roots[arc.UpperRoot - 1];
+      const double low = lower.AngleLast, high = upper.AngleFirst + (arc.UpperRoot < arc.LowerRoot ? 2 * std::acos(-1.) : 0);
+      for (int i = 1; i < 30; ++i)
+      {
+        const double angle = low + (high - low) * i / 30;
+        const auto point = curve->Value(angle);
+        const double k = 2 * std::acos(-1.) / 10;
+        const double value = std::sin(k * point.X()) * std::cos(k * point.Y())
+          + std::sin(k * point.Y()) * std::cos(k * point.Z())
+          + std::sin(k * point.Z()) * std::cos(k * point.X()) - .21;
+        EXPECT_EQ(value < 0, arc.Negative);
+      }
+    }
+    EXPECT_NEAR(total, 2 * std::acos(-1.), 1.e-13);
+    EXPECT_NE(result.Rings[cap][0].Negative, result.Rings[cap][1].Negative);
+  }
+  gp_Trsf pose;
+  pose.SetRotation(gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(1, 2, 3)), .4);
+  pose.SetTranslationPart(gp_Vec(3, -4, 2));
+  auto placedFace = face;
+  placedFace.Location(TopLoc_Location(pose));
+  auto placedSettings = s;
+  placedSettings.Frame.Transform(pose);
+  const auto placed = Section::BuildBoundaryRings(placedFace, placedSettings);
+  ASSERT_TRUE(placed.Verified);
+  for (int cap = 0; cap < 2; ++cap)
+    for (size_t i = 0; i < result.Rings[cap].size(); ++i)
+    {
+      EXPECT_EQ(placed.Rings[cap][i].Negative, result.Rings[cap][i].Negative);
+      EXPECT_TRUE(BRepCheck_Analyzer(placed.Rings[cap][i].Edge).IsValid());
+    }
+  s.MaximumCells = 4;
+  const auto failed = Section::BuildBoundaryRings(face, s);
+  EXPECT_FALSE(failed.Verified); EXPECT_TRUE(failed.Rings[0].empty()); EXPECT_TRUE(failed.Rings[1].empty());
+}
+
+TEST(BRepImplicitCylinderSection, RootFreeRingsAreActualClosedCirclePartitions)
+{
+  auto s = settings();
+  s.Radius = .5; s.AngleMaximum = s.AngleMinimum + 2 * std::acos(-1.);
+  const auto result = Section::BuildBoundaryRings(field(10), s);
+  ASSERT_TRUE(result.Verified);
+  for (const auto& ring : result.Rings)
+  {
+    ASSERT_EQ(ring.size(), 2);
+    TopoDS_Vertex a, b, c, d;
+    TopExp::Vertices(ring[0].Edge, a, b); TopExp::Vertices(ring[1].Edge, c, d);
+    EXPECT_TRUE(a.IsSame(d)); EXPECT_TRUE(b.IsSame(c));
+    for (const auto& arc : ring)
+    {
+      EXPECT_TRUE(arc.Negative); EXPECT_EQ(arc.LowerRoot, 0); EXPECT_EQ(arc.UpperRoot, 0);
+      EXPECT_TRUE(BRepCheck_Analyzer(arc.Edge).IsValid());
+    }
+  }
+  const auto positive = Section::BuildBoundaryRings(field(-10), s);
+  ASSERT_TRUE(positive.Verified);
+  for (const auto& ring : positive.Rings) for (const auto& arc : ring) EXPECT_FALSE(arc.Negative);
+}
+
+TEST(BRepImplicitCylinderSection, RingPrecisionCannotExceedRequestedTolerance)
+{
+  auto s = settings();
+  s.Radius = .5; s.AngleMinimum = 3;
+  s.AngleMaximum = s.AngleMinimum + 2 * std::acos(-1.);
+  s.Frame.SetLocation(gp_Pnt(1000, 0, 0));
+  s.DistanceTolerance = 2.e-9;
+  auto face = field(10);
+  gp_Trsf pose; pose.SetTranslation(gp_Vec(1000, 0, 0));
+  face.Location(TopLoc_Location(pose));
+  const auto result = Section::BuildBoundaryRings(face, s);
+  ASSERT_TRUE(result.Boundary.Section.Resolved);
+  EXPECT_FALSE(result.Verified);
+  EXPECT_TRUE(result.Rings[0].empty()); EXPECT_TRUE(result.Rings[1].empty());
 }

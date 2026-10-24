@@ -4,6 +4,7 @@
 #define _BRep_ImplicitCylinderSection_HeaderFile
 #include <BRep_ImplicitPlaneSection.hxx>
 #include <TopoDS_Vertex.hxx>
+#include <TopoDS_Edge.hxx>
 #include <array>
 
 //! Derivative-bounded gyroid section on a finite open cylindrical chart.
@@ -51,5 +52,21 @@ public:
   //! Does not build end-cap regions, native trim edges, shells or solids.
   //! Unresolved results publish no roots or endpoint identities.
   Standard_EXPORT static BoundaryResult TracePeriodicBoundary(const TopoDS_Face&, const Settings&);
+  struct RingArc
+  {
+    TopoDS_Edge Edge; //!< Analytic circle, outward cap orientation (bottom reversed).
+    size_t LowerRoot = 0, UpperRoot = 0; //!< Ascending curve-parameter root IDs; 0 for root-free rings.
+    bool Negative = false; //!< F<0 between root brackets; endpoint uncertainty is retained.
+  };
+  struct RingResult
+  {
+    BoundaryResult Boundary;
+    std::array<std::vector<RingArc>, 2> Rings;
+    bool Verified = false; //!< Ring incidence/sign intervals only; NOT cap/solid validation.
+  };
+  //! Construct both height-circle partitions using the retained root vertices.
+  //! Returns no edges unless every interval and root incidence passes.
+  //! Does not construct cap regions, cylindrical faces, shells or solids.
+  Standard_EXPORT static RingResult BuildBoundaryRings(const TopoDS_Face&, const Settings&);
 };
 #endif
