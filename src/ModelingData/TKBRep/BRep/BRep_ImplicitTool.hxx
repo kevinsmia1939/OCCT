@@ -9,6 +9,7 @@
 #include <gp_Pnt.hxx>
 #include <gp_Vec.hxx>
 #include <vector>
+#include <string>
 
 //! Field-aware queries on experimental native implicit faces.
 //! Points/directions/distances are in the placed face frame, not field-local UV.
@@ -26,6 +27,26 @@ public:
     double Residual;
     double BracketWidth;
   };
+
+  struct Projection
+  {
+    bool Converged = false;
+    gp_Pnt Point, First, Last;
+    double Residual = 0, Stationarity = 0, Distance = 0, BracketWidth = 0;
+    int Iterations = 0;
+    std::string Reason = "iteration_limit";
+  };
+
+  //! Bounded local regular normal foot, NOT a globally nearest point search.
+  //! Numerical KKT solve with a positive tangent second variation; acceptance
+  //! needs a nearby sign bracket wholly in the explicit query domain. Honors
+  //! domain boxes/exclusions/patch predicates, NOT arbitrary added trim wires.
+  //! Ordinary floating reserves, not directed interval certification. Failure
+  //! returns Converged=false; invalid settings/nonfinite evaluation throw.
+  Standard_EXPORT static Projection Project(const TopoDS_Face&, const gp_Pnt& theSeed,
+                                              double theDistanceTolerance = 0.1,
+                                              double theMaximumDistance = 1.0,
+                                              int theMaximumIterations = 32);
 
   Standard_EXPORT static double  Value(const TopoDS_Face&, const gp_Pnt&);
   Standard_EXPORT static gp_Vec  Gradient(const TopoDS_Face&, const gp_Pnt&);

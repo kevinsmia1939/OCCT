@@ -5,6 +5,7 @@
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <BRep_TImplicitFace.hxx>
+#include <BRep_TImplicitSpherePatch.hxx>
 #include <BRep_ImplicitTool.hxx>
 #include <BRep_ImplicitIO.hxx>
 #include <BRepAdaptor_Surface.hxx>
@@ -69,6 +70,77 @@ TEST(BRep_ImplicitFace, ExplicitDomainExclusionsQueriesCopyAndPersistence)
   EXPECT_EQ(out.str(), again.str());
   EXPECT_THROW(new BRep_TImplicitFace(new Geom_ImplicitSphere(gp_Pnt(), 2), low, high, .01,
     {{gp_Pnt(-4, -1, -1), gp_Pnt(-1, 1, 1)}}), Standard_DomainError);
+}
+
+TEST(BRep_ImplicitFace, LocalProjectionHasNormalFootAndDomainWitness)
+{
+  TopoDS_Face sphere;
+  BRep_Builder().MakeImplicitFace(sphere, new Geom_ImplicitSphere(gp_Pnt(), 2),
+    gp_Pnt(-3, -3, -3), gp_Pnt(3, 3, 3), TopLoc_Location(), .01);
+  std::ostringstream before;
+  BRep_ImplicitIO::Write(sphere, before);
+  const gp_Pnt seed(2.2, .3, .4);
+  const gp_Pnt expected(seed.XYZ() * (2 / gp_Vec(gp_Pnt(), seed).Magnitude()));
+  const auto projection = BRep_ImplicitTool::Project(sphere, seed, .001, 1);
+  ASSERT_TRUE(projection.Converged) << projection.Reason;
+  EXPECT_LE(projection.Point.Distance(expected), .001 / 64);
+  EXPECT_LE(projection.Stationarity, .001 / 32);
+  EXPECT_LE(projection.BracketWidth, .001 / 256);
+  EXPECT_LT(BRep_ImplicitTool::Value(sphere, projection.First), 0);
+  EXPECT_GT(BRep_ImplicitTool::Value(sphere, projection.Last), 0);
+  EXPECT_TRUE(BRep_ImplicitTool::IsInDomain(sphere, projection.Point));
+  gp_Trsf transform;
+  transform.SetScale(gp_Pnt(), 2);
+  transform.SetTranslationPart(gp_Vec(5, 4, 3));
+  sphere.Location(TopLoc_Location(transform));
+  const auto placed = BRep_ImplicitTool::Project(sphere, seed.Transformed(transform), .001, 2);
+  ASSERT_TRUE(placed.Converged) << placed.Reason;
+  EXPECT_LE(placed.Point.Distance(expected.Transformed(transform)), .001 / 64);
+  sphere.Location(TopLoc_Location());
+  std::ostringstream after;
+  BRep_ImplicitIO::Write(sphere, after);
+  EXPECT_EQ(before.str(), after.str());
+  TopoDS_Face gyroid;
+  BRep_Builder().MakeImplicitFace(gyroid, new Geom_ImplicitGyroid(10), gp_Pnt(),
+    gp_Pnt(10, 10, 10), TopLoc_Location(), .1);
+  const gp_Pnt root(2.5, 2.5, 2.5);
+  const auto normal = BRep_ImplicitTool::Normal(gyroid, root);
+  const auto gyroidFoot = BRep_ImplicitTool::Project(gyroid, root.Translated(normal * .05), .01, .4);
+  ASSERT_TRUE(gyroidFoot.Converged) << gyroidFoot.Reason;
+  EXPECT_LE(gyroidFoot.Point.Distance(root), .01 / 64);
+  EXPECT_LE(gyroidFoot.BracketWidth, .01 / 256);
+}
+
+TEST(BRep_ImplicitFace, LocalProjectionRejectsRestrictionsPrecisionAndBudgets)
+{
+  TopoDS_Face sphere;
+  BRep_Builder().MakeImplicitFace(sphere, new Geom_ImplicitSphere(gp_Pnt(), 2),
+    gp_Pnt(-3, -3, -3), gp_Pnt(3, 3, 3), TopLoc_Location(), .01);
+  EXPECT_FALSE(BRep_ImplicitTool::Project(sphere, gp_Pnt(), .01, 3).Converged);
+  EXPECT_FALSE(BRep_ImplicitTool::Project(sphere, gp_Pnt(2.2, 0, 0), .01, .01).Converged);
+  EXPECT_FALSE(BRep_ImplicitTool::Project(sphere, gp_Pnt(2.2, .3, .4), 1.e-12, 1, 1).Converged);
+  for (double tolerance : {0., -1., std::numeric_limits<double>::infinity()})
+    EXPECT_THROW(BRep_ImplicitTool::Project(sphere, gp_Pnt(2, 0, 0), tolerance), Standard_DomainError);
+  EXPECT_THROW(BRep_ImplicitTool::Project(sphere, gp_Pnt(2, 0, 0), .1, 1, 0), Standard_DomainError);
+  gp_Trsf shift;
+  shift.SetTranslation(gp_Vec(1.e15, 0, 0));
+  sphere.Location(TopLoc_Location(shift));
+  const auto exhausted = BRep_ImplicitTool::Project(sphere, gp_Pnt(2.2, 0, 0).Transformed(shift));
+  EXPECT_FALSE(exhausted.Converged);
+  EXPECT_EQ(exhausted.Reason, "coordinate_precision");
+  TopoDS_Face patch;
+  patch.TShape(new BRep_TImplicitSpherePatch(new Geom_ImplicitSphere(gp_Pnt(), 2),
+                                            gp_Pln(gp_Pnt(), gp_Dir(1, 0, 0)), .01));
+  EXPECT_FALSE(BRep_ImplicitTool::Project(patch, gp_Pnt(2.2, 0, 0)).Converged);
+  EXPECT_TRUE(BRep_ImplicitTool::Project(patch, gp_Pnt(-2.2, 0, 0)).Converged);
+  // Admissible bracket endpoints alone cannot detect this thin removed box.
+  TopoDS_Face excluded;
+  excluded.TShape(new BRep_TImplicitFace(new Geom_ImplicitSphere(gp_Pnt(), 2),
+    gp_Pnt(-3, -3, -3), gp_Pnt(3, 3, 3), .01,
+    {{gp_Pnt(2 - 1.e-8, -1.e-6, -1.e-6), gp_Pnt(2 + 1.e-8, 1.e-6, 1.e-6)}}));
+  const auto removed = BRep_ImplicitTool::Project(excluded, gp_Pnt(2.2, 0, 0), .01);
+  EXPECT_FALSE(removed.Converged);
+  EXPECT_EQ(removed.Reason, "outside_domain");
 }
 
 TopoDS_Face sphereFace(const gp_Pnt& low = gp_Pnt(-3, -3, -3), const gp_Pnt& high = gp_Pnt(3, 3, 3))
