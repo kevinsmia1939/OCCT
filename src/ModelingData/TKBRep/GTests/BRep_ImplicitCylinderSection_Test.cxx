@@ -116,3 +116,69 @@ TEST(BRepImplicitCylinderSection, InvalidAndPeriodicChartsReject)
   s = settings(); s.DistanceTolerance = std::numeric_limits<double>::quiet_NaN();
   EXPECT_THROW(Section::Trace(face, s), Standard_DomainError);
 }
+
+TEST(BRepImplicitCylinderSection, PeriodicSharedSeamClosesOneAnalyticLoop)
+{
+  const auto face = field();
+  auto s = settings();
+  s.Radius = .5;
+  s.AngleMinimum = .27;
+  s.AngleMaximum = s.AngleMinimum + 2 * std::acos(-1.);
+  s.HeightMinimum = -1.7; s.HeightMaximum = 1.3;
+  const auto result = Section::TracePeriodic(face, s);
+  ASSERT_TRUE(result.Resolved) << result.UnresolvedCells << " / " << result.GraphDefects;
+  ASSERT_EQ(result.Curves.size(), 1);
+  const auto& curve = result.Curves.front();
+  EXPECT_TRUE(curve.Closed);
+  ASSERT_GT(curve.Points.size(), 20);
+  EXPECT_EQ(curve.Points.front().Distance(curve.Points.back()), 0);
+  EXPECT_EQ(result.GraphDefects, 0);
+  EXPECT_LE(result.GeometricBound, .1);
+  const double k = 2 * std::acos(-1.) / 10;
+  for (int i = 0; i <= 240; ++i)
+  {
+    const double angle = s.AngleMinimum + 2 * std::acos(-1.) * i / 240;
+    const double x = s.Radius * std::cos(angle), y = s.Radius * std::sin(angle);
+    const double a = std::sin(k * y), b = std::cos(k * x);
+    const double c = std::sin(k * x) * std::cos(k * y) - .21;
+    const double phase = std::atan2(b, a), offset = std::acos(-c / std::hypot(a, b));
+    const double z = (phase - offset) / k;
+    ASSERT_GE(z, s.HeightMinimum); ASSERT_LE(z, s.HeightMaximum);
+    EXPECT_LE(distance(gp_Pnt(x, y, z), result), result.GeometricBound + 1.e-10);
+  }
+  // Moving the seam changes the chart only, not the physical closed section.
+  s.AngleMinimum = .63; s.AngleMaximum = s.AngleMinimum + 2 * std::acos(-1.);
+  const auto moved = Section::TracePeriodic(face, s);
+  ASSERT_TRUE(moved.Resolved);
+  ASSERT_EQ(moved.Curves.size(), 1);
+  EXPECT_TRUE(moved.Curves.front().Closed);
+  for (const auto& p : curve.Points) EXPECT_LE(distance(p, moved), .1);
+  s.MaximumCells = 4;
+  EXPECT_FALSE(Section::TracePeriodic(face, s).Resolved);
+  s = settings();
+  EXPECT_THROW(Section::TracePeriodic(face, s), Standard_DomainError);
+}
+
+TEST(BRepImplicitCylinderSection, PeriodicOpenEndsBelongOnlyToHeightBoundary)
+{
+  auto s = settings();
+  s.Radius = .5;
+  s.AngleMinimum = 3;
+  s.AngleMaximum = s.AngleMinimum + 2 * std::acos(-1.);
+  s.HeightMinimum = 0; s.HeightMaximum = 1.3;
+  const auto result = Section::TracePeriodic(field(), s);
+  ASSERT_TRUE(result.Resolved) << result.UnresolvedCells << " / " << result.GraphDefects;
+  ASSERT_FALSE(result.Curves.empty());
+  int open = 0;
+  for (const auto& curve : result.Curves)
+    if (!curve.Closed)
+    {
+      ++open;
+      EXPECT_EQ(curve.Points.front().Z(), 0);
+      EXPECT_EQ(curve.Points.back().Z(), 0);
+    }
+  EXPECT_GT(open, 0);
+  // A near/exact zero on a grid/seam endpoint must remain unresolved.
+  s.AngleMinimum = 0; s.AngleMaximum = 2 * std::acos(-1.);
+  EXPECT_FALSE(Section::TracePeriodic(field(std::sin(std::acos(-1.) / 10)), s).Resolved);
+}

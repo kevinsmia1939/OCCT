@@ -47,13 +47,14 @@ struct Chart
 struct Edge { int state = 0; size_t vertex = 0; }; // empty, unique root, unresolved
 
 Section::Result pass(const TopoDS_Face& face, const Section::Settings& s,
-                     int n, double lipschitz, double hessian, double reserve, double precision)
+                     int n, double lipschitz, double hessian, double reserve, double precision,
+                     bool periodic)
 {
   Section::Result result;
   result.Resolution = n;
   const Chart chart {s};
   const double u0 = s.Radius * s.AngleMinimum;
-  const double du = s.Radius * (s.AngleMaximum - s.AngleMinimum) / n;
+  const double du = s.Radius * (periodic ? 2 * std::acos(-1.) : s.AngleMaximum - s.AngleMinimum) / n;
   const double dv = (s.HeightMaximum - s.HeightMinimum) / n;
   const double diagonal = std::hypot(du, dv);
   const size_t width = size_t(n) + 1;
@@ -62,6 +63,11 @@ Section::Result pass(const TopoDS_Face& face, const Section::Settings& s,
     for (int i = 0; i <= n; ++i)
     {
       if ((size_t(j) * width + i) % 256 == 0) checkpoint(s);
+      if (periodic && i == n)
+      {
+        values[size_t(j) * width + i] = values[size_t(j) * width];
+        continue;
+      }
       values[size_t(j) * width + i] = BRep_ImplicitTool::Value(
         face, chart.point(u0 + du * i, s.HeightMinimum + dv * j));
     }
@@ -106,7 +112,7 @@ Section::Result pass(const TopoDS_Face& face, const Section::Settings& s,
     const double t = low + (high - low) * .5;
     const auto p = chart.point(u + (alongU ? du * t : 0), v + (alongU ? 0 : dv * t));
     e.state = 1; e.vertex = points.size(); points.push_back(p);
-    boundary.push_back(alongU ? j == 0 || j == n : i == 0 || i == n);
+    boundary.push_back(alongU ? j == 0 || j == n : !periodic && (i == 0 || i == n));
     result.MaximumResidual = std::max(result.MaximumResidual, std::abs(BRep_ImplicitTool::Value(face, p)));
     result.MaximumRootBracket = std::max(result.MaximumRootBracket, bracket);
     return e;
@@ -114,7 +120,9 @@ Section::Result pass(const TopoDS_Face& face, const Section::Settings& s,
   for (int j = 0; j <= n; ++j)
     for (int i = 0; i < n; ++i) horizontal[size_t(j) * n + i] = edge(i, j, true);
   for (int j = 0; j < n; ++j)
-    for (int i = 0; i <= n; ++i) vertical[size_t(j) * width + i] = edge(i, j, false);
+    for (int i = 0; i <= n; ++i)
+      vertical[size_t(j) * width + i] = periodic && i == n
+        ? vertical[size_t(j) * width] : edge(i, j, false);
   std::vector<std::pair<size_t, size_t>> segments;
   for (int j = 0; j < n; ++j)
     for (int i = 0; i < n; ++i)
@@ -177,7 +185,7 @@ Section::Result pass(const TopoDS_Face& face, const Section::Settings& s,
 }
 } // namespace
 
-Section::Result Section::Trace(const TopoDS_Face& face, const Settings& s)
+static Section::Result traceCylinder(const TopoDS_Face& face, const Section::Settings& s, bool periodic)
 {
   const auto data = occ::down_cast<BRep_TImplicitFace>(face.TShape());
   if (data.IsNull() || !data->ExcludedDomains().empty() || typeid(*data) != typeid(BRep_TImplicitFace)
@@ -188,7 +196,8 @@ Section::Result Section::Trace(const TopoDS_Face& face, const Settings& s)
   for (double value : {s.Radius, s.AngleMinimum, s.AngleMaximum, s.HeightMinimum, s.HeightMaximum,
                        s.DistanceTolerance}) require(std::isfinite(value), "Non-finite cylinder section setting");
   require(s.Radius > 0 && s.AngleMaximum > s.AngleMinimum
-          && s.AngleMaximum - s.AngleMinimum < 2 * std::acos(-1.)
+          && (periodic ? s.AngleMaximum == s.AngleMinimum + 2 * std::acos(-1.)
+                       : s.AngleMaximum - s.AngleMinimum < 2 * std::acos(-1.))
           && s.HeightMaximum > s.HeightMinimum && s.DistanceTolerance > 0,
           "Invalid finite open cylinder section");
   require(std::abs(s.AngleMinimum) < 1.e6 && std::abs(s.AngleMaximum) < 1.e6,
@@ -224,11 +233,29 @@ Section::Result Section::Trace(const TopoDS_Face& face, const Settings& s)
           && std::isfinite(s.Radius * s.AngleMinimum) && std::isfinite(s.Radius * s.AngleMaximum)
           && std::isfinite(s.Radius * (s.AngleMaximum - s.AngleMinimum))
           && std::isfinite(s.HeightMaximum - s.HeightMinimum), "Cylinder precision/span overflow");
-  Result result;
+  Section::Result result;
   for (int n = s.MinimumCells; n <= s.MaximumCells; n *= 2)
   {
-    result = pass(face, s, n, lipschitz, hessian, reserve, precision);
+    result = pass(face, s, n, lipschitz, hessian, reserve, precision, periodic);
     if (result.Resolved) return result;
   }
+  if (periodic)
+    for (int numerator : {6, 5, 7})
+    {
+      const int n = s.MaximumCells * numerator / 8;
+      if (n < s.MinimumCells) continue;
+      auto candidate = pass(face, s, n, lipschitz, hessian, reserve, precision, true);
+      if (candidate.Resolved) return candidate;
+    }
   return result;
+}
+
+Section::Result Section::Trace(const TopoDS_Face& face, const Settings& settings)
+{
+  return traceCylinder(face, settings, false);
+}
+
+Section::Result Section::TracePeriodic(const TopoDS_Face& face, const Settings& settings)
+{
+  return traceCylinder(face, settings, true);
 }

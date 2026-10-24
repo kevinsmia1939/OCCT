@@ -5,7 +5,7 @@
 #include <BRep_ImplicitPlaneSection.hxx>
 
 //! Derivative-bounded gyroid section on a finite open cylindrical chart.
-//! This query does not create trim topology, join periodic seams or build solids.
+//! Curves remain transient approximations, not native trim topology or solids.
 class BRep_ImplicitCylinderSection
 {
 public:
@@ -25,5 +25,10 @@ public:
   //! tangencies and unproved cells return unresolved, never guessed topology.
   //! GeometricBound is a model-length chart-cell diameter bound, not residual.
   Standard_EXPORT static Result Trace(const TopoDS_Face&, const Settings&);
+  //! Full-turn query with one canonical shared chart seam (no distance welding).
+  //! AngleMaximum must equal AngleMinimum + 2*pi. Seam roots are indexed once;
+  //! only height boundaries may contain open ends. Existing Settings/Result
+  //! layouts and the open Trace contract are unchanged.
+  Standard_EXPORT static Result TracePeriodic(const TopoDS_Face&, const Settings&);
 };
 #endif
