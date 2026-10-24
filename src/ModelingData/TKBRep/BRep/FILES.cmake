@@ -2,6 +2,8 @@
 set(OCCT_BRep_FILES_LOCATION "${CMAKE_CURRENT_LIST_DIR}")
 
 set(OCCT_BRep_FILES
+  BRep_ImplicitCylinderSection.hxx
+  BRep_ImplicitCylinderSection.cxx
   BRep_TImplicitPlanePatch.hxx
   BRep_ImplicitGyroidOps.hxx
   BRep_ImplicitGyroidOps.cxx
