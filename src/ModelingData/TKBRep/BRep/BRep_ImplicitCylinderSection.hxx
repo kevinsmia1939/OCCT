@@ -3,6 +3,8 @@
 #ifndef _BRep_ImplicitCylinderSection_HeaderFile
 #define _BRep_ImplicitCylinderSection_HeaderFile
 #include <BRep_ImplicitPlaneSection.hxx>
+#include <TopoDS_Vertex.hxx>
+#include <array>
 
 //! Derivative-bounded gyroid section on a finite open cylindrical chart.
 //! Curves remain transient approximations, not native trim topology or solids.
@@ -30,5 +32,24 @@ public:
   //! only height boundaries may contain open ends. Existing Settings/Result
   //! layouts and the open Trace contract are unchanged.
   Standard_EXPORT static Result TracePeriodic(const TopoDS_Face&, const Settings&);
+  struct BoundaryRoot
+  {
+    TopoDS_Vertex Vertex; //!< Owned canonical vertex for reuse by side/end-cap trims.
+    gp_Pnt First, Last; //!< Root bracket on the exact circular height boundary.
+    double AngleFirst = 0, AngleLast = 0;
+    int HeightBoundary = 0; //!< 0 bottom, 1 top.
+  };
+  struct BoundaryResult
+  {
+    Result Section;
+    std::vector<BoundaryRoot> Roots; //!< Ordered by height boundary then chart angle.
+    //! One pair per section curve; 1-based Roots indices. Closed curves use 0,0.
+    std::vector<std::array<size_t, 2>> CurveRoots;
+    bool BoundaryIncidenceVerified = false;
+  };
+  //! Retain the exact root/endpoint identity from one periodic tracing pass.
+  //! Does not build end-cap regions, native trim edges, shells or solids.
+  //! Unresolved results publish no roots or endpoint identities.
+  Standard_EXPORT static BoundaryResult TracePeriodicBoundary(const TopoDS_Face&, const Settings&);
 };
 #endif

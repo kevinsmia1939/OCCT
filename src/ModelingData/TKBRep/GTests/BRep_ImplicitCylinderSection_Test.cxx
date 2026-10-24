@@ -3,6 +3,7 @@
 #include <BRep_ImplicitCylinderSection.hxx>
 #include <BRep_ImplicitTool.hxx>
 #include <BRep_Builder.hxx>
+#include <BRep_Tool.hxx>
 #include <Geom_ImplicitGyroid.hxx>
 #include <Standard_AbortiveTransaction.hxx>
 #include <Standard_DomainError.hxx>
@@ -181,4 +182,58 @@ TEST(BRepImplicitCylinderSection, PeriodicOpenEndsBelongOnlyToHeightBoundary)
   // A near/exact zero on a grid/seam endpoint must remain unresolved.
   s.AngleMinimum = 0; s.AngleMaximum = 2 * std::acos(-1.);
   EXPECT_FALSE(Section::TracePeriodic(field(std::sin(std::acos(-1.) / 10)), s).Resolved);
+}
+
+TEST(BRepImplicitCylinderSection, EndCapRootsRetainOwnedVertexAndCurveIdentity)
+{
+  const auto face = field();
+  auto s = settings();
+  s.Radius = .5; s.AngleMinimum = 3;
+  s.AngleMaximum = s.AngleMinimum + 2 * std::acos(-1.);
+  s.HeightMinimum = 0; s.HeightMaximum = .5;
+  const auto result = Section::TracePeriodicBoundary(face, s);
+  ASSERT_TRUE(result.Section.Resolved);
+  ASSERT_TRUE(result.BoundaryIncidenceVerified);
+  ASSERT_EQ(result.Roots.size(), 4);
+  ASSERT_EQ(result.CurveRoots.size(), result.Section.Curves.size());
+  std::vector<int> uses(result.Roots.size(), 0);
+  std::array<int, 2> caps {{0, 0}};
+  for (size_t index = 0; index < result.Roots.size(); ++index)
+  {
+    const auto& root = result.Roots[index];
+    ++caps[root.HeightBoundary];
+    EXPECT_FALSE(root.Vertex.IsNull());
+    const auto p = BRep_Tool::Pnt(root.Vertex);
+    const double tolerance = BRep_Tool::Tolerance(root.Vertex);
+    EXPECT_NEAR(std::hypot(p.X(), p.Y()), s.Radius, 1.e-13);
+    EXPECT_EQ(p.Z(), root.HeightBoundary == 0 ? s.HeightMinimum : s.HeightMaximum);
+    EXPECT_LE(p.Distance(root.First), tolerance);
+    EXPECT_LE(p.Distance(root.Last), tolerance);
+    EXPECT_GE(root.AngleLast, root.AngleFirst);
+    EXPECT_LE(s.Radius * (root.AngleLast - root.AngleFirst), .1 / 32 + 1.e-14);
+    EXPECT_LE(BRep_ImplicitTool::Value(face, root.First) * BRep_ImplicitTool::Value(face, root.Last), 0);
+    if (index && root.HeightBoundary == result.Roots[index - 1].HeightBoundary)
+      EXPECT_GT(root.AngleFirst, result.Roots[index - 1].AngleLast);
+  }
+  EXPECT_EQ(caps[0], 2); EXPECT_EQ(caps[1], 2);
+  for (size_t index = 0; index < result.CurveRoots.size(); ++index)
+  {
+    const auto& curve = result.Section.Curves[index];
+    ASSERT_FALSE(curve.Closed);
+    for (int end = 0; end < 2; ++end)
+    {
+      const size_t id = result.CurveRoots[index][end];
+      ASSERT_GT(id, 0); ASSERT_LE(id, result.Roots.size());
+      ++uses[id - 1];
+      EXPECT_EQ(BRep_Tool::Pnt(result.Roots[id - 1].Vertex).Distance(
+        end == 0 ? curve.Points.front() : curve.Points.back()), 0);
+    }
+  }
+  for (auto count : uses) EXPECT_EQ(count, 1);
+  auto copy = result;
+  EXPECT_TRUE(copy.Roots.front().Vertex.IsSame(result.Roots.front().Vertex));
+  s.MaximumCells = 4;
+  const auto failed = Section::TracePeriodicBoundary(face, s);
+  EXPECT_FALSE(failed.Section.Resolved); EXPECT_FALSE(failed.BoundaryIncidenceVerified);
+  EXPECT_TRUE(failed.Roots.empty()); EXPECT_TRUE(failed.CurveRoots.empty());
 }

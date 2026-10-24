@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only WITH OCCT-exception-1.0
 #include <BRep_ImplicitCylinderSection.hxx>
 #include <BRep_ImplicitTool.hxx>
+#include <BRep_Builder.hxx>
 #include <BRep_TImplicitFace.hxx>
 #include <Geom_ImplicitGyroid.hxx>
 #include <Standard_DomainError.hxx>
@@ -48,8 +49,13 @@ struct Edge { int state = 0; size_t vertex = 0; }; // empty, unique root, unreso
 
 Section::Result pass(const TopoDS_Face& face, const Section::Settings& s,
                      int n, double lipschitz, double hessian, double reserve, double precision,
-                     bool periodic)
+                     bool periodic, Section::BoundaryResult* details = nullptr)
 {
+  if (details)
+  {
+    details->Roots.clear(); details->CurveRoots.clear();
+    details->BoundaryIncidenceVerified = false;
+  }
   Section::Result result;
   result.Resolution = n;
   const Chart chart {s};
@@ -73,6 +79,7 @@ Section::Result pass(const TopoDS_Face& face, const Section::Settings& s,
     }
   std::vector<gp_Pnt> points;
   std::vector<bool> boundary;
+  std::vector<std::pair<size_t, Section::BoundaryRoot>> capRoots;
   std::vector<Edge> horizontal(size_t(n) * width), vertical(size_t(n) * width);
   const auto edge = [&](int i, int j, bool alongU) {
     if ((size_t(j) * width + i) % 256 == 0) checkpoint(s);
@@ -113,6 +120,17 @@ Section::Result pass(const TopoDS_Face& face, const Section::Settings& s,
     const auto p = chart.point(u + (alongU ? du * t : 0), v + (alongU ? 0 : dv * t));
     e.state = 1; e.vertex = points.size(); points.push_back(p);
     boundary.push_back(alongU ? j == 0 || j == n : !periodic && (i == 0 || i == n));
+    if (details && alongU && (j == 0 || j == n))
+    {
+      Section::BoundaryRoot root;
+      root.AngleFirst = (u + du * low) / s.Radius;
+      root.AngleLast = (u + du * high) / s.Radius;
+      root.First = chart.point(u + du * low, v);
+      root.Last = chart.point(u + du * high, v);
+      root.HeightBoundary = j == 0 ? 0 : 1;
+      BRep_Builder().MakeVertex(root.Vertex, p, bracket * .5 + precision);
+      capRoots.emplace_back(e.vertex, std::move(root));
+    }
     result.MaximumResidual = std::max(result.MaximumResidual, std::abs(BRep_ImplicitTool::Value(face, p)));
     result.MaximumRootBracket = std::max(result.MaximumRootBracket, bracket);
     return e;
@@ -161,6 +179,7 @@ Section::Result pass(const TopoDS_Face& face, const Section::Settings& s,
     if (!adjacent[index].empty() && adjacent[index].size() != 2
         && !(boundary[index] && adjacent[index].size() == 1)) ++result.GraphDefects;
   std::vector<bool> used(segments.size(), false);
+  std::vector<std::array<size_t, 2>> curveEnds;
   const auto walk = [&](size_t start, size_t next) {
     BRep_ImplicitPlaneSection::Curve curve;
     curve.Points.push_back(points[start]);
@@ -176,16 +195,54 @@ Section::Result pass(const TopoDS_Face& face, const Section::Settings& s,
       if (!found) break;
     }
     result.Curves.push_back(std::move(curve));
+    curveEnds.push_back({start, current});
   };
   for (size_t i = 0; i < adjacent.size(); ++i)
     if (adjacent[i].size() == 1 && !used[adjacent[i][0]]) walk(i, adjacent[i][0]);
   for (size_t i = 0; i < segments.size(); ++i) if (!used[i]) walk(segments[i].first, i);
   result.Resolved = result.UnresolvedCells == 0 && result.GraphDefects == 0;
+  if (details && result.Resolved)
+  {
+    std::sort(capRoots.begin(), capRoots.end(), [](const auto& a, const auto& b) {
+      return a.second.HeightBoundary != b.second.HeightBoundary
+        ? a.second.HeightBoundary < b.second.HeightBoundary
+        : a.second.AngleFirst < b.second.AngleFirst;
+    });
+    std::vector<size_t> ids(points.size(), 0), uses(capRoots.size(), 0);
+    for (size_t index = 0; index < capRoots.size(); ++index)
+    {
+      ids[capRoots[index].first] = index + 1;
+      details->Roots.push_back(capRoots[index].second);
+    }
+    bool verified = true;
+    for (size_t index = 0; index < curveEnds.size(); ++index)
+    {
+      const auto& ends = curveEnds[index];
+      const std::array<size_t, 2> roots {{ids[ends[0]], ids[ends[1]]}};
+      if (result.Curves[index].Closed)
+        verified &= roots[0] == 0 && roots[1] == 0;
+      else
+        for (auto id : roots)
+        {
+          verified &= id != 0;
+          if (id) ++uses[id - 1];
+        }
+      details->CurveRoots.push_back(roots);
+    }
+    for (auto count : uses) verified &= count == 1;
+    if (!verified)
+    {
+      result.Resolved = false; ++result.GraphDefects;
+      details->Roots.clear(); details->CurveRoots.clear();
+    }
+    details->BoundaryIncidenceVerified = verified;
+  }
   return result;
 }
 } // namespace
 
-static Section::Result traceCylinder(const TopoDS_Face& face, const Section::Settings& s, bool periodic)
+static Section::Result traceCylinder(const TopoDS_Face& face, const Section::Settings& s, bool periodic,
+                                     Section::BoundaryResult* details = nullptr)
 {
   const auto data = occ::down_cast<BRep_TImplicitFace>(face.TShape());
   if (data.IsNull() || !data->ExcludedDomains().empty() || typeid(*data) != typeid(BRep_TImplicitFace)
@@ -236,7 +293,7 @@ static Section::Result traceCylinder(const TopoDS_Face& face, const Section::Set
   Section::Result result;
   for (int n = s.MinimumCells; n <= s.MaximumCells; n *= 2)
   {
-    result = pass(face, s, n, lipschitz, hessian, reserve, precision, periodic);
+    result = pass(face, s, n, lipschitz, hessian, reserve, precision, periodic, details);
     if (result.Resolved) return result;
   }
   if (periodic)
@@ -244,7 +301,7 @@ static Section::Result traceCylinder(const TopoDS_Face& face, const Section::Set
     {
       const int n = s.MaximumCells * numerator / 8;
       if (n < s.MinimumCells) continue;
-      auto candidate = pass(face, s, n, lipschitz, hessian, reserve, precision, true);
+      auto candidate = pass(face, s, n, lipschitz, hessian, reserve, precision, true, details);
       if (candidate.Resolved) return candidate;
     }
   return result;
@@ -258,4 +315,16 @@ Section::Result Section::Trace(const TopoDS_Face& face, const Settings& settings
 Section::Result Section::TracePeriodic(const TopoDS_Face& face, const Settings& settings)
 {
   return traceCylinder(face, settings, true);
+}
+
+Section::BoundaryResult Section::TracePeriodicBoundary(const TopoDS_Face& face, const Settings& settings)
+{
+  BoundaryResult result;
+  result.Section = traceCylinder(face, settings, true, &result);
+  if (!result.Section.Resolved)
+  {
+    result.Roots.clear(); result.CurveRoots.clear();
+    result.BoundaryIncidenceVerified = false;
+  }
+  return result;
 }
