@@ -16,6 +16,7 @@
 #include <Geom_BSplineCurve.hxx>
 #include <Geom2d_BSplineCurve.hxx>
 #include <Geom2d_Circle.hxx>
+#include <Geom2d_Line.hxx>
 #include <NCollection_Array1.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
@@ -1171,5 +1172,149 @@ BRepClass3d_ImplicitCylinder::ShellTolerance BRepClass3d_ImplicitCylinder::Check
   catch (const Standard_AbortiveTransaction&) { throw; }
   catch (const Standard_Failure& error)
   { result.Reason = error.what() ? error.what() : "cylinder_shell_tolerance_unresolved"; }
+  return result;
+}
+
+BRepClass3d_ImplicitCylinder::ShellGeometry BRepClass3d_ImplicitCylinder::CheckShellGeometry(
+  const TopoDS_Face& face, const Settings& s, bool negative, size_t maximumNestingTests,
+  int maximumDepth, size_t maximumCells, int maximumGeometryDepth,
+  size_t maximumGeometryCells, size_t maximumSegmentTests)
+{
+  require(maximumGeometryDepth >= 0 && maximumGeometryDepth <= 32
+            && maximumGeometryCells > 0 && maximumGeometryCells <= 2000000
+            && maximumSegmentTests > 0 && maximumSegmentTests <= 50000000,
+          "invalid_cylinder_geometry_budget");
+  ShellGeometry result;
+  result.Source = CheckShellTolerance(face, s, negative, maximumNestingTests, maximumDepth, maximumCells);
+  if (!result.Source.ToleranceVerified) { result.Reason = result.Source.Reason; return result; }
+  try
+  {
+    const auto& reference = result.Source.Source.Source.Reference;
+    const auto& axial = reference.Source;
+    const auto& sides = axial.Boundary.Source;
+    const auto& chart = sides.Boundary.Source.Chart;
+    require(sides.Faces.size() == 1 && axial.MonotonicityVerified
+              && reference.MathematicalCorrespondenceVerified, "cylinder_geometry_reference_missing");
+    const auto data = occ::down_cast<BRep_TImplicitFace>(face.TShape());
+    const auto* field = static_cast<const Geom_ImplicitGyroid*>(data->Field().get());
+    const double scale = std::abs((face.Location() * data->Location()).Transformation().ScaleFactor());
+    const double lipschitz = field->LipschitzBound() / scale;
+    const double precision = 8192 * std::numeric_limits<double>::epsilon()
+      * (1 + s.Radius + std::abs(s.HeightMinimum) + std::abs(s.HeightMaximum)
+         + s.Frame.Location().Distance(gp_Pnt()))
+      * (1 + std::abs(s.AngleMinimum) + std::abs(s.AngleMaximum));
+    const double reserve = precision * (1 + lipschitz)
+      + 8192 * std::numeric_limits<double>::epsilon() * (1 + std::abs(field->IsoValue()));
+    require(std::isfinite(reserve) && precision < s.DistanceTolerance, "cylinder_geometry_precision");
+    const double classificationReserve = std::max({precision, BRep_Tool::Tolerance(sides.Faces[0]),
+      result.Source.MaximumEdgeTolerance, result.Source.MaximumVertexTolerance});
+    struct Segment { gp_Pnt2d A, B; };
+    std::vector<Segment> segments;
+    const auto scaled = [&](const gp_Pnt2d& p) { return gp_Pnt2d(s.Radius * p.X(), p.Y()); };
+    const auto append = [&](const gp_Pnt2d& a, const gp_Pnt2d& b) {
+      const auto first = scaled(a), last = scaled(b);
+      require(std::isfinite(first.X()) && std::isfinite(first.Y()) && std::isfinite(last.X())
+                && std::isfinite(last.Y()) && first.Distance(last) > precision,
+              "cylinder_geometry_trim_segment");
+      segments.push_back({first, last});
+    };
+    for (TopExp_Explorer it(sides.Faces[0], TopAbs_EDGE); it.More(); it.Next())
+    {
+      checkpoint(s);
+      double first, last;
+      const auto pc = BRep_Tool::CurveOnSurface(TopoDS::Edge(it.Current()), sides.Faces[0], first, last);
+      require(!pc.IsNull(), "cylinder_geometry_missing_trim");
+      const auto bs = occ::down_cast<Geom2d_BSplineCurve>(pc);
+      if (!bs.IsNull())
+      {
+        require(bs->Degree() == 1, "cylinder_geometry_nonlinear_trim");
+        for (int i = 2; i <= bs->NbPoles(); ++i) append(bs->Pole(i - 1), bs->Pole(i));
+      }
+      else
+      {
+        require(!occ::down_cast<Geom2d_Line>(pc).IsNull(), "cylinder_geometry_unsupported_trim");
+        append(pc->Value(first), pc->Value(last));
+      }
+    }
+    require(!segments.empty(), "cylinder_geometry_empty_trim");
+    const auto distance = [&](double u, double v) {
+      double nearest = std::numeric_limits<double>::infinity();
+      for (const auto& segment : segments)
+      {
+        if ((result.SegmentTests % 256) == 0) checkpoint(s);
+        require(result.SegmentTests < maximumSegmentTests, "cylinder_geometry_segment_budget");
+        ++result.SegmentTests;
+        const double dx = segment.B.X() - segment.A.X(), dy = segment.B.Y() - segment.A.Y();
+        const double length = std::hypot(dx, dy), x = dx / length, y = dy / length;
+        const double along = std::clamp((u - segment.A.X()) * x + (v - segment.A.Y()) * y, 0., length);
+        nearest = std::min(nearest, std::hypot(u - segment.A.X() - along * x,
+                                              v - segment.A.Y() - along * y));
+      }
+      return nearest;
+    };
+    const auto rootDistance = [&](double u, double v) {
+      double low = s.HeightMinimum, high = s.HeightMaximum;
+      const double target = s.DistanceTolerance / 64;
+      for (int i = 0; i < 128 && high - low > target; ++i)
+      {
+        checkpoint(s);
+        const double middle = low + (high - low) * .5;
+        const double value = axial.Direction * BRep_ImplicitTool::Value(face, chart.Surface->Value(u / s.Radius, middle));
+        require(std::isfinite(value), "cylinder_geometry_root_nonfinite");
+        if (value > reserve) high = middle;
+        else if (value < -reserve) low = middle;
+        else
+        {
+          const double error = (std::abs(value) + reserve) / axial.DerivativeLowerBound;
+          const double a = std::max(low, middle - error), b = std::min(high, middle + error);
+          require(a <= b && b - a < high - low, "cylinder_geometry_root_precision");
+          low = a; high = b;
+        }
+      }
+      require(high - low <= target, "cylinder_geometry_root_unresolved");
+      return std::max(std::abs(v - low), std::abs(v - high));
+    };
+    struct Cell { double U0, U1, V0, V1; int Depth; };
+    std::vector<Cell> pending {{s.Radius * s.AngleMinimum, s.Radius * s.AngleMaximum,
+                               s.HeightMinimum, s.HeightMaximum, 0}};
+    double mathematical = 0, native = 0;
+    while (!pending.empty())
+    {
+      checkpoint(s);
+      require(result.Cells < maximumGeometryCells, "cylinder_geometry_cell_budget"); ++result.Cells;
+      const auto cell = pending.back(); pending.pop_back();
+      const double du = cell.U1 - cell.U0, dv = cell.V1 - cell.V0;
+      const double u = cell.U0 + du * .5, v = cell.V0 + dv * .5;
+      const double radius = std::hypot(du, dv) * .5 + precision;
+      const double q = (negative ? -1 : 1) * BRep_ImplicitTool::Value(face, chart.Surface->Value(u / s.Radius, v));
+      require(std::isfinite(q) && std::isfinite(radius), "cylinder_geometry_cell_nonfinite");
+      const double uncertainty = lipschitz * radius + reserve;
+      const bool mathIn = q > uncertainty, mathOut = q < -uncertainty;
+      const double nearest = distance(u, v);
+      const auto state = BRepClass_FaceClassifier(sides.Faces[0], gp_Pnt2d(u / s.Radius, v), precision).State();
+      const bool nativeIn = state == TopAbs_IN && nearest > radius + classificationReserve;
+      const bool nativeOut = state == TopAbs_OUT && nearest > radius + classificationReserve;
+      const bool nativeWitness = state == TopAbs_IN && nearest > classificationReserve;
+      double toNative = 0, toMath = 0;
+      if (!mathOut && !nativeIn) toNative = radius + precision + (nativeWitness ? 0 : nearest);
+      if (!nativeOut && !mathIn) toMath = radius + precision + (q > reserve ? 0 : rootDistance(u, v));
+      require(std::isfinite(toNative) && std::isfinite(toMath), "cylinder_geometry_witness_nonfinite");
+      if (toNative <= s.DistanceTolerance && toMath <= s.DistanceTolerance)
+      { mathematical = std::max(mathematical, toNative); native = std::max(native, toMath); continue; }
+      require(cell.Depth < maximumGeometryDepth, "cylinder_geometry_depth_budget");
+      auto a = cell, b = cell; a.Depth = b.Depth = cell.Depth + 1;
+      if (du >= dv) { require(u > cell.U0 && u < cell.U1, "cylinder_geometry_split_precision"); a.U1 = b.U0 = u; }
+      else { require(v > cell.V0 && v < cell.V1, "cylinder_geometry_split_precision"); a.V1 = b.V0 = v; }
+      pending.push_back(b); pending.push_back(a);
+    }
+    result.MathematicalToNativeBound = mathematical;
+    result.NativeToMathematicalBound = native;
+    result.BoundaryBound = std::max({mathematical, native, result.Source.FieldWireBound});
+    require(result.BoundaryBound <= s.DistanceTolerance, "cylinder_geometry_combined_bound");
+    result.BoundaryVerified = true; result.Reason = "cylinder_shell_boundary_geometry_verified";
+  }
+  catch (const Standard_AbortiveTransaction&) { throw; }
+  catch (const Standard_Failure& error)
+  { result.Reason = error.what() ? error.what() : "cylinder_shell_geometry_unresolved"; }
   return result;
 }

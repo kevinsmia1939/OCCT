@@ -166,5 +166,22 @@ public:
     const BRep_ImplicitCylinderSection::Settings&, bool negative = true,
     size_t maximumNestingTests = 2000000, int maximumDepth = 24,
     size_t maximumCells = 200000);
+  struct ShellGeometry
+  {
+    ShellTolerance Source;
+    bool BoundaryVerified = false;
+    double MathematicalToNativeBound = 0, NativeToMathematicalBound = 0, BoundaryBound = 0;
+    size_t Cells = 0, SegmentTests = 0;
+    std::string Reason;
+  };
+  //! Bidirectional boundary-set bounds for the qualified full-disk material.
+  //! Covers the entire cylindrical chart using field cones and native trim
+  //! witnesses. Exact field/cap correspondence and stored wire bounds are
+  //! inherited. Does not construct a solid or qualify volume/general consumers.
+  Standard_EXPORT static ShellGeometry CheckShellGeometry(const TopoDS_Face&,
+    const BRep_ImplicitCylinderSection::Settings&, bool negative = true,
+    size_t maximumNestingTests = 2000000, int maximumDepth = 24,
+    size_t maximumCells = 200000, int maximumGeometryDepth = 24,
+    size_t maximumGeometryCells = 200000, size_t maximumSegmentTests = 20000000);
 };
 #endif

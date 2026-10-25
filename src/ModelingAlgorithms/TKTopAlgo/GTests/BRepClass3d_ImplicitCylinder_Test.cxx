@@ -9,6 +9,7 @@
 #include <BRepClass_FaceClassifier.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepGProp.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
 #include <GProp_GProps.hxx>
 #include <Geom_ImplicitGyroid.hxx>
 #include <Geom2d_Curve.hxx>
@@ -517,6 +518,73 @@ TEST(BRepClass3dImplicitCylinder, ShellToleranceSeparatesSourcePolicyFromCombine
   ASSERT_GT(calls, 2); --calls;
   s.WorkCheckpoint = [] { if (--calls == 0) throw Standard_AbortiveTransaction("late tolerance cancellation"); };
   EXPECT_THROW(Ops::CheckShellTolerance(field(), s), Standard_AbortiveTransaction);
+}
+
+TEST(BRepClass3dImplicitCylinder, ShellGeometryBoundsBothDirectionsOverTheCylinder)
+{
+  const auto source = field();
+  for (double tolerance : {.1, .05}) for (bool negative : {false, true})
+  {
+    auto s = settings(); s.AngleMinimum = .27; s.AngleMaximum = .27 + 2 * std::acos(-1.);
+    s.HeightMinimum = -1.7; s.HeightMaximum = 1.3; s.DistanceTolerance = tolerance;
+    const auto result = Ops::CheckShellGeometry(source, s, negative);
+    ASSERT_TRUE(result.BoundaryVerified) << result.Reason << " cells " << result.Cells << " tests " << result.SegmentTests;
+    EXPECT_GT(result.Cells, 1); EXPECT_GT(result.SegmentTests, 1);
+    EXPECT_LE(result.MathematicalToNativeBound, tolerance);
+    EXPECT_LE(result.NativeToMathematicalBound, tolerance);
+    EXPECT_LE(result.BoundaryBound, tolerance);
+    EXPECT_GE(result.BoundaryBound, result.Source.FieldWireBound);
+    const auto& sides = result.Source.Source.Source.Reference.Source.Boundary.Source;
+    const double k = 2 * std::acos(-1.) / 10;
+    for (int i = 0; i < 24; ++i)
+    {
+      const double angle = s.AngleMinimum + 2 * std::acos(-1.) * (i + .37) / 24;
+      const double x = s.Radius * std::cos(angle), y = s.Radius * std::sin(angle);
+      const double a = std::sin(k * y), b = std::cos(k * x), c = std::sin(k * x) * std::cos(k * y) - .21;
+      const double root = (std::atan2(b, a) - std::acos(-c / std::hypot(a, b))) / k;
+      TopoDS_Vertex point; BRep_Builder().MakeVertex(point, gp_Pnt(x, y, root), 1.e-10);
+      BRepExtrema_DistShapeShape distance(point, sides.Faces[0]);
+      ASSERT_TRUE(distance.IsDone());
+      EXPECT_LE(distance.Value(), result.MathematicalToNativeBound + 1.e-8);
+      for (int j = 0; j < 12; ++j)
+      {
+        const double z = s.HeightMinimum + (s.HeightMaximum - s.HeightMinimum) * (j + .41) / 12;
+        const auto state = BRepClass_FaceClassifier(sides.Faces[0], gp_Pnt2d(angle, z), 1.e-9).State();
+        if (state == TopAbs_IN && ((negative && z > root) || (!negative && z < root)))
+          EXPECT_LE(std::abs(z - root), result.NativeToMathematicalBound + 1.e-8);
+      }
+    }
+  }
+}
+
+TEST(BRepClass3dImplicitCylinder, ShellGeometryRefusesBudgetsAndSupportsPlacementCancellation)
+{
+  auto s = settings(); s.AngleMinimum = .27; s.AngleMaximum = .27 + 2 * std::acos(-1.);
+  s.HeightMinimum = -1.7; s.HeightMaximum = 1.3;
+  const auto source = field();
+  const auto cells = Ops::CheckShellGeometry(source, s, true, 2000000, 24, 200000, 24, 1);
+  EXPECT_FALSE(cells.BoundaryVerified); EXPECT_EQ(cells.Cells, 1); EXPECT_EQ(cells.BoundaryBound, 0);
+  const auto segments = Ops::CheckShellGeometry(source, s, true, 2000000, 24, 200000, 24, 200000, 1);
+  EXPECT_FALSE(segments.BoundaryVerified); EXPECT_EQ(segments.SegmentTests, 1);
+  EXPECT_FALSE(Ops::CheckShellGeometry(source, s, true, 2000000, 24, 200000, 0).BoundaryVerified);
+  EXPECT_THROW(Ops::CheckShellGeometry(source, s, true, 2000000, 24, 200000, 24, 0), Standard_DomainError);
+  gp_Trsf move; move.SetTranslation(gp_Vec(1.2, -.4, 2.1));
+  auto placed = source; placed.Location(TopLoc_Location(move)); s.Frame.Transform(move);
+  const auto translated = Ops::CheckShellGeometry(placed, s);
+  ASSERT_TRUE(translated.BoundaryVerified) << translated.Reason;
+  auto reverse = settings(); reverse.AngleMinimum = .27; reverse.AngleMaximum = .27 + 2 * std::acos(-1.);
+  reverse.Frame = gp_Ax2(gp_Pnt(), gp_Dir(0, 0, -1), gp_Dir(1, 0, 0));
+  reverse.HeightMinimum = -1.3; reverse.HeightMaximum = 1.7;
+  const auto reversed = Ops::CheckShellGeometry(source, reverse);
+  ASSERT_TRUE(reversed.BoundaryVerified) << reversed.Reason;
+  const auto partial = Ops::CheckShellGeometry(source, settings());
+  EXPECT_FALSE(partial.BoundaryVerified); EXPECT_EQ(partial.BoundaryBound, 0);
+  static size_t calls = 0;
+  calls = 0; s.WorkCheckpoint = [] { ++calls; };
+  ASSERT_TRUE(Ops::CheckShellGeometry(placed, s).BoundaryVerified);
+  ASSERT_GT(calls, 2); --calls;
+  s.WorkCheckpoint = [] { if (--calls == 0) throw Standard_AbortiveTransaction("late geometry cancellation"); };
+  EXPECT_THROW(Ops::CheckShellGeometry(placed, s), Standard_AbortiveTransaction);
 }
 
 TEST(BRepClass3dImplicitCylinder, NativeCapsPartitionDiskAndShareSideRootVertices)
