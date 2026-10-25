@@ -60,8 +60,10 @@ BRep_ImplicitPlaneSection::Result pass(const TopoDS_Face&                       
                                        double                                     hessian,
                                        double                                     fieldReserve,
                                        double                                     gradientReserve,
-                                       double                                     coordinateReserve)
+                                       double                                     coordinateReserve,
+                                       BRep_ImplicitPlaneSection::GraphResult* graph = nullptr)
 {
+  if (graph) { graph->Vertices.clear(); graph->Arcs.clear(); graph->VertexRadius = 0; }
   using Section = BRep_ImplicitPlaneSection;
   checkpoint(settings);
   Section::Result result;
@@ -205,8 +207,9 @@ BRep_ImplicitPlaneSection::Result pass(const TopoDS_Face&                       
     else
     {
       double low = 0, high = 1, fLow = fa;
+      const double rootTolerance = settings.DistanceTolerance / (graph ? 4096 : 16);
       for (int iteration = 0;
-           iteration < 100 && (high - low) * length > settings.DistanceTolerance / 16;
+           iteration < 100 && (high - low) * length > rootTolerance;
            ++iteration)
       {
         const double t = low + (high - low) * .5;
@@ -224,7 +227,7 @@ BRep_ImplicitPlaneSection::Result pass(const TopoDS_Face&                       
         }
       }
       const double bracket = (high - low) * length;
-      if (bracket > settings.DistanceTolerance / 16)
+      if (bracket > rootTolerance)
         answer.State = 2;
       else
       {
@@ -312,6 +315,7 @@ BRep_ImplicitPlaneSection::Result pass(const TopoDS_Face&                       
           && diagonal + coordinateReserve <= settings.DistanceTolerance)
       {
         segments.emplace_back(roots[0], roots[1]);
+        if (graph) graph->Arcs.push_back({i, j, roots[0], roots[1]});
         result.GeometricBound = std::max(result.GeometricBound, diagonal + coordinateReserve);
       }
       else
@@ -378,12 +382,18 @@ BRep_ImplicitPlaneSection::Result pass(const TopoDS_Face&                       
     if (!used[i])
       walk(segments[i].first, i);
   result.Resolved = result.UnresolvedCells == 0 && result.GraphDefects == 0;
+  if (graph && result.Resolved)
+  {
+    graph->Vertices = vertices;
+    graph->VertexRadius = result.MaximumRootBracket * .5 + coordinateReserve;
+  }
   return result;
 }
 } // namespace
 
-BRep_ImplicitPlaneSection::Result BRep_ImplicitPlaneSection::Trace(const TopoDS_Face& face,
-                                                                   const Settings&    settings)
+static BRep_ImplicitPlaneSection::Result tracePlane(const TopoDS_Face& face,
+  const BRep_ImplicitPlaneSection::Settings& settings,
+  BRep_ImplicitPlaneSection::GraphResult* graph = nullptr)
 {
   const auto data = occ::down_cast<BRep_TImplicitFace>(face.TShape());
   if (data.IsNull() || !data->ExcludedDomains().empty() || typeid(*data) != typeid(BRep_TImplicitFace)
@@ -450,7 +460,7 @@ BRep_ImplicitPlaneSection::Result BRep_ImplicitPlaneSection::Trace(const TopoDS_
   const double gradientReserve = 128 * epsilon * lipschitz + hessian * coordinateReserve;
   require(std::isfinite(fieldReserve) && std::isfinite(gradientReserve),
           "Section reserve overflow");
-  Result result;
+  BRep_ImplicitPlaneSection::Result result;
   for (int n = settings.MinimumCells; n <= settings.MaximumCells; n *= 2)
   {
     result = pass(face,
@@ -461,7 +471,7 @@ BRep_ImplicitPlaneSection::Result BRep_ImplicitPlaneSection::Trace(const TopoDS_
                   hessian,
                   fieldReserve,
                   gradientReserve,
-                  coordinateReserve);
+                  coordinateReserve, graph);
     if (result.Resolved)
       return result;
     if (settings.AllowExactLatticeNodes && n - 1 >= settings.MinimumCells)
@@ -469,7 +479,7 @@ BRep_ImplicitPlaneSection::Result BRep_ImplicitPlaneSection::Trace(const TopoDS_
       // Odd grids avoid repeated unrecognized eighth-period samples without
       // moving the rectangle, changing the field or enlarging the axis budget.
       auto candidate = pass(face, settings, n - 1, *field, lipschitz, hessian,
-                            fieldReserve, gradientReserve, coordinateReserve);
+                            fieldReserve, gradientReserve, coordinateReserve, graph);
       if (candidate.Resolved)
         return candidate;
     }
@@ -491,9 +501,25 @@ BRep_ImplicitPlaneSection::Result BRep_ImplicitPlaneSection::Trace(const TopoDS_
                           hessian,
                           fieldReserve,
                           gradientReserve,
-                          coordinateReserve);
+                          coordinateReserve, graph);
     if (candidate.Resolved)
       return candidate;
   }
+  return result;
+}
+
+BRep_ImplicitPlaneSection::Result BRep_ImplicitPlaneSection::Trace(const TopoDS_Face& face,
+  const Settings& settings)
+{
+  return tracePlane(face, settings);
+}
+
+BRep_ImplicitPlaneSection::GraphResult BRep_ImplicitPlaneSection::TraceGraph(
+  const TopoDS_Face& face, const Settings& settings)
+{
+  GraphResult result;
+  result.Section = tracePlane(face, settings, &result);
+  if (!result.Section.Resolved)
+  { result.Vertices.clear(); result.Arcs.clear(); result.VertexRadius = 0; }
   return result;
 }

@@ -106,7 +106,9 @@ Section::Result pass(const TopoDS_Face& face, const Section::Settings& s,
     }
     if (!monotone) { e.state = 2; return e; }
     double low = 0, high = 1, first = values[a];
-    for (int iteration = 0; iteration < 100 && (high - low) * length > s.DistanceTolerance / 32;
+    const double rootTolerance = s.DistanceTolerance
+      / (details && alongU && (j == 0 || j == n) ? 65536 : 32);
+    for (int iteration = 0; iteration < 100 && (high - low) * length > rootTolerance;
          ++iteration)
     {
       const double t = low + (high - low) * .5;
@@ -117,7 +119,7 @@ Section::Result pass(const TopoDS_Face& face, const Section::Settings& s,
       else { low = t; first = f; }
     }
     const double bracket = (high - low) * length;
-    if (bracket > s.DistanceTolerance / 32) { e.state = 2; return e; }
+    if (bracket > rootTolerance) { e.state = 2; return e; }
     const double t = low + (high - low) * .5;
     const auto p = chart.point(u + (alongU ? du * t : 0), v + (alongU ? 0 : dv * t));
     e.state = 1; e.vertex = points.size(); points.push_back(p);

@@ -68,5 +68,16 @@ public:
   //! Returns no edges unless every interval and root incidence passes.
   //! Does not construct cap regions, cylindrical faces, shells or solids.
   Standard_EXPORT static RingResult BuildBoundaryRings(const TopoDS_Face&, const Settings&);
+  struct DiskResult
+  {
+    BoundaryResult Boundary;
+    std::array<Result, 2> Disks;
+    std::array<std::vector<std::array<size_t, 2>>, 2> CurveRoots;
+    bool Verified = false; //!< Constrained contour/root incidence, NOT native cap/solid validity.
+  };
+  //! Trace both planar disks using accepted Cartesian cells and shared circle
+  //! root brackets. Includes interior closed contours; never proximity-welds.
+  //! Uncertain cut-cell attachment rejects; no partial disk curves on failure.
+  Standard_EXPORT static DiskResult TraceEndCapDisks(const TopoDS_Face&, const Settings&);
 };
 #endif

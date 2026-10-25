@@ -54,5 +54,20 @@ public:
   //! are supported. Errors reject invalid/unsupported inputs; valid but
   //! unresolved geometry returns Resolved=false, never an empty-success claim.
   Standard_EXPORT static Result Trace(const TopoDS_Face&, const Settings&);
+  struct CellArc
+  {
+    int U = 0, V = 0;
+    size_t First = 0, Last = 0; //!< Shared Vertices indices, zero-based.
+  };
+  struct GraphResult
+  {
+    Result Section;
+    std::vector<gp_Pnt> Vertices;
+    std::vector<CellArc> Arcs; //!< Accepted regular-cell arcs, not display-mesh segments.
+    double VertexRadius = 0; //!< Conservative global root-bracket halfwidth + coordinate reserve.
+  };
+  //! Retain accepted cell/root identities for constrained-domain tracing.
+  //! Unresolved queries publish no graph; no native trim/solid qualification.
+  Standard_EXPORT static GraphResult TraceGraph(const TopoDS_Face&, const Settings&);
 };
 #endif

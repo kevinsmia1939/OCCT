@@ -53,6 +53,32 @@ double distance(const gp_Pnt& point, const Section::Result& result)
     }
   return closest;
 }
+int analyticDiskWitnesses(const Section::Settings& s, int cap, double iso,
+                          const Section::Result& disk)
+{
+  const double k = 2 * std::acos(-1.) / 10;
+  const double z = s.Frame.Location().Z() + (cap == 0 ? s.HeightMinimum : s.HeightMaximum);
+  int witnesses = 0;
+  for (int i = 0; i <= 100; ++i)
+  {
+    const double localY = s.Radius * (2. * i / 100 - 1);
+    const double y = s.Frame.Location().Y() + localY;
+    const double a = std::cos(k * y), b = std::sin(k * z);
+    const double c = std::sin(k * y) * std::cos(k * z) - iso;
+    const double radius = std::hypot(a, b);
+    if (std::abs(c) > radius || radius == 0) continue;
+    const double phase = std::atan2(b, a), angle = std::asin(-c / radius);
+    for (double branch : {angle, std::acos(-1.) - angle})
+      for (int turn = -2; turn <= 2; ++turn)
+      {
+        const double x = (branch - phase + turn * 2 * std::acos(-1.)) / k;
+        if (std::hypot(x - s.Frame.Location().X(), localY) > s.Radius) continue;
+        ++witnesses;
+        EXPECT_LE(distance(gp_Pnt(x, y, z), disk), disk.GeometricBound + 1.e-10);
+      }
+  }
+  return witnesses;
+}
 }
 
 TEST(BRepImplicitCylinderSection, AnalyticHeightRootsAndPhysicalCoverage)
@@ -434,4 +460,125 @@ TEST(BRepImplicitCylinderSection, CylinderRestrictionGuardsProjectionRaysAndGeom
   TopoDS_Face restored; BRep_ImplicitIO::Read(record, restored);
   EXPECT_TRUE(BRep_ImplicitTool::IsInDomain(restored, gp_Pnt(.4, .3, .2).Transformed(pose)));
   EXPECT_FALSE(BRep_ImplicitTool::IsInDomain(restored, gp_Pnt(1.5, 1.5, 0).Transformed(pose)));
+}
+
+TEST(BRepImplicitCylinderSection, AcceptedPlaneGraphRetainsCellAndSharedRootIdentities)
+{
+  BRep_ImplicitPlaneSection::Settings s;
+  s.UMinimum = s.VMinimum = -.5; s.UMaximum = s.VMaximum = .5;
+  s.DistanceTolerance = .05;
+  const auto graph = BRep_ImplicitPlaneSection::TraceGraph(field(), s);
+  ASSERT_TRUE(graph.Section.Resolved);
+  ASSERT_FALSE(graph.Arcs.empty());
+  EXPECT_LE(graph.Section.GeometricBound, .05);
+  const double step = 1. / graph.Section.Resolution;
+  for (const auto& arc : graph.Arcs)
+    for (auto vertex : {arc.First, arc.Last})
+    {
+      ASSERT_LT(vertex, graph.Vertices.size());
+      const auto& p = graph.Vertices[vertex];
+      EXPECT_GE(p.X(), -.5 + step * arc.U - 1.e-12);
+      EXPECT_LE(p.X(), -.5 + step * (arc.U + 1) + 1.e-12);
+      EXPECT_GE(p.Y(), -.5 + step * arc.V - 1.e-12);
+      EXPECT_LE(p.Y(), -.5 + step * (arc.V + 1) + 1.e-12);
+    }
+  s.MaximumCells = 4;
+  const auto failed = BRep_ImplicitPlaneSection::TraceGraph(field(), s);
+  EXPECT_FALSE(failed.Section.Resolved); EXPECT_TRUE(failed.Vertices.empty()); EXPECT_TRUE(failed.Arcs.empty());
+}
+
+TEST(BRepImplicitCylinderSection, EndCapDisksAttachAllCircleRootsByCellIdentity)
+{
+  auto s = settings();
+  s.Radius = .5; s.AngleMinimum = 3; s.AngleMaximum = s.AngleMinimum + 2 * std::acos(-1.);
+  s.HeightMinimum = 0; s.HeightMaximum = .5;
+  const auto result = Section::TraceEndCapDisks(field(), s);
+  ASSERT_TRUE(result.Verified) << result.Disks[0].AmbiguousCells << "/" << result.Disks[0].GraphDefects
+    << "; " << result.Disks[1].AmbiguousCells << "/" << result.Disks[1].GraphDefects;
+  ASSERT_EQ(result.Boundary.Roots.size(), 4);
+  std::vector<int> uses(4, 0);
+  for (int cap = 0; cap < 2; ++cap)
+  {
+    const auto& disk = result.Disks[cap];
+    EXPECT_TRUE(disk.Resolved); EXPECT_LE(disk.GeometricBound, .1);
+    EXPECT_GT(analyticDiskWitnesses(s, cap, .21, disk), 10);
+    ASSERT_FALSE(disk.Curves.empty());
+    ASSERT_EQ(disk.Curves.size(), result.CurveRoots[cap].size());
+    for (size_t i = 0; i < disk.Curves.size(); ++i)
+    {
+      const auto& curve = disk.Curves[i];
+      EXPECT_FALSE(curve.Closed);
+      for (int end = 0; end < 2; ++end)
+      {
+        const auto id = result.CurveRoots[cap][i][end];
+        ASSERT_GT(id, 0); ASSERT_LE(id, 4); ++uses[id - 1];
+        EXPECT_EQ(result.Boundary.Roots[id - 1].HeightBoundary, cap);
+        EXPECT_EQ(BRep_Tool::Pnt(result.Boundary.Roots[id - 1].Vertex).Distance(
+          end == 0 ? curve.Points.front() : curve.Points.back()), 0);
+      }
+      for (const auto& p : curve.Points)
+      { EXPECT_LE(std::hypot(p.X(), p.Y()), .5 + 1.e-12); EXPECT_LE(std::abs(BRep_ImplicitTool::Value(field(), p)), .01); }
+    }
+  }
+  for (auto count : uses) EXPECT_EQ(count, 1);
+  s.MaximumCells = 4;
+  const auto failed = Section::TraceEndCapDisks(field(), s);
+  EXPECT_FALSE(failed.Verified);
+  for (int cap = 0; cap < 2; ++cap)
+  { EXPECT_FALSE(failed.Disks[cap].Resolved); EXPECT_TRUE(failed.Disks[cap].Curves.empty()); EXPECT_TRUE(failed.CurveRoots[cap].empty()); }
+}
+
+TEST(BRepImplicitCylinderSection, EndCapDisksRetainClosedInteriorIslandsWithoutCircleRoots)
+{
+  auto s = settings();
+  s.Frame.SetLocation(gp_Pnt(2.5, 1.25, 0)); s.Radius = 1.5;
+  s.AngleMinimum = 3; s.AngleMaximum = s.AngleMinimum + 2 * std::acos(-1.);
+  s.HeightMinimum = 0; s.HeightMaximum = .02;
+  const auto result = Section::TraceEndCapDisks(field(1.3), s);
+  ASSERT_TRUE(result.Verified) << result.Boundary.Section.UnresolvedCells << "; "
+    << result.Disks[0].UnresolvedCells << "/" << result.Disks[0].GraphDefects;
+  EXPECT_TRUE(result.Boundary.Roots.empty());
+  for (int cap = 0; cap < 2; ++cap)
+  {
+    ASSERT_EQ(result.Disks[cap].Curves.size(), 1);
+    EXPECT_TRUE(result.Disks[cap].Curves[0].Closed);
+    EXPECT_EQ(result.CurveRoots[cap][0][0], 0); EXPECT_EQ(result.CurveRoots[cap][0][1], 0);
+    EXPECT_GT(result.Disks[cap].Curves[0].Points.size(), 10);
+    EXPECT_GT(analyticDiskWitnesses(s, cap, 1.3, result.Disks[cap]), 10);
+  }
+}
+
+TEST(BRepImplicitCylinderSection, EndCapDisksHandleInteriorZeroEmptyPlacementAndCancellation)
+{
+  auto s = settings();
+  s.Radius = .5; s.AngleMinimum = 3; s.AngleMaximum = s.AngleMinimum + 2 * std::acos(-1.);
+  s.HeightMinimum = 0; s.HeightMaximum = .5;
+  const auto zero = Section::TraceEndCapDisks(field(0), s);
+  ASSERT_TRUE(zero.Verified) << zero.Boundary.Section.UnresolvedCells << "; "
+    << zero.Disks[0].UnresolvedCells << "/" << zero.Disks[0].GraphDefects;
+  EXPECT_GT(zero.Disks[0].ExactLatticeNodeCount, 0);
+  EXPECT_GT(analyticDiskWitnesses(s, 0, 0, zero.Disks[0]), 10);
+  const auto empty = Section::TraceEndCapDisks(field(10), s);
+  EXPECT_TRUE(empty.Verified);
+  for (const auto& disk : empty.Disks) EXPECT_TRUE(disk.Curves.empty());
+  gp_Trsf pose; pose.SetRotation(gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(1, 2, 3)), .4);
+  pose.SetTranslationPart(gp_Vec(3, -4, 2));
+  auto placedFace = field(); placedFace.Location(TopLoc_Location(pose));
+  auto placedSettings = s; placedSettings.Frame.Transform(pose);
+  const auto placed = Section::TraceEndCapDisks(placedFace, placedSettings);
+  EXPECT_TRUE(placed.Verified);
+  s.HeightMaximum = .37;
+  const auto nonlattice = Section::TraceEndCapDisks(field(std::sin(2 * std::acos(-1.) / 10 * .37)), s);
+  EXPECT_TRUE(nonlattice.Verified);
+  auto criticalSettings = s;
+  criticalSettings.Frame.SetLocation(gp_Pnt(2.5, 1.25, 0));
+  criticalSettings.Radius = 1.5;
+  criticalSettings.HeightMinimum = -.5; criticalSettings.HeightMaximum = 0;
+  const auto lateFailure = Section::TraceEndCapDisks(field(std::sqrt(2.)), criticalSettings);
+  EXPECT_TRUE(lateFailure.Boundary.Section.Resolved);
+  EXPECT_FALSE(lateFailure.Verified);
+  for (const auto& disk : lateFailure.Disks)
+  { EXPECT_FALSE(disk.Resolved); EXPECT_TRUE(disk.Curves.empty()); }
+  s.WorkCheckpoint = [] { throw Standard_AbortiveTransaction("Disk query cancelled"); };
+  EXPECT_THROW(Section::TraceEndCapDisks(field(), s), Standard_AbortiveTransaction);
 }
