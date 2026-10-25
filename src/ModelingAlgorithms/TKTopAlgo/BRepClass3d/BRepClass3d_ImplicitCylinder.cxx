@@ -32,6 +32,7 @@
 #include <map>
 #include <set>
 #include <typeinfo>
+#include <queue>
 #include <TopoDS_Iterator.hxx>
 
 namespace
@@ -1408,5 +1409,169 @@ BRepClass3d_ImplicitCylinder::MaterialPoint BRepClass3d_ImplicitCylinder::Classi
     else if (definiteOutside) result.State = TopAbs_OUT;
   }
   result.BoundaryAllowanceSeparated = result.DistanceLowerBound > geometry.BoundaryBound + pointTolerance;
+  return result;
+}
+
+BRepClass3d_ImplicitCylinder::VolumeBounds BRepClass3d_ImplicitCylinder::BoundMaterialVolume(
+  const ShellGeometry& geometry, const VolumeSettings& settings)
+{
+  require(std::isfinite(settings.AbsoluteTolerance) && settings.AbsoluteTolerance > 0
+            && settings.MaximumDepth >= 0 && settings.MaximumDepth <= 32
+            && settings.MaximumCells > 0 && settings.MaximumCells <= 2000000
+            && settings.MaximumRootTests > 0 && settings.MaximumRootTests <= 50000000,
+          "invalid_cylinder_volume_budget");
+  require(geometry.BoundaryVerified && geometry.Source.Source.TopologyValidated
+            && geometry.Source.ToleranceVerified, "cylinder_volume_requires_qualified_geometry");
+  VolumeBounds result; result.AbsoluteTolerance = settings.AbsoluteTolerance;
+  const auto work = [&] { if (settings.WorkCheckpoint) settings.WorkCheckpoint(); };
+  try
+  {
+    const auto& reference = geometry.Source.Source.Source.Reference;
+    const auto& recipe = reference.Source.Boundary.Source.Boundary.Source.Regions;
+    const auto& s = recipe.Parameters;
+    require(reference.MathematicalCorrespondenceVerified && reference.Source.MonotonicityVerified,
+            "cylinder_volume_reference_missing");
+    const auto data = occ::down_cast<BRep_TImplicitFace>(recipe.Field.TShape());
+    require(!data.IsNull() && !data->Field().IsNull()
+              && typeid(*data->Field()) == typeid(Geom_ImplicitGyroid), "cylinder_volume_field_type");
+    const auto* field = static_cast<const Geom_ImplicitGyroid*>(data->Field().get());
+    const double scale = std::abs((recipe.Field.Location() * data->Location()).Transformation().ScaleFactor());
+    const double k = 2 * std::acos(-1.) / field->Period() / scale;
+    const double hessian = 4 * k * k, lipschitz = field->LipschitzBound() / scale;
+    const double area = std::acos(-1.) * s.Radius * s.Radius;
+    const double span = s.HeightMaximum - s.HeightMinimum;
+    result.CylinderVolume = area * span;
+    const double precision = 16384 * std::numeric_limits<double>::epsilon()
+      * (1 + s.Radius + std::abs(s.HeightMinimum) + std::abs(s.HeightMaximum)
+         + s.Frame.Location().Distance(gp_Pnt()));
+    const double scalarReserve = precision * (1 + lipschitz)
+      + 16384 * std::numeric_limits<double>::epsilon() * (1 + std::abs(field->IsoValue()) + hessian);
+    const double gradientReserve = 16384 * std::numeric_limits<double>::epsilon()
+      * (1 + lipschitz + hessian) + (lipschitz + hessian) * precision;
+    const double heightResolution = settings.AbsoluteTolerance / (64 * area);
+    require(std::isfinite(result.CylinderVolume) && result.CylinderVolume > 0 && std::isfinite(gradientReserve)
+              && std::isfinite(scalarReserve) && s.Radius > 2 * precision
+              && std::isfinite(heightResolution) && heightResolution > precision,
+            "cylinder_volume_precision");
+    const bool bottom = recipe.Negative == (reference.Source.Direction > 0);
+    const gp_Vec x(s.Frame.XDirection()), y(s.Frame.YDirection()), axis(s.Frame.Direction());
+    struct Cell { double X0, X1, Y0, Y1, Lower = 0, Upper = 0; int Depth = 0; size_t Order = 0; };
+    struct Priority { bool operator()(const Cell& a, const Cell& b) const {
+      const double ea = a.Upper - a.Lower, eb = b.Upper - b.Lower;
+      return ea == eb ? a.Order > b.Order : ea < eb;
+    } };
+    const auto evaluate = [&](Cell cell) {
+      work(); require(result.Cells < settings.MaximumCells, "cylinder_volume_cell_budget");
+      cell.Order = result.Cells++;
+      const auto nearest = [](double low, double high) { return low > 0 ? low : high < 0 ? -high : 0.; };
+      if (std::hypot(nearest(cell.X0, cell.X1), nearest(cell.Y0, cell.Y1)) > s.Radius + precision) return cell;
+      const double dx = cell.X1 - cell.X0, dy = cell.Y1 - cell.Y0;
+      double qx = cell.X0 + dx * .5, qy = cell.Y0 + dy * .5;
+      const double radial = std::hypot(qx, qy);
+      if (radial > s.Radius - precision)
+      { qx *= (s.Radius - precision) / radial; qy *= (s.Radius - precision) / radial; }
+      const double rx = std::max(std::abs(cell.X0 - qx), std::abs(cell.X1 - qx));
+      const double ry = std::max(std::abs(cell.Y0 - qy), std::abs(cell.Y1 - qy));
+      const double remainder = .5 * hessian * ((rx + precision) * (rx + precision)
+        + (ry + precision) * (ry + precision)) + scalarReserve + gradientReserve * (rx + ry + 2 * precision);
+      require(std::isfinite(remainder), "cylinder_volume_cone_nonfinite");
+      const auto cone = [&](double height) {
+        if ((result.RootTests % 64) == 0) work();
+        require(result.RootTests < settings.MaximumRootTests, "cylinder_volume_root_budget"); ++result.RootTests;
+        const auto p = s.Frame.Location().Translated(x * qx + y * qy + axis * height);
+        const auto gradient = BRep_ImplicitTool::Gradient(recipe.Field, p);
+        const double f = reference.Source.Direction * BRep_ImplicitTool::Value(recipe.Field, p);
+        const double error = std::abs(gradient.Dot(x)) * rx + std::abs(gradient.Dot(y)) * ry + remainder;
+        require(std::isfinite(f) && std::isfinite(error), "cylinder_volume_root_nonfinite");
+        return std::make_pair(f, error);
+      };
+      double low = s.HeightMinimum, search = s.HeightMaximum;
+      for (int i = 0; i < 96 && search - low > heightResolution; ++i)
+      {
+        const double middle = low + (search - low) * .5;
+        require(middle > low && middle < search, "cylinder_volume_split_precision");
+        const auto value = cone(middle);
+        if (value.first + value.second < 0) low = middle; else search = middle;
+      }
+      require(search - low <= heightResolution, "cylinder_volume_height_precision");
+      search = s.HeightMinimum; double high = s.HeightMaximum;
+      for (int i = 0; i < 96 && high - search > heightResolution; ++i)
+      {
+        const double middle = search + (high - search) * .5;
+        require(middle > search && middle < high, "cylinder_volume_split_precision");
+        const auto value = cone(middle);
+        if (value.first - value.second > 0) high = middle; else search = middle;
+      }
+      require(high - search <= heightResolution && high >= low, "cylinder_volume_root_interval");
+      low = std::max(s.HeightMinimum, low - precision); high = std::min(s.HeightMaximum, high + precision);
+      const double lowerHeight = bottom ? low - s.HeightMinimum : s.HeightMaximum - high;
+      const double upperHeight = bottom ? high - s.HeightMinimum : s.HeightMaximum - low;
+      const double furthest = std::hypot(std::max(std::abs(cell.X0), std::abs(cell.X1)),
+                                         std::max(std::abs(cell.Y0), std::abs(cell.Y1)));
+      const double rectangle = dx * dy;
+      const double areaReserve = 4096 * std::numeric_limits<double>::epsilon() * (1 + area + rectangle);
+      const double lowerArea = furthest + precision < s.Radius ? std::max(0., rectangle - areaReserve) : 0;
+      cell.Lower = lowerArea * lowerHeight;
+      cell.Upper = (rectangle + areaReserve) * upperHeight;
+      require(std::isfinite(cell.Lower) && std::isfinite(cell.Upper) && cell.Lower >= 0
+                && cell.Upper >= cell.Lower, "cylinder_volume_cell_arithmetic");
+      return cell;
+    };
+    std::priority_queue<Cell, std::vector<Cell>, Priority> pending;
+    auto first = evaluate({-s.Radius, s.Radius, -s.Radius, s.Radius}); pending.push(first);
+    double lower = first.Lower, upper = first.Upper;
+    double arithmetic = 32768 * std::numeric_limits<double>::epsilon() * (1 + result.CylinderVolume + upper);
+    const double cylinderReserve = arithmetic;
+    for (;;)
+    {
+      work();
+      const double a = std::max(0., lower - arithmetic);
+      const double b = std::min(result.CylinderVolume + cylinderReserve, upper + arithmetic);
+      require(std::isfinite(a) && std::isfinite(b) && b >= a, "cylinder_volume_sum_arithmetic");
+      if (b - a <= settings.AbsoluteTolerance)
+      { result.Lower = a; result.Upper = b; result.Verified = true; result.Reason = "cylinder_material_volume_bounded"; break; }
+      require(!pending.empty(), "cylinder_volume_missing_partition");
+      auto parent = pending.top(); pending.pop();
+      require(parent.Depth < settings.MaximumDepth, "cylinder_volume_depth_budget");
+      auto left = parent, right = parent;
+      left.Depth = right.Depth = parent.Depth + 1; left.Lower = left.Upper = right.Lower = right.Upper = 0;
+      if (parent.X1 - parent.X0 >= parent.Y1 - parent.Y0)
+      { const double cut = parent.X0 + (parent.X1 - parent.X0) * .5;
+        require(cut > parent.X0 && cut < parent.X1, "cylinder_volume_split_precision"); left.X1 = right.X0 = cut; }
+      else
+      { const double cut = parent.Y0 + (parent.Y1 - parent.Y0) * .5;
+        require(cut > parent.Y0 && cut < parent.Y1, "cylinder_volume_split_precision"); left.Y1 = right.Y0 = cut; }
+      left = evaluate(left); right = evaluate(right);
+      lower += left.Lower + right.Lower - parent.Lower; upper += left.Upper + right.Upper - parent.Upper;
+      arithmetic += 8192 * std::numeric_limits<double>::epsilon()
+        * (1 + std::abs(lower) + std::abs(upper) + parent.Upper + left.Upper + right.Upper);
+      if (left.Upper > left.Lower) pending.push(left);
+      if (right.Upper > right.Lower) pending.push(right);
+    }
+  }
+  catch (const Standard_AbortiveTransaction&) { throw; }
+  catch (const Standard_Failure& error)
+  { result.Lower = result.Upper = 0; result.Reason = error.what() ? error.what() : "cylinder_material_volume_unresolved"; }
+  return result;
+}
+
+BRepClass3d_ImplicitCylinder::NativeSolid BRepClass3d_ImplicitCylinder::BuildNativeSolid(
+  const ShellGeometry& geometry, const VolumeSettings& settings)
+{
+  NativeSolid result; result.Volume = BoundMaterialVolume(geometry, settings); result.Source = geometry;
+  if (!result.Volume.Verified) { result.Reason = result.Volume.Reason; return result; }
+  try
+  {
+    require(result.Volume.Lower > 0 && result.Volume.Upper < result.Volume.CylinderVolume,
+            "cylinder_solid_positive_partial_volume_unproved");
+    require(!geometry.Source.Source.Shell.IsNull() && geometry.Source.Source.Shell.Closed(),
+            "cylinder_solid_missing_closed_shell");
+    if (settings.WorkCheckpoint) settings.WorkCheckpoint();
+    BRep_Builder builder; builder.MakeSolid(result.Solid); builder.Add(result.Solid, geometry.Source.Source.Shell);
+    result.Solid.Closed(true); result.SolidValidated = true; result.Reason = "native_cylinder_material_solid_validated";
+  }
+  catch (const Standard_AbortiveTransaction&) { throw; }
+  catch (const Standard_Failure& error)
+  { result.Solid.Nullify(); result.Reason = error.what() ? error.what() : "native_cylinder_solid_unresolved"; }
   return result;
 }

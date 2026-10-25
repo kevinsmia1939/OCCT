@@ -635,6 +635,101 @@ TEST(BRepClass3dImplicitCylinder, MaterialClassificationUsesSpatialBoundsAndKeep
   EXPECT_EQ(before.str(), after.str());
 }
 
+TEST(BRepClass3dImplicitCylinder, MaterialVolumeBoundsAnalyticReferenceAndBuildsActualSolid)
+{
+  auto s = settings(); s.AngleMinimum = .27; s.AngleMaximum = .27 + 2 * std::acos(-1.);
+  s.HeightMinimum = -1.7; s.HeightMaximum = 1.3;
+  const auto source = field();
+  const double k = 2 * std::acos(-1.) / 10;
+  const auto reference = [&](int n) {
+    double volume = 0;
+    for (int i = 0; i < n; ++i)
+    {
+      const double r0 = s.Radius * i / n, r1 = s.Radius * (i + 1) / n;
+      const double radius = (r0 + r1) * .5, weight = std::acos(-1.) * (r1 * r1 - r0 * r0) / n;
+      for (int j = 0; j < n; ++j)
+      {
+        const double theta = 2 * std::acos(-1.) * (j + .5) / n;
+        const double x = radius * std::cos(theta), y = radius * std::sin(theta);
+        const double a = std::sin(k * y), b = std::cos(k * x), c = std::sin(k * x) * std::cos(k * y) - .21;
+        const double root = (std::atan2(b, a) - std::acos(-c / std::hypot(a, b))) / k;
+        volume += weight * (root - s.HeightMinimum);
+      }
+    }
+    return volume;
+  };
+  const double coarse = reference(128), exact = reference(256);
+  ASSERT_NEAR(coarse, exact, 1.e-5);
+  Ops::VolumeSettings settings;
+  double lows = 0, highs = 0;
+  for (bool negative : {false, true})
+  {
+    const auto geometry = Ops::CheckShellGeometry(source, s, negative);
+    ASSERT_TRUE(geometry.BoundaryVerified) << geometry.Reason;
+    const auto result = Ops::BuildNativeSolid(geometry, settings);
+    ASSERT_TRUE(result.SolidValidated) << result.Reason << " cells " << result.Volume.Cells << " roots " << result.Volume.RootTests;
+    ASSERT_TRUE(result.Volume.Verified);
+    EXPECT_EQ(result.Solid.ShapeType(), TopAbs_SOLID); EXPECT_TRUE(result.Solid.Closed());
+    EXPECT_GT(result.Volume.Lower, 0); EXPECT_LT(result.Volume.Upper, result.Volume.CylinderVolume);
+    EXPECT_LE(result.Volume.Upper - result.Volume.Lower, settings.AbsoluteTolerance);
+    const double expected = negative ? exact : result.Volume.CylinderVolume - exact;
+    EXPECT_LE(result.Volume.Lower, expected + 1.e-5); EXPECT_GE(result.Volume.Upper, expected - 1.e-5);
+    lows += result.Volume.Lower; highs += result.Volume.Upper;
+    int shells = 0, implicit = 0;
+    for (TopExp_Explorer it(result.Solid, TopAbs_SHELL); it.More(); it.Next()) ++shells;
+    for (TopExp_Explorer it(result.Solid, TopAbs_FACE); it.More(); it.Next())
+      implicit += BRep_Tool::IsImplicit(TopoDS::Face(it.Current()));
+    EXPECT_EQ(shells, 1); EXPECT_EQ(implicit, 1);
+    EXPECT_EQ(Ops::ClassifyMaterial(result.Source, gp_Pnt(0, 0, -.5)).State, negative ? TopAbs_IN : TopAbs_OUT);
+  }
+  const double full = std::acos(-1.) * s.Radius * s.Radius * (s.HeightMaximum - s.HeightMinimum);
+  EXPECT_LE(lows, full); EXPECT_GE(highs, full);
+}
+
+TEST(BRepClass3dImplicitCylinder, SolidVolumeRefusesBudgetsPreservesSourceAndHandlesPlacementCancellation)
+{
+  auto s = settings(); s.AngleMinimum = .27; s.AngleMaximum = .27 + 2 * std::acos(-1.);
+  s.Frame = gp_Ax2(gp_Pnt(), gp_Dir(0, 0, -1), gp_Dir(1, 0, 0));
+  s.HeightMinimum = -1.3; s.HeightMaximum = 1.7;
+  const auto source = field();
+  std::stringstream before; BRep_ImplicitIO::Write(source, before);
+  gp_Trsf move; move.SetTranslation(gp_Vec(1.2, -.4, 2.1));
+  auto placed = source; placed.Location(TopLoc_Location(move)); s.Frame.Transform(move);
+  const auto geometry = Ops::CheckShellGeometry(placed, s);
+  ASSERT_TRUE(geometry.BoundaryVerified) << geometry.Reason;
+  Ops::VolumeSettings limits;
+  const auto solid = Ops::BuildNativeSolid(geometry, limits);
+  ASSERT_TRUE(solid.SolidValidated) << solid.Reason;
+  EXPECT_EQ(Ops::ClassifyMaterial(solid.Source, gp_Pnt(0, 0, -.5).Transformed(move)).State, TopAbs_IN);
+  limits.MaximumCells = 1;
+  const auto cells = Ops::BoundMaterialVolume(geometry, limits);
+  EXPECT_FALSE(cells.Verified); EXPECT_EQ(cells.Cells, 1); EXPECT_EQ(cells.Lower, 0); EXPECT_EQ(cells.Upper, 0);
+  EXPECT_TRUE(Ops::BuildNativeSolid(geometry, limits).Solid.IsNull());
+  limits = Ops::VolumeSettings(); limits.MaximumRootTests = 1;
+  const auto roots = Ops::BoundMaterialVolume(geometry, limits);
+  EXPECT_FALSE(roots.Verified); EXPECT_EQ(roots.RootTests, 1);
+  limits = Ops::VolumeSettings(); limits.MaximumDepth = 0;
+  EXPECT_FALSE(Ops::BoundMaterialVolume(geometry, limits).Verified);
+  limits = Ops::VolumeSettings(); limits.AbsoluteTolerance = 100;
+  const auto coarse = Ops::BuildNativeSolid(geometry, limits);
+  EXPECT_TRUE(coarse.Volume.Verified); EXPECT_FALSE(coarse.SolidValidated); EXPECT_TRUE(coarse.Solid.IsNull());
+  limits.AbsoluteTolerance = 0;
+  EXPECT_THROW(Ops::BoundMaterialVolume(geometry, limits), Standard_DomainError);
+  limits = Ops::VolumeSettings();
+  EXPECT_THROW(Ops::BoundMaterialVolume(Ops::ShellGeometry(), limits), Standard_DomainError);
+  static size_t calls = 0;
+  calls = 0; limits.WorkCheckpoint = [] { ++calls; };
+  ASSERT_TRUE(Ops::BoundMaterialVolume(geometry, limits).Verified);
+  ASSERT_GT(calls, 2);
+  const size_t full = calls;
+  calls = full - 1; limits.WorkCheckpoint = [] { if (--calls == 0) throw Standard_AbortiveTransaction("late volume cancellation"); };
+  EXPECT_THROW(Ops::BoundMaterialVolume(geometry, limits), Standard_AbortiveTransaction);
+  calls = full + 1;
+  EXPECT_THROW(Ops::BuildNativeSolid(geometry, limits), Standard_AbortiveTransaction);
+  std::stringstream after; BRep_ImplicitIO::Write(source, after);
+  EXPECT_EQ(before.str(), after.str());
+}
+
 TEST(BRepClass3dImplicitCylinder, NativeCapsPartitionDiskAndShareSideRootVertices)
 {
   const auto source = field(); const auto s = settings();

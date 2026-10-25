@@ -6,6 +6,7 @@
 #include <string>
 #include <TopoDS_Wire.hxx>
 #include <TopoDS_Shell.hxx>
+#include <TopoDS_Solid.hxx>
 #include <TopAbs_State.hxx>
 
 //! Restricted native cap-region assembly; NOT a cylinder Boolean/solid builder.
@@ -197,5 +198,34 @@ public:
   //! No ordinary OCCT solid-classifier or generic consumer support is implied.
   Standard_EXPORT static MaterialPoint ClassifyMaterial(const ShellGeometry&,
     const gp_Pnt&, double pointTolerance = 1.e-7);
+  struct VolumeSettings
+  {
+    double AbsoluteTolerance = .01; //!< Model length cubed, independent of trim tolerance.
+    int MaximumDepth = 24;
+    size_t MaximumCells = 200000, MaximumRootTests = 10000000;
+    void (*WorkCheckpoint)() = nullptr; //!< Never retained in results.
+  };
+  struct VolumeBounds
+  {
+    bool Verified = false;
+    double Lower = 0, Upper = 0, CylinderVolume = 0, AbsoluteTolerance = 0;
+    size_t Cells = 0, RootTests = 0;
+    std::string Reason;
+  };
+  //! Adaptive disk/fibre integration of the mathematical material. Conservative
+  //! area and Taylor-cone root intervals; no mesh or generic BRep mass property.
+  Standard_EXPORT static VolumeBounds BoundMaterialVolume(const ShellGeometry&, const VolumeSettings&);
+  struct NativeSolid
+  {
+    ShellGeometry Source;
+    VolumeBounds Volume;
+    TopoDS_Solid Solid;
+    bool SolidValidated = false;
+    std::string Reason;
+  };
+  //! Actual native solid only after topology, boundary geometry and bounded
+  //! positive material volume qualify. Validity is the explicit implicit-aware
+  //! contract, not generic OCCT consumer/serialization support.
+  Standard_EXPORT static NativeSolid BuildNativeSolid(const ShellGeometry&, const VolumeSettings&);
 };
 #endif
