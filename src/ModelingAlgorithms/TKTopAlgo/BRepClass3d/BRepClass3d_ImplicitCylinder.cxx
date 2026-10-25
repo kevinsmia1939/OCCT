@@ -29,6 +29,8 @@
 #include <cmath>
 #include <limits>
 #include <map>
+#include <set>
+#include <TopoDS_Iterator.hxx>
 
 namespace
 {
@@ -991,5 +993,124 @@ BRepClass3d_ImplicitCylinder::NativeFaces BRepClass3d_ImplicitCylinder::BuildImp
   catch (const Standard_AbortiveTransaction&) { throw; }
   catch (const Standard_Failure& error)
   { result.Faces.clear(); result.Reason = error.what() ? error.what() : "implicit_cylinder_attachment_failed"; }
+  return result;
+}
+
+BRepClass3d_ImplicitCylinder::NativeShell BRepClass3d_ImplicitCylinder::BuildNativeShell(
+  const TopoDS_Face& source, const Settings& s, bool negative, size_t maximumNestingTests,
+  int maximumDepth, size_t maximumCells)
+{
+  NativeShell result;
+  result.Source = BuildImplicitFaces(source, s, negative, maximumNestingTests, maximumDepth, maximumCells);
+  if (!result.Source.FacesAttached) { result.Reason = result.Source.Reason; return result; }
+  try
+  {
+    const auto& reference = result.Source.Reference;
+    const auto& sides = reference.Source.Boundary.Source;
+    const int retained = negative == (reference.Source.Direction > 0) ? 0 : 1;
+    require(result.Source.Faces.size() == 1 && sides.Faces.size() == 1
+              && sides.Boundary.Source.Regions.Faces[retained].size() == 1
+              && sides.Boundary.Source.Regions.Faces[1 - retained].empty(),
+            "cylinder_shell_full_disk_face_partition");
+    std::vector<TopoDS_Face> faces {sides.Boundary.Source.Regions.Faces[retained][0],
+                                  sides.Faces[0], result.Source.Faces[0]};
+    TopoDS_Shell shell; BRep_Builder builder; builder.MakeShell(shell);
+    for (const auto& face : faces) builder.Add(shell, face);
+    NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> edges, vertices;
+    TopExp::MapShapes(shell, TopAbs_EDGE, edges); TopExp::MapShapes(shell, TopAbs_VERTEX, vertices);
+    struct Use { int Forward = 0, Reversed = 0; std::vector<int> Faces; };
+    std::vector<Use> uses(edges.Size());
+    std::vector<std::map<int, std::vector<int>>> links(vertices.Size());
+    std::vector<std::vector<int>> adjacent(faces.size());
+    for (size_t f = 0; f < faces.size(); ++f)
+    {
+      int wires = 0;
+      for (TopoDS_Iterator wi(faces[f]); wi.More(); wi.Next())
+      {
+        checkpoint(s); ++wires;
+        require(wi.Value().ShapeType() == TopAbs_WIRE, "cylinder_shell_nonwire_face_child");
+        std::vector<TopoDS_Edge> ordered;
+        for (TopoDS_Iterator ei(wi.Value()); ei.More(); ei.Next())
+        { require(ei.Value().ShapeType() == TopAbs_EDGE, "cylinder_shell_nonedge_wire_child");
+          ordered.push_back(TopoDS::Edge(ei.Value())); }
+        // These private builders insert each directed cycle in traversal order.
+        // Verify every join rather than assuming this for arbitrary user wires.
+        if (wi.Value().Orientation() == TopAbs_REVERSED) std::reverse(ordered.begin(), ordered.end());
+        require(!ordered.empty(), "cylinder_shell_empty_wire");
+        std::vector<int> starts, ends, startGerms, endGerms;
+        for (const auto& edge : ordered)
+        {
+          checkpoint(s);
+          const int id = edges.FindIndex(edge) - 1;
+          require(id >= 0, "cylinder_shell_missing_edge");
+          const bool forward = edge.Orientation() == TopAbs_FORWARD;
+          require(forward || edge.Orientation() == TopAbs_REVERSED, "cylinder_shell_edge_orientation");
+          auto& use = uses[size_t(id)]; use.Faces.push_back(int(f));
+          if (forward) ++use.Forward; else ++use.Reversed;
+          TopoDS_Vertex a, b;
+          TopExp::Vertices(TopoDS::Edge(edge.Oriented(TopAbs_FORWARD)), a, b);
+          const int av = vertices.FindIndex(a) - 1, bv = vertices.FindIndex(b) - 1;
+          require(av >= 0 && bv >= 0, "cylinder_shell_missing_vertex");
+          starts.push_back(forward ? av : bv); ends.push_back(forward ? bv : av);
+          startGerms.push_back(2 * id + (forward ? 0 : 1));
+          endGerms.push_back(2 * id + (forward ? 1 : 0));
+        }
+        for (size_t i = 0; i < ordered.size(); ++i)
+        {
+          const size_t next = (i + 1) % ordered.size();
+          require(ends[i] == starts[next], "cylinder_shell_unordered_or_open_wire");
+          const int a = endGerms[i], b = startGerms[next];
+          require(a != b, "cylinder_shell_collapsed_corner");
+          links[size_t(ends[i])][a].push_back(b); links[size_t(ends[i])][b].push_back(a);
+        }
+      }
+      require(wires == 1, "cylinder_shell_expected_disk_cell");
+    }
+    for (size_t id = 0; id < uses.size(); ++id)
+    {
+      checkpoint(s);
+      const auto& use = uses[id];
+      require(use.Forward == 1 && use.Reversed == 1 && use.Faces.size() == 2,
+              "cylinder_shell_unpaired_edge");
+      const int a = use.Faces[0], b = use.Faces[1];
+      if (a == b)
+        require(!BRep_Tool::IsImplicit(faces[size_t(a)])
+                  && BRep_Tool::IsClosed(TopoDS::Edge(edges.FindKey(id + 1)), faces[size_t(a)]),
+                "cylinder_shell_unqualified_self_seam");
+      else { adjacent[size_t(a)].push_back(b); adjacent[size_t(b)].push_back(a); }
+    }
+    for (const auto& link : links)
+    {
+      checkpoint(s);
+      require(!link.empty(), "cylinder_shell_unused_vertex");
+      for (const auto& germ : link) require(germ.second.size() == 2, "cylinder_shell_noncyclic_vertex_link");
+      std::set<int> visited; std::vector<int> todo {link.begin()->first};
+      while (!todo.empty())
+      {
+        const int id = todo.back(); todo.pop_back();
+        if (!visited.insert(id).second) continue;
+        for (int next : link.at(id)) todo.push_back(next);
+      }
+      require(visited.size() == link.size(), "cylinder_shell_pinched_vertex");
+    }
+    std::set<int> visited; std::vector<int> todo {0};
+    while (!todo.empty())
+    {
+      checkpoint(s);
+      const int id = todo.back(); todo.pop_back();
+      if (!visited.insert(id).second) continue;
+      for (int next : adjacent[size_t(id)]) todo.push_back(next);
+    }
+    require(visited.size() == faces.size(), "cylinder_shell_disconnected_faces");
+    const int euler = int(vertices.Size()) - int(edges.Size()) + int(faces.size());
+    require(euler == 2, "cylinder_shell_reference_euler_mismatch");
+    shell.Closed(true);
+    result.Shell = shell; result.Faces = std::move(faces); result.Euler = euler;
+    result.Vertices = vertices.Size(); result.Edges = edges.Size();
+    result.TopologyValidated = true; result.Reason = "cylinder_native_shell_topology_validated";
+  }
+  catch (const Standard_AbortiveTransaction&) { throw; }
+  catch (const Standard_Failure& error)
+  { result.Reason = error.what() ? error.what() : "cylinder_native_shell_failed"; }
   return result;
 }

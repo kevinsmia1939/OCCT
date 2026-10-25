@@ -16,6 +16,7 @@
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS_Wire.hxx>
+#include <TopoDS.hxx>
 #include <Standard_AbortiveTransaction.hxx>
 #include <Standard_DomainError.hxx>
 #include <gtest/gtest.h>
@@ -445,6 +446,45 @@ TEST(BRepClass3dImplicitCylinder, FullDiskCorrespondenceAttachesActualCylinderRe
   EXPECT_THROW(Ops::BuildImplicitFaces(source, cancellable), Standard_AbortiveTransaction);
   std::stringstream after; BRep_ImplicitIO::Write(source, after);
   EXPECT_EQ(before.str(), after.str());
+}
+
+TEST(BRepClass3dImplicitCylinder, NativeCylinderShellPairsSeamsAndHasSphericalVertexLinks)
+{
+  const auto source = field();
+  for (bool reverse : {false, true}) for (bool negative : {false, true})
+  {
+    auto s = settings(); s.AngleMinimum = .27; s.AngleMaximum = .27 + 2 * std::acos(-1.);
+    s.HeightMinimum = -1.7; s.HeightMaximum = 1.3;
+    if (reverse)
+    { s.Frame = gp_Ax2(gp_Pnt(), gp_Dir(0, 0, -1), gp_Dir(1, 0, 0));
+      s.HeightMinimum = -1.3; s.HeightMaximum = 1.7; }
+    const auto result = Ops::BuildNativeShell(source, s, negative);
+    ASSERT_TRUE(result.TopologyValidated) << reverse << "/" << negative << ": " << result.Reason;
+    EXPECT_FALSE(result.Shell.IsNull()); EXPECT_TRUE(result.Shell.Closed());
+    EXPECT_EQ(result.Faces.size(), 3); EXPECT_EQ(result.Euler, 2);
+    EXPECT_EQ(result.Vertices, 3); EXPECT_EQ(result.Edges, 4);
+    int implicit = 0;
+    for (TopExp_Explorer it(result.Shell, TopAbs_FACE); it.More(); it.Next())
+      implicit += BRep_Tool::IsImplicit(TopoDS::Face(it.Current()));
+    EXPECT_EQ(implicit, 1);
+    const int retained = negative == !reverse ? 0 : 1;
+    const auto& caps = result.Source.Reference.Source.Boundary.Source.Boundary.Source.Regions.Faces;
+    EXPECT_EQ(caps[retained].size(), 1); EXPECT_TRUE(caps[1 - retained].empty());
+  }
+  auto s = settings(); s.AngleMinimum = .27; s.AngleMaximum = .27 + 2 * std::acos(-1.);
+  s.HeightMinimum = -1.7; s.HeightMaximum = 1.3;
+  gp_Trsf move; move.SetTranslation(gp_Vec(1.2, -.4, 2.1));
+  auto placed = source; placed.Location(TopLoc_Location(move)); s.Frame.Transform(move);
+  const auto translated = Ops::BuildNativeShell(placed, s);
+  ASSERT_TRUE(translated.TopologyValidated) << translated.Reason;
+  const auto partial = Ops::BuildNativeShell(source, settings());
+  EXPECT_FALSE(partial.TopologyValidated); EXPECT_TRUE(partial.Shell.IsNull()); EXPECT_TRUE(partial.Faces.empty());
+  static size_t calls = 0;
+  calls = 0; s.WorkCheckpoint = [] { ++calls; };
+  ASSERT_TRUE(Ops::BuildNativeShell(placed, s).TopologyValidated);
+  ASSERT_GT(calls, 2); --calls;
+  s.WorkCheckpoint = [] { if (--calls == 0) throw Standard_AbortiveTransaction("late shell cancellation"); };
+  EXPECT_THROW(Ops::BuildNativeShell(placed, s), Standard_AbortiveTransaction);
 }
 
 TEST(BRepClass3dImplicitCylinder, NativeCapsPartitionDiskAndShareSideRootVertices)

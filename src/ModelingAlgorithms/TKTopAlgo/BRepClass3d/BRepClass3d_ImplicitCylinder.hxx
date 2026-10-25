@@ -5,6 +5,7 @@
 #include <BRep_ImplicitCylinderSection.hxx>
 #include <string>
 #include <TopoDS_Wire.hxx>
+#include <TopoDS_Shell.hxx>
 
 //! Restricted native cap-region assembly; NOT a cylinder Boolean/solid builder.
 class BRepClass3d_ImplicitCylinder
@@ -131,6 +132,23 @@ public:
   //! Shared trim incidence is checked; shells/solids and general partial-sheet
   //! or multi-sheet component attachment remain separate requirements.
   Standard_EXPORT static NativeFaces BuildImplicitFaces(const TopoDS_Face&,
+    const BRep_ImplicitCylinderSection::Settings&, bool negative = true,
+    size_t maximumNestingTests = 2000000, int maximumDepth = 24,
+    size_t maximumCells = 200000);
+  struct NativeShell
+  {
+    NativeFaces Source;
+    TopoDS_Shell Shell;
+    std::vector<TopoDS_Face> Faces;
+    bool TopologyValidated = false;
+    int Euler = 0;
+    size_t Vertices = 0, Edges = 0;
+    std::string Reason;
+  };
+  //! Closed oriented shell for qualified full-disk sheets. Includes periodic
+  //! seam occurrences and vertex-link checks; does not qualify solid geometry,
+  //! volume, persistence or ordinary OCCT consumers of implicit faces.
+  Standard_EXPORT static NativeShell BuildNativeShell(const TopoDS_Face&,
     const BRep_ImplicitCylinderSection::Settings&, bool negative = true,
     size_t maximumNestingTests = 2000000, int maximumDepth = 24,
     size_t maximumCells = 200000);
