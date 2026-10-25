@@ -2,6 +2,8 @@
 set(OCCT_BRepClass3d_FILES_LOCATION "${CMAKE_CURRENT_LIST_DIR}")
 
 set(OCCT_BRepClass3d_FILES
+  BRepClass3d_ImplicitCylinder.hxx
+  BRepClass3d_ImplicitCylinder.cxx
   BRepClass3d.cxx
   BRepClass3d.hxx
   BRepClass3d_BndBoxTree.hxx

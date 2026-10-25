@@ -79,5 +79,13 @@ public:
   //! root brackets. Includes interior closed contours; never proximity-welds.
   //! Uncertain cut-cell attachment rejects; no partial disk curves on failure.
   Standard_EXPORT static DiskResult TraceEndCapDisks(const TopoDS_Face&, const Settings&);
+  struct CapSkeleton
+  {
+    DiskResult Disks;
+    RingResult Rings;
+    bool Verified = false;
+  };
+  //! One tracing snapshot: rings and disk endpoints share actual vertex handles.
+  Standard_EXPORT static CapSkeleton BuildCapSkeleton(const TopoDS_Face&, const Settings&);
 };
 #endif

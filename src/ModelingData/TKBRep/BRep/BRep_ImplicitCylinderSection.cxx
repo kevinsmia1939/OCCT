@@ -333,10 +333,11 @@ Section::BoundaryResult Section::TracePeriodicBoundary(const TopoDS_Face& face, 
   return result;
 }
 
-Section::RingResult Section::BuildBoundaryRings(const TopoDS_Face& face, const Settings& s)
+static Section::RingResult buildBoundaryRings(const TopoDS_Face& face,
+  const Section::Settings& s, const Section::BoundaryResult& boundary)
 {
-  RingResult result;
-  result.Boundary = TracePeriodicBoundary(face, s);
+  Section::RingResult result;
+  result.Boundary = boundary;
   if (!result.Boundary.BoundaryIncidenceVerified) return result;
   const Chart chart {s};
   const double turn = 2 * std::acos(-1.);
@@ -375,7 +376,7 @@ Section::RingResult Section::BuildBoundaryRings(const TopoDS_Face& face, const S
     {
       checkpoint(s);
       const size_t next = (i + 1) % count;
-      RingArc arc;
+      Section::RingArc arc;
       double first, last, low, high;
       TopoDS_Vertex a, b;
       if (roots.empty())
@@ -421,5 +422,20 @@ Section::RingResult Section::BuildBoundaryRings(const TopoDS_Face& face, const S
   }
   if (!verified) for (auto& ring : result.Rings) ring.clear();
   result.Verified = verified;
+  return result;
+}
+
+Section::RingResult Section::BuildBoundaryRings(const TopoDS_Face& face, const Settings& s)
+{
+  return buildBoundaryRings(face, s, TracePeriodicBoundary(face, s));
+}
+
+Section::CapSkeleton Section::BuildCapSkeleton(const TopoDS_Face& face, const Settings& s)
+{
+  CapSkeleton result;
+  result.Disks = TraceEndCapDisks(face, s);
+  if (!result.Disks.Verified) return result;
+  result.Rings = buildBoundaryRings(face, s, result.Disks.Boundary);
+  result.Verified = result.Rings.Verified;
   return result;
 }
