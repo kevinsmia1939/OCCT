@@ -972,6 +972,14 @@ BRepClass3d_ImplicitCylinder::NativeFaces BRepClass3d_ImplicitCylinder::BuildImp
       s.HeightMinimum / scale, s.HeightMaximum / scale);
     face.Orientation(TopAbs_FORWARD);
     BRep_Builder builder;
+    const auto& side = result.Reference.Source.Boundary.Source.Boundary;
+    const double wireBound = side.Source.Chart.Graph.Boundary.Section.GeometricBound
+      + side.SurfaceDeviationBound;
+    require(std::isfinite(wireBound) && wireBound > 0 && wireBound <= s.DistanceTolerance,
+            "implicit_cylinder_trim_tolerance_budget");
+    // A new field face has its own trim policy; never mutate the primitive's
+    // tolerance or claim a smaller tolerance than the retained contour bound.
+    builder.UpdateFace(face, s.DistanceTolerance);
     auto wire = result.Reference.Source.Boundary.Wires.front();
     if (!negative) wire.Reverse(); // Compensate the face orientation below.
     builder.Add(face, wire);
@@ -1112,5 +1120,56 @@ BRepClass3d_ImplicitCylinder::NativeShell BRepClass3d_ImplicitCylinder::BuildNat
   catch (const Standard_AbortiveTransaction&) { throw; }
   catch (const Standard_Failure& error)
   { result.Reason = error.what() ? error.what() : "cylinder_native_shell_failed"; }
+  return result;
+}
+
+BRepClass3d_ImplicitCylinder::ShellTolerance BRepClass3d_ImplicitCylinder::CheckShellTolerance(
+  const TopoDS_Face& face, const Settings& s, bool negative, size_t maximumNestingTests,
+  int maximumDepth, size_t maximumCells)
+{
+  ShellTolerance result;
+  result.Source = BuildNativeShell(face, s, negative, maximumNestingTests, maximumDepth, maximumCells);
+  if (!result.Source.TopologyValidated) { result.Reason = result.Source.Reason; return result; }
+  try
+  {
+    const auto& side = result.Source.Source.Reference.Source.Boundary.Source.Boundary;
+    result.ContourBound = side.Source.Chart.Graph.Boundary.Section.GeometricBound;
+    result.SurfaceDeviationBound = side.SurfaceDeviationBound;
+    result.FieldWireBound = result.ContourBound + result.SurfaceDeviationBound;
+    const auto within = [&](double value) {
+      return std::isfinite(value) && value >= 0 && value <= s.DistanceTolerance;
+    };
+    require(result.ContourBound > 0 && within(result.FieldWireBound), "cylinder_shell_field_wire_bound");
+    for (const auto& fieldFace : result.Source.Source.Faces)
+      require(BRep_Tool::Tolerance(fieldFace) >= result.FieldWireBound, "cylinder_shell_field_face_underdeclared");
+    for (const auto& edge : side.FieldEdges)
+      require(BRep_Tool::Tolerance(edge) >= result.SurfaceDeviationBound,
+              "cylinder_shell_side_edge_underdeclared");
+    for (TopExp_Explorer it(result.Source.Shell, TopAbs_FACE); it.More(); it.Next())
+    {
+      checkpoint(s);
+      const double tolerance = BRep_Tool::Tolerance(TopoDS::Face(it.Current()));
+      require(within(tolerance), "cylinder_shell_face_tolerance_budget");
+      result.MaximumFaceTolerance = std::max(result.MaximumFaceTolerance, tolerance);
+    }
+    for (TopExp_Explorer it(result.Source.Shell, TopAbs_EDGE); it.More(); it.Next())
+    {
+      checkpoint(s);
+      const double tolerance = BRep_Tool::Tolerance(TopoDS::Edge(it.Current()));
+      require(within(tolerance), "cylinder_shell_edge_tolerance_budget");
+      result.MaximumEdgeTolerance = std::max(result.MaximumEdgeTolerance, tolerance);
+    }
+    for (TopExp_Explorer it(result.Source.Shell, TopAbs_VERTEX); it.More(); it.Next())
+    {
+      checkpoint(s);
+      const double tolerance = BRep_Tool::Tolerance(TopoDS::Vertex(it.Current()));
+      require(within(tolerance), "cylinder_shell_vertex_tolerance_budget");
+      result.MaximumVertexTolerance = std::max(result.MaximumVertexTolerance, tolerance);
+    }
+    result.ToleranceVerified = true; result.Reason = "cylinder_shell_tolerance_verified";
+  }
+  catch (const Standard_AbortiveTransaction&) { throw; }
+  catch (const Standard_Failure& error)
+  { result.Reason = error.what() ? error.what() : "cylinder_shell_tolerance_unresolved"; }
   return result;
 }

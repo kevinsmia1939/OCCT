@@ -152,5 +152,19 @@ public:
     const BRep_ImplicitCylinderSection::Settings&, bool negative = true,
     size_t maximumNestingTests = 2000000, int maximumDepth = 24,
     size_t maximumCells = 200000);
+  struct ShellTolerance
+  {
+    NativeShell Source;
+    bool ToleranceVerified = false;
+    double ContourBound = 0, SurfaceDeviationBound = 0, FieldWireBound = 0;
+    double MaximumFaceTolerance = 0, MaximumEdgeTolerance = 0, MaximumVertexTolerance = 0;
+    std::string Reason;
+  };
+  //! Audit declared model-length tolerances and combined field-wire bounds.
+  //! This is not a global shell-geometry, material-volume or solid certificate.
+  Standard_EXPORT static ShellTolerance CheckShellTolerance(const TopoDS_Face&,
+    const BRep_ImplicitCylinderSection::Settings&, bool negative = true,
+    size_t maximumNestingTests = 2000000, int maximumDepth = 24,
+    size_t maximumCells = 200000);
 };
 #endif

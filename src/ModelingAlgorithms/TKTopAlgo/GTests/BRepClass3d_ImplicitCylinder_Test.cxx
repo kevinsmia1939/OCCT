@@ -27,11 +27,11 @@ namespace
 {
 using Ops = BRepClass3d_ImplicitCylinder;
 using Settings = BRep_ImplicitCylinderSection::Settings;
-TopoDS_Face field(double iso = .21)
+TopoDS_Face field(double iso = .21, double tolerance = .1)
 {
   TopoDS_Face face;
   BRep_Builder().MakeImplicitFace(face, new Geom_ImplicitGyroid(10, iso),
-    gp_Pnt(-10, -10, -10), gp_Pnt(10, 10, 10), TopLoc_Location(), .1);
+    gp_Pnt(-10, -10, -10), gp_Pnt(10, 10, 10), TopLoc_Location(), tolerance);
   return face;
 }
 Settings settings()
@@ -485,6 +485,38 @@ TEST(BRepClass3dImplicitCylinder, NativeCylinderShellPairsSeamsAndHasSphericalVe
   ASSERT_GT(calls, 2); --calls;
   s.WorkCheckpoint = [] { if (--calls == 0) throw Standard_AbortiveTransaction("late shell cancellation"); };
   EXPECT_THROW(Ops::BuildNativeShell(placed, s), Standard_AbortiveTransaction);
+}
+
+TEST(BRepClass3dImplicitCylinder, ShellToleranceSeparatesSourcePolicyFromCombinedTrimBound)
+{
+  auto s = settings(); s.AngleMinimum = .27; s.AngleMaximum = .27 + 2 * std::acos(-1.);
+  s.HeightMinimum = -1.7; s.HeightMaximum = 1.3; s.DistanceTolerance = .05;
+  for (double tolerance : {1.e-6, .5}) for (bool negative : {false, true})
+  {
+    const auto source = field(.21, tolerance);
+    std::stringstream before; BRep_ImplicitIO::Write(source, before);
+    const auto result = Ops::CheckShellTolerance(source, s, negative);
+    ASSERT_TRUE(result.ToleranceVerified) << result.Reason;
+    EXPECT_GT(result.ContourBound, 0); EXPECT_GT(result.SurfaceDeviationBound, 0);
+    EXPECT_EQ(result.FieldWireBound, result.ContourBound + result.SurfaceDeviationBound);
+    EXPECT_LE(result.FieldWireBound, s.DistanceTolerance);
+    EXPECT_EQ(result.MaximumFaceTolerance, s.DistanceTolerance);
+    EXPECT_LE(result.MaximumEdgeTolerance, s.DistanceTolerance);
+    EXPECT_LE(result.MaximumVertexTolerance, s.DistanceTolerance);
+    EXPECT_EQ(BRep_Tool::Tolerance(result.Source.Source.Faces[0]), s.DistanceTolerance);
+    EXPECT_EQ(BRep_Tool::Tolerance(source), tolerance);
+    std::stringstream after; BRep_ImplicitIO::Write(source, after);
+    EXPECT_EQ(before.str(), after.str());
+  }
+  auto small = s; small.MaximumCells = 4;
+  const auto failed = Ops::CheckShellTolerance(field(), small);
+  EXPECT_FALSE(failed.ToleranceVerified); EXPECT_FALSE(failed.Source.TopologyValidated);
+  static size_t calls = 0;
+  calls = 0; s.WorkCheckpoint = [] { ++calls; };
+  ASSERT_TRUE(Ops::CheckShellTolerance(field(), s).ToleranceVerified);
+  ASSERT_GT(calls, 2); --calls;
+  s.WorkCheckpoint = [] { if (--calls == 0) throw Standard_AbortiveTransaction("late tolerance cancellation"); };
+  EXPECT_THROW(Ops::CheckShellTolerance(field(), s), Standard_AbortiveTransaction);
 }
 
 TEST(BRepClass3dImplicitCylinder, NativeCapsPartitionDiskAndShareSideRootVertices)
