@@ -5,11 +5,14 @@
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <Geom_Circle.hxx>
+#include <Geom_Line.hxx>
+#include <Geom2d_Line.hxx>
 #include <BRep_TImplicitFace.hxx>
 #include <Geom_ImplicitGyroid.hxx>
 #include <Standard_DomainError.hxx>
 #include <Standard_NotImplemented.hxx>
 #include <TopoDS_Iterator.hxx>
+#include <TopExp.hxx>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -495,6 +498,90 @@ static Section::RingResult buildBoundaryRings(const TopoDS_Face& face,
 Section::RingResult Section::BuildBoundaryRings(const TopoDS_Face& face, const Settings& s)
 {
   return buildBoundaryRings(face, s, TracePeriodicBoundary(face, s));
+}
+
+Section::ChartSkeleton Section::BuildChartSkeleton(const TopoDS_Face& face, const Settings& s)
+{
+  ChartSkeleton result;
+  result.Graph = TracePeriodicGraph(face, s);
+  if (!result.Graph.Verified) return result;
+  result.Rings = buildBoundaryRings(face, s, result.Graph.Boundary);
+  if (!result.Rings.Verified) return result;
+  BRep_Builder builder;
+  for (int cap = 0; cap < 2; ++cap)
+  {
+    checkpoint(s);
+    auto& arcs = result.Rings.Rings[cap];
+    // Root-free rings already have two half circles meeting at the chart seam.
+    if (arcs.front().LowerRoot == 0)
+    {
+      TopoDS_Vertex other;
+      TopExp::Vertices(arcs.front().Edge, result.SeamEnds[cap], other);
+      continue;
+    }
+    const auto wrap = arcs.back();
+    double first, last;
+    const auto circle = BRep_Tool::Curve(wrap.Edge, first, last);
+    TopoDS_Vertex a, b;
+    TopExp::Vertices(wrap.Edge, a, b);
+    const double tolerance = BRep_Tool::Tolerance(wrap.Edge);
+    builder.MakeVertex(result.SeamEnds[cap], circle->Value(s.AngleMaximum), tolerance);
+    const auto make = [&](TopoDS_Vertex start, TopoDS_Vertex end,
+                          double low, double high, size_t lower, size_t upper) {
+      RingArc arc;
+      arc.LowerRoot = lower; arc.UpperRoot = upper; arc.Negative = wrap.Negative;
+      builder.MakeEdge(arc.Edge, circle, tolerance);
+      start.Orientation(TopAbs_FORWARD); end.Orientation(TopAbs_REVERSED);
+      builder.Add(arc.Edge, start); builder.Add(arc.Edge, end);
+      builder.UpdateVertex(start, low, arc.Edge, BRep_Tool::Tolerance(start));
+      builder.UpdateVertex(end, high, arc.Edge, BRep_Tool::Tolerance(end));
+      builder.Range(arc.Edge, low, high);
+      if (cap == 0) arc.Edge.Reverse();
+      return arc;
+    };
+    arcs.back() = make(a, result.SeamEnds[cap], first, s.AngleMaximum, wrap.LowerRoot, 0);
+    arcs.push_back(make(result.SeamEnds[cap], b, s.AngleMinimum,
+                        last - 2 * std::acos(-1.), 0, wrap.UpperRoot));
+  }
+  result.Surface = new Geom_CylindricalSurface(s.Frame, s.Radius);
+  for (int cap = 0; cap < 2; ++cap)
+    for (const auto& arc : result.Rings.Rings[cap])
+    {
+      double first, last; BRep_Tool::Range(arc.Edge, first, last);
+      const occ::handle<Geom2d_Line> pc = new Geom2d_Line(
+        gp_Pnt2d(0, cap == 0 ? s.HeightMinimum : s.HeightMaximum), gp_Dir2d(1, 0));
+      builder.UpdateEdge(arc.Edge, pc, result.Surface, TopLoc_Location(), BRep_Tool::Tolerance(arc.Edge));
+      builder.Range(arc.Edge, result.Surface, TopLoc_Location(), first, last);
+      builder.SameRange(arc.Edge, true); builder.SameParameter(arc.Edge, true);
+    }
+  std::vector<std::pair<double, TopoDS_Vertex>> seam {{s.HeightMinimum, result.SeamEnds[0]},
+                                                    {s.HeightMaximum, result.SeamEnds[1]}};
+  for (const auto& node : result.Graph.Vertices)
+    if (node.Seam) seam.emplace_back(node.UV.Y(), node.Vertex);
+  std::sort(seam.begin(), seam.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+  const auto origin = Chart{s}.point(s.Radius * s.AngleMinimum, 0);
+  const occ::handle<Geom_Line> line = new Geom_Line(origin, s.Frame.Direction());
+  const occ::handle<Geom2d_Line> low = new Geom2d_Line(gp_Pnt2d(s.AngleMinimum, 0), gp_Dir2d(0, 1));
+  const occ::handle<Geom2d_Line> high = new Geom2d_Line(gp_Pnt2d(s.AngleMaximum, 0), gp_Dir2d(0, 1));
+  for (size_t i = 1; i < seam.size(); ++i)
+  {
+    checkpoint(s);
+    auto a = seam[i - 1].second, b = seam[i].second;
+    const double tolerance = std::max(BRep_Tool::Tolerance(a), BRep_Tool::Tolerance(b));
+    TopoDS_Edge edge;
+    builder.MakeEdge(edge, line, tolerance);
+    a.Orientation(TopAbs_FORWARD); b.Orientation(TopAbs_REVERSED);
+    builder.Add(edge, a); builder.Add(edge, b);
+    builder.UpdateVertex(a, seam[i - 1].first, edge, BRep_Tool::Tolerance(a));
+    builder.UpdateVertex(b, seam[i].first, edge, BRep_Tool::Tolerance(b));
+    builder.Range(edge, seam[i - 1].first, seam[i].first);
+    builder.UpdateEdge(edge, low, high, result.Surface, TopLoc_Location(), tolerance);
+    builder.Range(edge, result.Surface, TopLoc_Location(), seam[i - 1].first, seam[i].first);
+    builder.SameRange(edge, true); builder.SameParameter(edge, true);
+    result.SeamEdges.push_back(edge);
+  }
+  result.Verified = true;
+  return result;
 }
 
 Section::CapSkeleton Section::BuildCapSkeleton(const TopoDS_Face& face, const Settings& s)

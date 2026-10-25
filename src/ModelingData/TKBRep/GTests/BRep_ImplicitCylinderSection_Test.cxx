@@ -9,6 +9,7 @@
 #include <BRep_Tool.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <Geom_Circle.hxx>
+#include <Geom2d_Curve.hxx>
 #include <TopExp.hxx>
 #include <Geom_ImplicitGyroid.hxx>
 #include <Geom_ImplicitSphere.hxx>
@@ -274,6 +275,75 @@ TEST(BRepImplicitCylinderSection, PeriodicGraphRetainsSeamCellsAndCapVertexOwner
   EXPECT_FALSE(failed.Verified);
   EXPECT_TRUE(failed.Vertices.empty()); EXPECT_TRUE(failed.Arcs.empty());
   EXPECT_TRUE(failed.CurveVertices.empty()); EXPECT_TRUE(failed.Boundary.Roots.empty());
+}
+
+TEST(BRepImplicitCylinderSection, ChartSkeletonSplitsWrapAndSharesLogicalSeamEnds)
+{
+  auto s = settings();
+  s.Radius = .5; s.AngleMinimum = 3;
+  s.AngleMaximum = s.AngleMinimum + 2 * std::acos(-1.);
+  s.HeightMinimum = 0; s.HeightMaximum = .5;
+  for (double iso : {.21, 10.})
+  {
+    const auto result = Section::BuildChartSkeleton(field(iso), s);
+    ASSERT_TRUE(result.Verified);
+    ASSERT_TRUE(result.Graph.Verified);
+    ASSERT_FALSE(result.Surface.IsNull());
+    ASSERT_FALSE(result.SeamEdges.empty());
+    double height = s.HeightMinimum;
+    TopoDS_Vertex previous = result.SeamEnds[0];
+    for (const auto& edge : result.SeamEdges)
+    {
+      EXPECT_TRUE(BRep_Tool::IsClosed(edge, result.Surface, TopLoc_Location()));
+      double first, last;
+      const auto curve = BRep_Tool::Curve(edge, first, last);
+      EXPECT_EQ(first, height); EXPECT_GT(last, first); height = last;
+      TopoDS_Vertex a, b;
+      TopExp::Vertices(edge, a, b);
+      EXPECT_TRUE(a.IsSame(previous)); previous = b;
+      EXPECT_LT(curve->Value(first).Distance(BRep_Tool::Pnt(a)), 1.e-12);
+      EXPECT_LT(curve->Value(last).Distance(BRep_Tool::Pnt(b)), 1.e-12);
+    }
+    EXPECT_EQ(height, s.HeightMaximum);
+    EXPECT_TRUE(previous.IsSame(result.SeamEnds[1]));
+    for (int cap = 0; cap < 2; ++cap)
+    {
+      double span = 0;
+      int seamUses = 0;
+      ASSERT_FALSE(result.SeamEnds[cap].IsNull());
+      for (const auto& arc : result.Rings.Rings[cap])
+      {
+        double first, last;
+        const auto curve = BRep_Tool::Curve(arc.Edge, first, last);
+        double pfirst, plast;
+        const auto pc = BRep_Tool::CurveOnSurface(arc.Edge, result.Surface,
+                                                 TopLoc_Location(), pfirst, plast);
+        ASSERT_FALSE(pc.IsNull()); EXPECT_EQ(pfirst, first); EXPECT_EQ(plast, last);
+        for (double t : {first, (first + last) * .5, last})
+        {
+          const auto uv = pc->Value(t);
+          EXPECT_LT(result.Surface->Value(uv.X(), uv.Y()).Distance(curve->Value(t)), 1.e-12);
+        }
+        EXPECT_GE(first, s.AngleMinimum); EXPECT_LE(last, s.AngleMaximum);
+        EXPECT_GT(last, first); span += last - first;
+        TopoDS_Vertex a, b;
+        TopExp::Vertices(arc.Edge, a, b);
+        EXPECT_LT(BRep_Tool::Pnt(a).Distance(curve->Value(first)), 1.e-12);
+        EXPECT_LT(BRep_Tool::Pnt(b).Distance(curve->Value(last)), 1.e-12);
+        for (const auto& v : {a, b}) if (v.IsSame(result.SeamEnds[cap])) ++seamUses;
+        for (auto end : {std::make_pair(arc.LowerRoot, a), std::make_pair(arc.UpperRoot, b)})
+          if (end.first) EXPECT_TRUE(end.second.IsSame(
+            result.Graph.Boundary.Roots[end.first - 1].Vertex));
+      }
+      EXPECT_NEAR(span, 2 * std::acos(-1.), 1.e-12);
+      EXPECT_EQ(seamUses, 2);
+    }
+  }
+  s.MaximumCells = 4;
+  const auto failed = Section::BuildChartSkeleton(field(), s);
+  EXPECT_FALSE(failed.Verified);
+  EXPECT_TRUE(failed.Rings.Rings[0].empty());
+  EXPECT_TRUE(failed.SeamEnds[0].IsNull());
 }
 
 TEST(BRepImplicitCylinderSection, PeriodicOpenEndsBelongOnlyToHeightBoundary)

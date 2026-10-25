@@ -6,6 +6,7 @@
 #include <TopoDS_Vertex.hxx>
 #include <TopoDS_Edge.hxx>
 #include <gp_Pnt2d.hxx>
+#include <Geom_CylindricalSurface.hxx>
 #include <array>
 
 //! Derivative-bounded gyroid section on a finite open cylindrical chart.
@@ -82,7 +83,7 @@ public:
   struct RingArc
   {
     TopoDS_Edge Edge; //!< Analytic circle, outward cap orientation (bottom reversed).
-    size_t LowerRoot = 0, UpperRoot = 0; //!< Ascending curve-parameter root IDs; 0 for root-free rings.
+    size_t LowerRoot = 0, UpperRoot = 0; //!< Root IDs; 0 denotes synthetic root-free/chart-seam ends.
     bool Negative = false; //!< F<0 between root brackets; endpoint uncertainty is retained.
   };
   struct RingResult
@@ -95,6 +96,18 @@ public:
   //! Returns no edges unless every interval and root incidence passes.
   //! Does not construct cap regions, cylindrical faces, shells or solids.
   Standard_EXPORT static RingResult BuildBoundaryRings(const TopoDS_Face&, const Settings&);
+  struct ChartSkeleton
+  {
+    PeriodicGraph Graph;
+    RingResult Rings;
+    std::array<TopoDS_Vertex, 2> SeamEnds;
+    occ::handle<Geom_CylindricalSurface> Surface;
+    std::vector<TopoDS_Edge> SeamEdges; //!< Increasing height, paired angular p-curves.
+    bool Verified = false;
+  };
+  //! One shared side/ring snapshot. Wrap arcs split at the chart seam, using
+  //! a single vertex per cap for both parameter branches. No side faces yet.
+  Standard_EXPORT static ChartSkeleton BuildChartSkeleton(const TopoDS_Face&, const Settings&);
   struct DiskResult
   {
     BoundaryResult Boundary;
