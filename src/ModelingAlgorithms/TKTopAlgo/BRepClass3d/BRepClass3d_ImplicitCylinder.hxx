@@ -39,5 +39,31 @@ public:
   Standard_EXPORT static ChartCaps BuildChartCaps(const TopoDS_Face&,
     const BRep_ImplicitCylinderSection::Settings&, bool negative = true,
     size_t maximumNestingTests = 2000000);
+  struct SideBoundary
+  {
+    ChartCaps Source;
+    std::vector<TopoDS_Edge> FieldEdges;
+    bool Verified = false;
+    double SurfaceDeviationBound = 0;
+    std::string Reason;
+  };
+  //! Split field contours only at logical seam/cap vertices. Degree-1 3D and
+  //! UV curves retain a curvature-based cylinder deviation allowance. Does not
+  //! yet certify material cycles, side faces, implicit attachments or solids.
+  Standard_EXPORT static SideBoundary BuildSideBoundary(const TopoDS_Face&,
+    const BRep_ImplicitCylinderSection::Settings&, bool negative = true,
+    size_t maximumNestingTests = 2000000);
+  struct Sides
+  {
+    SideBoundary Boundary;
+    std::vector<TopoDS_Face> Faces;
+    bool TopologyValidated = false;
+    std::string Reason;
+  };
+  //! Retained cylindrical material regions. No implicit-face attachment or
+  //! closed-solid qualification follows from ordinary side-face validity.
+  Standard_EXPORT static Sides BuildSides(const TopoDS_Face&,
+    const BRep_ImplicitCylinderSection::Settings&, bool negative = true,
+    size_t maximumNestingTests = 2000000);
 };
 #endif

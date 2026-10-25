@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <map>
 
 namespace
 {
@@ -269,5 +270,276 @@ BRepClass3d_ImplicitCylinder::ChartCaps BRepClass3d_ImplicitCylinder::BuildChart
   ChartCaps result;
   result.Chart = std::move(source.Chart);
   result.Regions = buildCapsFromSkeleton(face, s, negative, maximumNestingTests, std::move(source.Caps));
+  return result;
+}
+
+BRepClass3d_ImplicitCylinder::SideBoundary BRepClass3d_ImplicitCylinder::BuildSideBoundary(
+  const TopoDS_Face& face, const Settings& s, bool negative, size_t maximumNestingTests)
+{
+  SideBoundary result;
+  result.Source = BuildChartCaps(face, s, negative, maximumNestingTests);
+  if (!result.Source.Regions.TopologyValidated)
+  { result.Reason = result.Source.Regions.Reason; return result; }
+  const auto& graph = result.Source.Chart.Graph;
+  const auto surface = result.Source.Chart.Surface;
+  const double turn = 2 * std::acos(-1.);
+  const double magnitude = 1 + s.Radius + std::abs(s.HeightMinimum) + std::abs(s.HeightMaximum)
+    + s.Frame.Location().Distance(gp_Pnt());
+  const double precision = 4096 * std::numeric_limits<double>::epsilon() * magnitude
+    * (1 + std::abs(s.AngleMinimum) + std::abs(s.AngleMaximum));
+  BRep_Builder builder;
+  try
+  {
+    require(std::isfinite(precision) && precision < s.DistanceTolerance, "side_coordinate_precision");
+    const auto data = occ::down_cast<BRep_TImplicitFace>(face.TShape());
+    const auto* field = static_cast<const Geom_ImplicitGyroid*>(data->Field().get());
+    const double scale = std::abs((face.Location() * data->Location()).Transformation().ScaleFactor());
+    const double k = 2 * std::acos(-1.) / field->Period() / scale;
+    const double hessian = 4 * k * k;
+    const double lipschitz = field->LipschitzBound() / scale;
+    for (size_t c = 0; c < graph.CurveVertices.size(); ++c)
+    {
+      checkpoint(s);
+      auto ids = graph.CurveVertices[c];
+      require(ids.size() >= 2, "side_empty_contour");
+      const bool closed = graph.Boundary.Section.Curves[c].Closed;
+      if (closed)
+      {
+        ids.pop_back();
+        const auto seam = std::find_if(ids.begin(), ids.end(), [&](size_t id) {
+          return graph.Vertices[id].Seam;
+        });
+        if (seam != ids.end()) std::rotate(ids.begin(), seam, ids.end());
+        ids.push_back(ids.front());
+      }
+      size_t begin = 0;
+      while (begin + 1 < ids.size())
+      {
+        size_t end = begin + 1;
+        while (end + 1 < ids.size() && !graph.Vertices[ids[end]].Seam) ++end;
+        const int count = int(end - begin + 1);
+        std::vector<gp_Pnt2d> uv;
+        for (size_t i = begin; i <= end; ++i)
+        {
+          auto p = graph.Vertices[ids[i]].UV;
+          if (!uv.empty()) p.SetX(p.X() + turn * std::round((uv.back().X() - p.X()) / turn));
+          uv.push_back(p);
+        }
+        double mean = 0;
+        for (const auto& p : uv) mean += (p.X() - s.AngleMinimum) / count;
+        const double shift = turn * std::floor(mean / turn);
+        for (auto& p : uv)
+        {
+          p.SetX(p.X() - shift);
+          require(p.X() >= s.AngleMinimum - precision / s.Radius
+                    && p.X() <= s.AngleMaximum + precision / s.Radius,
+                  "side_unsplit_chart_seam");
+        }
+        NCollection_Array1<gp_Pnt> poles(1, count);
+        NCollection_Array1<gp_Pnt2d> poles2d(1, count);
+        NCollection_Array1<double> knots(1, count);
+        NCollection_Array1<int> mults(1, count);
+        int direction = 0;
+        double deviation = 0;
+        for (int i = 1; i <= count; ++i)
+        {
+          checkpoint(s);
+          const auto& p = graph.Vertices[ids[begin + size_t(i - 1)]].Point;
+          poles.SetValue(i, p); poles2d.SetValue(i, uv[size_t(i - 1)]);
+          knots.SetValue(i, i - 1); mults.SetValue(i, i == 1 || i == count ? 2 : 1);
+          if (i == 1) continue;
+          const auto& a = poles.Value(i - 1);
+          const gp_Vec tangent(a, p);
+          const double length = tangent.Magnitude();
+          require(length > precision, "side_collapsed_segment");
+          const double angle = (uv[size_t(i - 2)].X() + uv[size_t(i - 1)].X()) * .5;
+          const double delta = std::abs(uv[size_t(i - 1)].X() - uv[size_t(i - 2)].X());
+          deviation = std::max(deviation, s.Radius * delta * delta / 8 + precision);
+          const gp_Vec normal = gp_Vec(s.Frame.XDirection()) * std::cos(angle)
+                              + gp_Vec(s.Frame.YDirection()) * std::sin(angle);
+          const auto gradient = BRep_ImplicitTool::Gradient(face, gp_Pnt((a.XYZ() + p.XYZ()) * .5));
+          const double orientation = tangent.Dot(normal.Crossed(gradient)) * (negative ? 1 : -1);
+          const double uncertainty = length * (hessian * graph.Boundary.Section.GeometricBound
+            + lipschitz * delta * .5) + precision * (1 + gradient.Magnitude());
+          require(std::abs(orientation) > uncertainty, "side_orientation_unresolved");
+          const int sign = orientation > 0 ? 1 : -1;
+          require(direction == 0 || direction == sign, "side_inconsistent_orientation");
+          direction = sign;
+        }
+        auto first = graph.Vertices[ids[begin]].Vertex, last = graph.Vertices[ids[end]].Vertex;
+        if (first.IsNull())
+        {
+          require(closed && begin == 0 && end + 1 == ids.size(), "side_missing_endpoint");
+          builder.MakeVertex(first, poles.Value(1), precision); last = first;
+        }
+        require(!last.IsNull(), "side_missing_endpoint");
+        const double tolerance = std::max({deviation, BRep_Tool::Tolerance(first), BRep_Tool::Tolerance(last)});
+        require(tolerance <= s.DistanceTolerance, "side_edge_tolerance");
+        const occ::handle<Geom_BSplineCurve> geometry = new Geom_BSplineCurve(poles, knots, mults, 1);
+        const occ::handle<Geom2d_BSplineCurve> pc = new Geom2d_BSplineCurve(poles2d, knots, mults, 1);
+        TopoDS_Edge edge; builder.MakeEdge(edge, geometry, tolerance);
+        first.Orientation(TopAbs_FORWARD); last.Orientation(TopAbs_REVERSED);
+        builder.Add(edge, first); builder.Add(edge, last);
+        builder.UpdateVertex(first, 0, edge, BRep_Tool::Tolerance(first));
+        builder.UpdateVertex(last, count - 1, edge, BRep_Tool::Tolerance(last));
+        builder.Range(edge, 0, count - 1);
+        builder.UpdateEdge(edge, pc, surface, TopLoc_Location(), tolerance);
+        builder.Range(edge, surface, TopLoc_Location(), 0, count - 1);
+        builder.SameRange(edge, true); builder.SameParameter(edge, true);
+        if (direction < 0) edge.Reverse();
+        result.FieldEdges.push_back(edge);
+        result.SurfaceDeviationBound = std::max(result.SurfaceDeviationBound, deviation);
+        begin = end;
+      }
+    }
+    result.Verified = true; result.Reason = "side_boundary_verified";
+  }
+  catch (const Standard_AbortiveTransaction&) { throw; }
+  catch (const Standard_Failure& error)
+  {
+    result.FieldEdges.clear(); result.SurfaceDeviationBound = 0;
+    result.Reason = error.what() ? error.what() : "side_boundary_failed";
+  }
+  return result;
+}
+
+BRepClass3d_ImplicitCylinder::Sides BRepClass3d_ImplicitCylinder::BuildSides(
+  const TopoDS_Face& source, const Settings& s, bool negative, size_t maximumNestingTests)
+{
+  Sides result;
+  result.Boundary = BuildSideBoundary(source, s, negative, maximumNestingTests);
+  if (!result.Boundary.Verified) { result.Reason = result.Boundary.Reason; return result; }
+  const auto& chart = result.Boundary.Source.Chart;
+  const auto surface = chart.Surface;
+  BRep_Builder builder;
+  struct SideLink { TopoDS_Edge Edge; double Area, Length, Tolerance; gp_Pnt2d Witness; int Begin, End; };
+  struct SideCycle { TopoDS_Wire Wire; TopoDS_Face Interior; gp_Pnt2d Witness; double Area; int Parent = -1; };
+  try
+  {
+    const double precision = 8192 * std::numeric_limits<double>::epsilon()
+      * (1 + s.Radius + std::abs(s.HeightMinimum) + std::abs(s.HeightMaximum)
+         + s.Frame.Location().Distance(gp_Pnt()))
+      * (1 + std::abs(s.AngleMinimum) + std::abs(s.AngleMaximum));
+    require(precision < s.DistanceTolerance, "side_region_precision");
+    std::vector<TopoDS_Edge> edges = result.Boundary.FieldEdges;
+    for (const auto& ring : chart.Rings.Rings)
+      for (const auto& arc : ring) if (arc.Negative == negative)
+      { auto edge = arc.Edge; edge.Reverse(); edges.push_back(edge); }
+    for (const auto& edge : chart.SeamEdges)
+    {
+      checkpoint(s);
+      double first, last; BRep_Tool::Range(edge, first, last);
+      const auto p = surface->Value(s.AngleMinimum, (first + last) * .5);
+      const double value = BRep_ImplicitTool::Value(source, p);
+      const auto gradient = BRep_ImplicitTool::Gradient(source, p);
+      require(std::isfinite(value) && std::abs(value) > precision * (1 + gradient.Magnitude()),
+              "side_seam_material_unresolved");
+      if ((value < 0) == negative)
+      { edges.push_back(edge); auto reverse = edge; reverse.Reverse(); edges.push_back(reverse); }
+    }
+    NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> vertices;
+    NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> seamVertices;
+    seamVertices.Add(chart.SeamEnds[0]); seamVertices.Add(chart.SeamEnds[1]);
+    for (const auto& node : chart.Graph.Vertices)
+    { checkpoint(s); if (node.Seam) seamVertices.Add(node.Vertex); }
+    std::map<std::pair<int, int>, int> occurrences;
+    const auto occurrence = [&](const TopoDS_Vertex& v, const gp_Pnt2d& uv) {
+      const bool seam = seamVertices.Contains(v);
+      const int branch = seam ? (std::abs(uv.X() - s.AngleMinimum)
+                              < std::abs(uv.X() - s.AngleMaximum) ? 1 : 2) : 0;
+      const auto key = std::make_pair(vertices.Add(v), branch);
+      const auto found = occurrences.find(key);
+      if (found != occurrences.end()) return found->second;
+      const int id = int(occurrences.size()); occurrences.emplace(key, id); return id;
+    };
+    std::vector<SideLink> links;
+    for (const auto& edge : edges)
+    {
+      checkpoint(s);
+      double first, last;
+      const auto pc = BRep_Tool::CurveOnSurface(edge, surface, TopLoc_Location(), first, last);
+      require(!pc.IsNull(), "side_missing_pcurve");
+      std::vector<gp_Pnt2d> points;
+      const auto bs = occ::down_cast<Geom2d_BSplineCurve>(pc);
+      if (!bs.IsNull())
+        for (int i = 1; i <= bs->NbPoles(); ++i) points.push_back(bs->Pole(i));
+      else { points.push_back(pc->Value(first)); points.push_back(pc->Value(last)); }
+      if (edge.Orientation() == TopAbs_REVERSED) std::reverse(points.begin(), points.end());
+      double area = 0, length = 0;
+      for (size_t i = 1; i < points.size(); ++i)
+      {
+        const auto& a = points[i - 1]; const auto& b = points[i];
+        area += .5 * s.Radius * (a.X() * b.Y() - b.X() * a.Y());
+        length += std::hypot(s.Radius * (b.X() - a.X()), b.Y() - a.Y());
+      }
+      TopoDS_Vertex a, b; TopExp::Vertices(edge, a, b, true);
+      require(!a.IsNull() && !b.IsNull(), "side_missing_vertices");
+      links.push_back({edge, area, length, BRep_Tool::Tolerance(edge),
+        pc->Value((first + last) * .5), occurrence(a, points.front()), occurrence(b, points.back())});
+    }
+    std::vector<int> outgoing(occurrences.size(), -1), incoming(occurrences.size(), 0);
+    for (size_t i = 0; i < links.size(); ++i)
+    {
+      require(outgoing[size_t(links[i].Begin)] == -1, "side_branched_material_cycle");
+      outgoing[size_t(links[i].Begin)] = int(i); ++incoming[size_t(links[i].End)];
+    }
+    for (size_t i = 0; i < incoming.size(); ++i)
+      require(incoming[i] == 1 && outgoing[i] >= 0, "side_open_material_cycle");
+    std::vector<bool> used(links.size(), false);
+    std::vector<SideCycle> cycles;
+    for (size_t first = 0; first < links.size(); ++first)
+    {
+      if (used[first]) continue;
+      SideCycle cycle; builder.MakeWire(cycle.Wire); cycle.Area = 0; cycle.Witness = links[first].Witness;
+      size_t current = first;
+      double length = 0, tolerance = precision;
+      do
+      {
+        checkpoint(s);
+        require(!used[current], "side_joined_foreign_cycle"); used[current] = true;
+        const auto& link = links[current]; builder.Add(cycle.Wire, link.Edge);
+        cycle.Area += link.Area; length += link.Length; tolerance = std::max(tolerance, link.Tolerance);
+        current = size_t(outgoing[size_t(link.End)]);
+      } while (current != first);
+      cycle.Wire.Closed(true);
+      require(std::isfinite(cycle.Area) && std::isfinite(length)
+                && std::abs(cycle.Area) > (precision + tolerance) * length,
+              "side_cycle_area_unresolved");
+      auto positive = cycle.Wire; if (cycle.Area < 0) positive.Reverse();
+      builder.MakeFace(cycle.Interior, surface, precision); builder.Add(cycle.Interior, positive);
+      require(BRepCheck_Analyzer(cycle.Interior).IsValid(), "side_cycle_invalid_topology");
+      cycles.push_back(cycle);
+    }
+    size_t tests = 0;
+    for (size_t i = 0; i < cycles.size(); ++i)
+    {
+      double parentArea = std::numeric_limits<double>::infinity();
+      for (size_t j = 0; j < cycles.size(); ++j)
+      {
+        checkpoint(s); require(++tests <= maximumNestingTests, "side_nesting_budget");
+        if (i == j || std::abs(cycles[j].Area) <= std::abs(cycles[i].Area)) continue;
+        const auto state = BRepClass_FaceClassifier(cycles[j].Interior, cycles[i].Witness, precision).State();
+        require(state != TopAbs_ON, "side_touching_cycles");
+        if (state == TopAbs_IN && std::abs(cycles[j].Area) < parentArea)
+        { parentArea = std::abs(cycles[j].Area); cycles[i].Parent = int(j); }
+      }
+      if (cycles[i].Parent < 0) require(cycles[i].Area > 0, "side_hole_without_outer_cycle");
+      else require((cycles[i].Area > 0) != (cycles[size_t(cycles[i].Parent)].Area > 0),
+                    "side_inconsistent_material_nesting");
+    }
+    for (size_t i = 0; i < cycles.size(); ++i)
+    {
+      if (cycles[i].Area < 0) continue;
+      TopoDS_Face face; builder.MakeFace(face, surface, precision); builder.Add(face, cycles[i].Wire);
+      for (const auto& hole : cycles)
+        if (hole.Parent == int(i) && hole.Area < 0) builder.Add(face, hole.Wire);
+      require(BRepCheck_Analyzer(face).IsValid(), "side_region_invalid_topology");
+      result.Faces.push_back(face);
+    }
+    result.TopologyValidated = true; result.Reason = "side_topology_validated";
+  }
+  catch (const Standard_AbortiveTransaction&) { throw; }
+  catch (const Standard_Failure& error)
+  { result.Faces.clear(); result.Reason = error.what() ? error.what() : "side_region_failed"; }
   return result;
 }

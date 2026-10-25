@@ -11,6 +11,7 @@
 #include <BRepGProp.hxx>
 #include <GProp_GProps.hxx>
 #include <Geom_ImplicitGyroid.hxx>
+#include <Geom2d_Curve.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS_Wire.hxx>
@@ -118,6 +119,120 @@ TEST(BRepClass3dImplicitCylinder, ChartSeamBuildsValidOutwardCylinderFace)
                           * (s.HeightMaximum - s.HeightMinimum), 1.e-8);
   EXPECT_EQ(BRepClass_FaceClassifier(face, gp_Pnt(s.Radius, 0, .25), 1.e-7).State(), TopAbs_IN);
   EXPECT_EQ(BRepClass_FaceClassifier(face, gp_Pnt(s.Radius, 0, 1), 1.e-7).State(), TopAbs_OUT);
+}
+
+TEST(BRepClass3dImplicitCylinder, SideFieldEdgesShareChartVerticesAndBoundCylinderDeviation)
+{
+  for (bool closed : {false, true})
+    for (bool negative : {false, true})
+    {
+      auto s = settings();
+      if (closed)
+      { s.AngleMinimum = .27; s.AngleMaximum = .27 + 2 * std::acos(-1.);
+        s.HeightMinimum = -1.7; s.HeightMaximum = 1.3; }
+      const auto result = Ops::BuildSideBoundary(field(), s, negative);
+      ASSERT_TRUE(result.Verified) << result.Reason;
+      ASSERT_FALSE(result.FieldEdges.empty());
+      EXPECT_LE(result.SurfaceDeviationBound, s.DistanceTolerance);
+      const auto& chart = result.Source.Chart;
+      for (const auto& edge : result.FieldEdges)
+      {
+        double first, last, pf, pl;
+        const auto curve = BRep_Tool::Curve(edge, first, last);
+        const auto pc = BRep_Tool::CurveOnSurface(edge, chart.Surface, TopLoc_Location(), pf, pl);
+        ASSERT_FALSE(pc.IsNull()); EXPECT_EQ(first, pf); EXPECT_EQ(last, pl);
+        for (int i = 0; i <= 100; ++i)
+        {
+          const double t = first + (last - first) * i / 100;
+          const auto uv = pc->Value(t);
+          EXPECT_GE(uv.X(), s.AngleMinimum - 1.e-12);
+          EXPECT_LE(uv.X(), s.AngleMaximum + 1.e-12);
+          EXPECT_LE(curve->Value(t).Distance(chart.Surface->Value(uv.X(), uv.Y())),
+                    result.SurfaceDeviationBound);
+        }
+        TopoDS_Vertex a, b; TopExp::Vertices(edge, a, b);
+        for (const auto& v : {a, b})
+        {
+          bool shared = false;
+          for (const auto& node : chart.Graph.Vertices)
+            if (!node.Vertex.IsNull() && node.Vertex.IsSame(v)) shared = true;
+          EXPECT_TRUE(shared);
+        }
+      }
+    }
+  auto s = settings(); s.MaximumCells = 4;
+  const auto failed = Ops::BuildSideBoundary(field(), s);
+  EXPECT_FALSE(failed.Verified); EXPECT_TRUE(failed.FieldEdges.empty());
+}
+
+TEST(BRepClass3dImplicitCylinder, NativeSideRegionsPartitionCylinderAndClassifyMaterial)
+{
+  for (bool winding : {false, true})
+  {
+    auto s = settings();
+    if (winding)
+    { s.AngleMinimum = .27; s.AngleMaximum = .27 + 2 * std::acos(-1.);
+      s.HeightMinimum = -1.7; s.HeightMaximum = 1.3; }
+    const auto source = field();
+    const auto negative = Ops::BuildSides(source, s, true);
+    const auto positive = Ops::BuildSides(source, s, false);
+    ASSERT_TRUE(negative.TopologyValidated) << negative.Reason;
+    ASSERT_TRUE(positive.TopologyValidated) << positive.Reason;
+    EXPECT_NEAR(area(negative.Faces) + area(positive.Faces),
+                2 * std::acos(-1.) * s.Radius * (s.HeightMaximum - s.HeightMinimum), 1.e-6);
+    for (int i = 0; i < 31; ++i) for (int j = 0; j < 23; ++j)
+    {
+      const double u = s.AngleMinimum + (s.AngleMaximum - s.AngleMinimum) * (i + .37) / 31;
+      const double v = s.HeightMinimum + (s.HeightMaximum - s.HeightMinimum) * (j + .43) / 23;
+      const auto p = negative.Boundary.Source.Chart.Surface->Value(u, v);
+      const double value = BRep_ImplicitTool::Value(source, p);
+      if (std::abs(value) < .25) continue;
+      for (const auto* result : {&negative, &positive})
+      {
+        int inside = 0;
+        for (const auto& face : result->Faces)
+        {
+          EXPECT_TRUE(BRepCheck_Analyzer(face).IsValid());
+          const auto state = BRepClass_FaceClassifier(face, gp_Pnt2d(u, v), 1.e-7).State();
+          EXPECT_NE(state, TopAbs_ON); inside += state == TopAbs_IN;
+        }
+        EXPECT_EQ(inside, (value < 0) == result->Boundary.Source.Regions.Negative ? 1 : 0);
+      }
+    }
+  }
+  const auto full = Ops::BuildSides(field(10), settings());
+  ASSERT_TRUE(full.TopologyValidated) << full.Reason;
+  ASSERT_EQ(full.Faces.size(), 1);
+  const auto empty = Ops::BuildSides(field(10), settings(), false);
+  EXPECT_TRUE(empty.TopologyValidated); EXPECT_TRUE(empty.Faces.empty());
+}
+
+TEST(BRepClass3dImplicitCylinder, NativeSidesPlacementCancellationAndFailureCleanup)
+{
+  auto s = settings();
+  const auto source = field();
+  std::stringstream before; BRep_ImplicitIO::Write(source, before);
+  const auto original = Ops::BuildSides(source, s);
+  ASSERT_TRUE(original.TopologyValidated) << original.Reason;
+  gp_Trsf move; move.SetTranslation(gp_Vec(1.2, -.4, 2.1));
+  auto placed = source; placed.Location(TopLoc_Location(move));
+  s.Frame.Transform(move);
+  const auto moved = Ops::BuildSides(placed, s);
+  ASSERT_TRUE(moved.TopologyValidated) << moved.Reason;
+  EXPECT_NEAR(area(original.Faces), area(moved.Faces), 1.e-6);
+  std::stringstream after; BRep_ImplicitIO::Write(source, after);
+  EXPECT_EQ(before.str(), after.str());
+  s = settings(); s.MaximumCells = 4;
+  const auto budget = Ops::BuildSides(source, s);
+  EXPECT_FALSE(budget.TopologyValidated); EXPECT_TRUE(budget.Faces.empty());
+  s = settings();
+  static size_t calls = 0;
+  calls = 0; s.WorkCheckpoint = [] { ++calls; };
+  ASSERT_TRUE(Ops::BuildSides(source, s).TopologyValidated);
+  ASSERT_GT(calls, 2);
+  --calls;
+  s.WorkCheckpoint = [] { if (--calls == 0) throw Standard_AbortiveTransaction("late side cancellation"); };
+  EXPECT_THROW(Ops::BuildSides(source, s), Standard_AbortiveTransaction);
 }
 
 TEST(BRepClass3dImplicitCylinder, NativeCapsPartitionDiskAndShareSideRootVertices)
