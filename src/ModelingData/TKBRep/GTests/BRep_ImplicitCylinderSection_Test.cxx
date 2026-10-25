@@ -196,6 +196,86 @@ TEST(BRepImplicitCylinderSection, PeriodicSharedSeamClosesOneAnalyticLoop)
   EXPECT_THROW(Section::TracePeriodic(face, s), Standard_DomainError);
 }
 
+TEST(BRepImplicitCylinderSection, PeriodicGraphRetainsSeamCellsAndCapVertexOwnership)
+{
+  auto s = settings();
+  s.Radius = .5; s.AngleMinimum = .27;
+  s.AngleMaximum = s.AngleMinimum + 2 * std::acos(-1.);
+  s.HeightMinimum = -1.7; s.HeightMaximum = 1.3;
+  for (bool capped : {false, true})
+  {
+    if (capped)
+    {
+      s.AngleMinimum = 3; s.AngleMaximum = s.AngleMinimum + 2 * std::acos(-1.);
+      s.HeightMinimum = 0; s.HeightMaximum = .5;
+    }
+    const auto graph = Section::TracePeriodicGraph(field(), s);
+    ASSERT_TRUE(graph.Verified);
+    const auto& curves = graph.Boundary.Section.Curves;
+    ASSERT_EQ(graph.CurveVertices.size(), curves.size());
+    size_t segmentCount = 0, seamCount = 0;
+    std::vector<std::vector<int>> seamCells(graph.Vertices.size());
+    for (const auto& arc : graph.Arcs)
+    {
+      ASSERT_LT(arc.First, graph.Vertices.size());
+      ASSERT_LT(arc.Last, graph.Vertices.size());
+      EXPECT_GE(arc.U, 0); EXPECT_LT(arc.U, graph.Boundary.Section.Resolution);
+      EXPECT_GE(arc.V, 0); EXPECT_LT(arc.V, graph.Boundary.Section.Resolution);
+      for (auto id : {arc.First, arc.Last})
+        if (graph.Vertices[id].Seam) seamCells[id].push_back(arc.U);
+    }
+    for (size_t id = 0; id < graph.Vertices.size(); ++id)
+    {
+      const auto& node = graph.Vertices[id];
+      const auto p = s.Frame.Location().Translated(
+        gp_Vec(s.Frame.XDirection()) * (s.Radius * std::cos(node.UV.X()))
+        + gp_Vec(s.Frame.YDirection()) * (s.Radius * std::sin(node.UV.X()))
+        + gp_Vec(s.Frame.Direction()) * node.UV.Y());
+      EXPECT_LT(p.Distance(node.Point), 1.e-12);
+      if (!node.Seam) continue;
+      ++seamCount;
+      EXPECT_FALSE(node.Vertex.IsNull());
+      ASSERT_EQ(seamCells[id].size(), 2);
+      std::sort(seamCells[id].begin(), seamCells[id].end());
+      EXPECT_EQ(seamCells[id][0], 0);
+      EXPECT_EQ(seamCells[id][1], graph.Boundary.Section.Resolution - 1);
+    }
+    if (!capped) EXPECT_GT(seamCount, 0);
+    for (size_t i = 0; i < curves.size(); ++i)
+    {
+      const auto& ids = graph.CurveVertices[i];
+      ASSERT_EQ(ids.size(), curves[i].Points.size());
+      ASSERT_EQ(graph.CurveUV[i].size(), ids.size());
+      segmentCount += ids.size() - 1;
+      for (size_t j = 0; j < ids.size(); ++j)
+        EXPECT_EQ(graph.Vertices[ids[j]].Point.Distance(curves[i].Points[j]), 0);
+      for (size_t j = 1; j < ids.size(); ++j)
+        EXPECT_LE(std::abs(graph.CurveUV[i][j].X() - graph.CurveUV[i][j - 1].X()),
+                  2 * std::acos(-1.) / graph.Boundary.Section.Resolution + 1.e-12);
+      if (curves[i].Closed)
+      {
+        EXPECT_EQ(ids.front(), ids.back());
+        if (!capped) EXPECT_NEAR(std::abs(graph.CurveUV[i].back().X()
+                                        - graph.CurveUV[i].front().X()), 2 * std::acos(-1.), 1.e-12);
+      }
+      else
+        for (int end = 0; end < 2; ++end)
+        {
+          const auto root = graph.Boundary.CurveRoots[i][end];
+          ASSERT_GT(root, 0);
+          EXPECT_TRUE(graph.Vertices[end ? ids.back() : ids.front()].Vertex.IsSame(
+            graph.Boundary.Roots[root - 1].Vertex));
+        }
+    }
+    EXPECT_EQ(segmentCount, graph.Arcs.size());
+  }
+  s.MaximumCells = 4;
+  const auto failed = Section::TracePeriodicGraph(field(), s);
+  EXPECT_FALSE(failed.Verified);
+  EXPECT_TRUE(failed.Vertices.empty()); EXPECT_TRUE(failed.Arcs.empty());
+  EXPECT_TRUE(failed.CurveVertices.empty()); EXPECT_TRUE(failed.Boundary.Roots.empty());
+}
+
 TEST(BRepImplicitCylinderSection, PeriodicOpenEndsBelongOnlyToHeightBoundary)
 {
   auto s = settings();

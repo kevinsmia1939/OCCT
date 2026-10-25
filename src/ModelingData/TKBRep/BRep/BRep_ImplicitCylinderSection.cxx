@@ -51,8 +51,14 @@ struct Edge { int state = 0; size_t vertex = 0; }; // empty, unique root, unreso
 
 Section::Result pass(const TopoDS_Face& face, const Section::Settings& s,
                      int n, double lipschitz, double hessian, double reserve, double precision,
-                     bool periodic, Section::BoundaryResult* details = nullptr)
+                     bool periodic, Section::BoundaryResult* details = nullptr,
+                     Section::PeriodicGraph* graph = nullptr)
 {
+  if (graph)
+  {
+    graph->Vertices.clear(); graph->Arcs.clear(); graph->CurveVertices.clear(); graph->CurveUV.clear();
+    graph->Verified = false;
+  }
   if (details)
   {
     details->Roots.clear(); details->CurveRoots.clear();
@@ -123,6 +129,16 @@ Section::Result pass(const TopoDS_Face& face, const Section::Settings& s,
     const double t = low + (high - low) * .5;
     const auto p = chart.point(u + (alongU ? du * t : 0), v + (alongU ? 0 : dv * t));
     e.state = 1; e.vertex = points.size(); points.push_back(p);
+    if (graph)
+    {
+      Section::ChartVertex node;
+      node.Point = p;
+      node.UV.SetCoord((u + (alongU ? du * t : 0)) / s.Radius,
+                       v + (alongU ? 0 : dv * t));
+      node.Seam = periodic && !alongU && i == 0;
+      if (node.Seam) BRep_Builder().MakeVertex(node.Vertex, p, bracket * .5 + precision);
+      graph->Vertices.push_back(std::move(node));
+    }
     boundary.push_back(alongU ? j == 0 || j == n : !periodic && (i == 0 || i == n));
     if (details && alongU && (j == 0 || j == n))
     {
@@ -133,6 +149,7 @@ Section::Result pass(const TopoDS_Face& face, const Section::Settings& s,
       root.Last = chart.point(u + du * high, v);
       root.HeightBoundary = j == 0 ? 0 : 1;
       BRep_Builder().MakeVertex(root.Vertex, p, bracket * .5 + precision);
+      if (graph) graph->Vertices[e.vertex].Vertex = root.Vertex;
       capRoots.emplace_back(e.vertex, std::move(root));
     }
     result.MaximumResidual = std::max(result.MaximumResidual, std::abs(BRep_ImplicitTool::Value(face, p)));
@@ -167,6 +184,7 @@ Section::Result pass(const TopoDS_Face& face, const Section::Settings& s,
       if (regular && !unknown && roots.size() == 2 && diagonal + precision <= s.DistanceTolerance)
       {
         segments.emplace_back(roots[0], roots[1]);
+        if (graph) graph->Arcs.push_back({roots[0], roots[1], i, j});
         result.GeometricBound = std::max(result.GeometricBound, diagonal + precision);
       }
       else
@@ -187,12 +205,33 @@ Section::Result pass(const TopoDS_Face& face, const Section::Settings& s,
   const auto walk = [&](size_t start, size_t next) {
     BRep_ImplicitPlaneSection::Curve curve;
     curve.Points.push_back(points[start]);
+    std::vector<size_t> nodes {start};
+    std::vector<gp_Pnt2d> uv;
     size_t current = start;
     while (!used[next])
     {
+      if (graph)
+      {
+        const auto& arc = graph->Arcs[next];
+        const size_t destination = segments[next].first == current
+          ? segments[next].second : segments[next].first;
+        const double turn = 2 * std::acos(-1.);
+        const auto local = [&](size_t id) {
+          auto p = graph->Vertices[id].UV;
+          if (graph->Vertices[id].Seam && arc.U == n - 1) p.SetX(p.X() + turn);
+          return p;
+        };
+        auto a = local(current), b = local(destination);
+        if (uv.empty()) uv.push_back(a);
+        // Branch translation uses the same logical node, never point proximity.
+        const double shift = turn * std::round((uv.back().X() - a.X()) / turn);
+        b.SetX(b.X() + shift);
+        uv.push_back(b);
+      }
       used[next] = true;
       current = segments[next].first == current ? segments[next].second : segments[next].first;
       curve.Points.push_back(points[current]);
+      nodes.push_back(current);
       if (current == start) { curve.Closed = true; break; }
       bool found = false;
       for (auto candidate : adjacent[current]) if (!used[candidate]) { next = candidate; found = true; break; }
@@ -200,6 +239,11 @@ Section::Result pass(const TopoDS_Face& face, const Section::Settings& s,
     }
     result.Curves.push_back(std::move(curve));
     curveEnds.push_back({start, current});
+    if (graph)
+    {
+      graph->CurveVertices.push_back(std::move(nodes));
+      graph->CurveUV.push_back(std::move(uv));
+    }
   };
   for (size_t i = 0; i < adjacent.size(); ++i)
     if (adjacent[i].size() == 1 && !used[adjacent[i][0]]) walk(i, adjacent[i][0]);
@@ -241,12 +285,21 @@ Section::Result pass(const TopoDS_Face& face, const Section::Settings& s,
     }
     details->BoundaryIncidenceVerified = verified;
   }
+  if (graph)
+  {
+    graph->Verified = result.Resolved && details && details->BoundaryIncidenceVerified;
+    if (!graph->Verified)
+    {
+      graph->Vertices.clear(); graph->Arcs.clear(); graph->CurveVertices.clear(); graph->CurveUV.clear();
+    }
+  }
   return result;
 }
 } // namespace
 
 static Section::Result traceCylinder(const TopoDS_Face& face, const Section::Settings& s, bool periodic,
-                                     Section::BoundaryResult* details = nullptr)
+                                     Section::BoundaryResult* details = nullptr,
+                                     Section::PeriodicGraph* graph = nullptr)
 {
   const auto data = occ::down_cast<BRep_TImplicitFace>(face.TShape());
   if (data.IsNull() || !data->ExcludedDomains().empty() || typeid(*data) != typeid(BRep_TImplicitFace)
@@ -297,7 +350,7 @@ static Section::Result traceCylinder(const TopoDS_Face& face, const Section::Set
   Section::Result result;
   for (int n = s.MinimumCells; n <= s.MaximumCells; n *= 2)
   {
-    result = pass(face, s, n, lipschitz, hessian, reserve, precision, periodic, details);
+    result = pass(face, s, n, lipschitz, hessian, reserve, precision, periodic, details, graph);
     if (result.Resolved) return result;
   }
   if (periodic)
@@ -305,7 +358,7 @@ static Section::Result traceCylinder(const TopoDS_Face& face, const Section::Set
     {
       const int n = s.MaximumCells * numerator / 8;
       if (n < s.MinimumCells) continue;
-      auto candidate = pass(face, s, n, lipschitz, hessian, reserve, precision, true, details);
+      auto candidate = pass(face, s, n, lipschitz, hessian, reserve, precision, true, details, graph);
       if (candidate.Resolved) return candidate;
     }
   return result;
@@ -331,6 +384,20 @@ Section::BoundaryResult Section::TracePeriodicBoundary(const TopoDS_Face& face, 
     result.BoundaryIncidenceVerified = false;
   }
   return result;
+}
+
+Section::PeriodicGraph Section::TracePeriodicGraph(const TopoDS_Face& face, const Settings& settings)
+{
+  PeriodicGraph graph;
+  graph.Boundary.Section = traceCylinder(face, settings, true, &graph.Boundary, &graph);
+  if (!graph.Boundary.Section.Resolved)
+  {
+    graph.Boundary.Roots.clear(); graph.Boundary.CurveRoots.clear();
+    graph.Boundary.BoundaryIncidenceVerified = false;
+    graph.Vertices.clear(); graph.Arcs.clear(); graph.CurveVertices.clear(); graph.CurveUV.clear();
+    graph.Verified = false;
+  }
+  return graph;
 }
 
 static Section::RingResult buildBoundaryRings(const TopoDS_Face& face,

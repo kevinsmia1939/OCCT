@@ -5,6 +5,7 @@
 #include <BRep_ImplicitPlaneSection.hxx>
 #include <TopoDS_Vertex.hxx>
 #include <TopoDS_Edge.hxx>
+#include <gp_Pnt2d.hxx>
 #include <array>
 
 //! Derivative-bounded gyroid section on a finite open cylindrical chart.
@@ -52,6 +53,32 @@ public:
   //! Does not build end-cap regions, native trim edges, shells or solids.
   //! Unresolved results publish no roots or endpoint identities.
   Standard_EXPORT static BoundaryResult TracePeriodicBoundary(const TopoDS_Face&, const Settings&);
+  struct ChartVertex
+  {
+    gp_Pnt Point;
+    gp_Pnt2d UV; //!< Canonical angle (radians) and axial height.
+    bool Seam = false; //!< Logical shared first/last chart-column root.
+    TopoDS_Vertex Vertex; //!< Non-null only for cap or chart-seam roots.
+  };
+  struct ChartArc
+  {
+    size_t First = 0, Last = 0;
+    int U = 0, V = 0; //!< Accepted source-cell indices, not inferred from points.
+  };
+  struct PeriodicGraph
+  {
+    BoundaryResult Boundary;
+    std::vector<ChartVertex> Vertices;
+    std::vector<ChartArc> Arcs;
+    //! Node IDs in exactly the order of each Section curve's Points.
+    std::vector<std::vector<size_t>> CurveVertices;
+    //! Continuous angle/height coordinates; seam branches follow source cells.
+    std::vector<std::vector<gp_Pnt2d>> CurveUV;
+    bool Verified = false; //!< Provenance only; not native side-face validity.
+  };
+  //! Retains periodic chart provenance without proximity welding. No graph is
+  //! published after an unresolved pass. Does not construct side faces/solids.
+  Standard_EXPORT static PeriodicGraph TracePeriodicGraph(const TopoDS_Face&, const Settings&);
   struct RingArc
   {
     TopoDS_Edge Edge; //!< Analytic circle, outward cap orientation (bottom reversed).
