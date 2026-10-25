@@ -80,5 +80,21 @@ public:
   Standard_EXPORT static TrimBoundary BuildTrimBoundary(const TopoDS_Face&,
     const BRep_ImplicitCylinderSection::Settings&, bool negative = true,
     size_t maximumNestingTests = 2000000);
+  struct AxialSheet
+  {
+    TrimBoundary Boundary;
+    bool MonotonicityVerified = false;
+    int Direction = 0; //!< Sign of the field derivative along the cylinder axis.
+    double DerivativeLowerBound = 0; //!< Positive bound on its signed magnitude.
+    size_t Cells = 0;
+    std::string Reason;
+  };
+  //! Adaptive Hessian cones over the entire finite cylinder prove at most one
+  //! zero per axial fibre. This does not establish existence, connectedness,
+  //! projected trim correspondence, implicit-face attachment or solid validity.
+  Standard_EXPORT static AxialSheet CheckAxialSheet(const TopoDS_Face&,
+    const BRep_ImplicitCylinderSection::Settings&, bool negative = true,
+    size_t maximumNestingTests = 2000000, int maximumDepth = 24,
+    size_t maximumCells = 200000);
 };
 #endif

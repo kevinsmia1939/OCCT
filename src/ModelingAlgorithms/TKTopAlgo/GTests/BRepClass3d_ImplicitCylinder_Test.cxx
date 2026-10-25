@@ -16,6 +16,7 @@
 #include <TopExp_Explorer.hxx>
 #include <TopoDS_Wire.hxx>
 #include <Standard_AbortiveTransaction.hxx>
+#include <Standard_DomainError.hxx>
 #include <gtest/gtest.h>
 #include <cmath>
 #include <sstream>
@@ -289,6 +290,60 @@ TEST(BRepClass3dImplicitCylinder, TrimWiresCloseBySharedIdentityWithOppositeFace
   EXPECT_THROW(Ops::BuildTrimBoundary(source, s), Standard_AbortiveTransaction);
   std::stringstream after; BRep_ImplicitIO::Write(source, after);
   EXPECT_EQ(before.str(), after.str());
+}
+
+TEST(BRepClass3dImplicitCylinder, AxialSheetConesBoundEveryFibreAndRefuseUnprovedCases)
+{
+  const auto source = field();
+  for (bool reverse : {false, true})
+  {
+    auto s = settings();
+    if (reverse)
+    { s.Frame = gp_Ax2(gp_Pnt(), gp_Dir(0, 0, -1), gp_Dir(1, 0, 0));
+      s.HeightMinimum = -.5; s.HeightMaximum = 0; }
+    const auto result = Ops::CheckAxialSheet(source, s);
+    ASSERT_TRUE(result.MonotonicityVerified) << result.Reason;
+    EXPECT_EQ(result.Direction, reverse ? -1 : 1);
+    EXPECT_GT(result.DerivativeLowerBound, 0); EXPECT_GT(result.Cells, 1);
+    for (int i = 0; i <= 12; ++i) for (int j = 0; j <= 12; ++j) for (int h = 0; h <= 8; ++h)
+    {
+      const double x = s.Radius * (2. * i / 12 - 1), y = s.Radius * (2. * j / 12 - 1);
+      if (std::hypot(x, y) > s.Radius) continue;
+      const double z = s.HeightMinimum + (s.HeightMaximum - s.HeightMinimum) * h / 8;
+      const auto p = s.Frame.Location().Translated(gp_Vec(s.Frame.XDirection()) * x
+        + gp_Vec(s.Frame.YDirection()) * y + gp_Vec(s.Frame.Direction()) * z);
+      EXPECT_GE(result.Direction * BRep_ImplicitTool::Gradient(source, p).Dot(gp_Vec(s.Frame.Direction())),
+                result.DerivativeLowerBound);
+    }
+  }
+  auto s = settings();
+  const auto budget = Ops::CheckAxialSheet(source, s, true, 2000000, 24, 1);
+  EXPECT_FALSE(budget.MonotonicityVerified); EXPECT_EQ(budget.Cells, 1);
+  EXPECT_EQ(budget.Direction, 0); EXPECT_EQ(budget.DerivativeLowerBound, 0);
+  EXPECT_FALSE(Ops::CheckAxialSheet(source, s, true, 2000000, 0).MonotonicityVerified);
+  EXPECT_THROW(Ops::CheckAxialSheet(source, s, true, 2000000, 24, 0), Standard_DomainError);
+  gp_Trsf move; move.SetTranslation(gp_Vec(1.2, -.4, 2.1));
+  auto placed = source; placed.Location(TopLoc_Location(move)); s.Frame.Transform(move);
+  const auto moved = Ops::CheckAxialSheet(placed, s);
+  ASSERT_TRUE(moved.MonotonicityVerified) << moved.Reason;
+  EXPECT_EQ(moved.Direction, 1);
+  const auto empty = Ops::CheckAxialSheet(field(10), settings());
+  ASSERT_TRUE(empty.MonotonicityVerified);
+  EXPECT_TRUE(empty.Boundary.Wires.empty()); // Uniqueness is not an existence claim.
+  s = settings();
+  s.Frame.SetLocation(gp_Pnt(2.5, 1.25, 0)); s.Radius = 1.5;
+  s.HeightMinimum = 0; s.HeightMaximum = .02;
+  const auto folded = Ops::CheckAxialSheet(field(1.3), s, true, 2000000, 12, 10000);
+  ASSERT_TRUE(folded.Boundary.IncidenceVerified) << folded.Boundary.Reason;
+  EXPECT_FALSE(folded.MonotonicityVerified);
+  EXPECT_EQ(folded.Direction, 0); EXPECT_EQ(folded.DerivativeLowerBound, 0);
+  s = settings();
+  static size_t calls = 0;
+  calls = 0; s.WorkCheckpoint = [] { ++calls; };
+  ASSERT_TRUE(Ops::CheckAxialSheet(source, s).MonotonicityVerified);
+  ASSERT_GT(calls, 2); --calls;
+  s.WorkCheckpoint = [] { if (--calls == 0) throw Standard_AbortiveTransaction("late axial cancellation"); };
+  EXPECT_THROW(Ops::CheckAxialSheet(source, s), Standard_AbortiveTransaction);
 }
 
 TEST(BRepClass3dImplicitCylinder, NativeCapsPartitionDiskAndShareSideRootVertices)

@@ -639,3 +639,79 @@ BRepClass3d_ImplicitCylinder::TrimBoundary BRepClass3d_ImplicitCylinder::BuildTr
   }
   return result;
 }
+
+BRepClass3d_ImplicitCylinder::AxialSheet BRepClass3d_ImplicitCylinder::CheckAxialSheet(
+  const TopoDS_Face& face, const Settings& s, bool negative, size_t maximumNestingTests,
+  int maximumDepth, size_t maximumCells)
+{
+  require(maximumDepth >= 0 && maximumDepth <= 32 && maximumCells > 0 && maximumCells <= 2000000,
+          "invalid_axial_sheet_budget");
+  AxialSheet result;
+  result.Boundary = BuildTrimBoundary(face, s, negative, maximumNestingTests);
+  if (!result.Boundary.IncidenceVerified) { result.Reason = result.Boundary.Reason; return result; }
+  try
+  {
+    const auto data = occ::down_cast<BRep_TImplicitFace>(face.TShape());
+    const auto* field = static_cast<const Geom_ImplicitGyroid*>(data->Field().get());
+    const double scale = std::abs((face.Location() * data->Location()).Transformation().ScaleFactor());
+    const double k = 2 * std::acos(-1.) / field->Period() / scale;
+    const double hessian = 4 * k * k, lipschitz = field->LipschitzBound() / scale;
+    const double magnitude = 1 + s.Radius + std::abs(s.HeightMinimum) + std::abs(s.HeightMaximum)
+      + s.Frame.Location().Distance(gp_Pnt());
+    const double precision = 4096 * std::numeric_limits<double>::epsilon() * magnitude;
+    const double reserve = 4096 * std::numeric_limits<double>::epsilon() * (1 + hessian + lipschitz)
+      + (hessian + lipschitz) * precision;
+    require(std::isfinite(reserve) && std::isfinite(hessian), "axial_sheet_precision");
+    const gp_Vec axis(s.Frame.Direction()), x(s.Frame.XDirection()), y(s.Frame.YDirection());
+    const auto point = [&](const gp_Pnt& local) {
+      return s.Frame.Location().Translated(x * local.X() + y * local.Y() + axis * local.Z());
+    };
+    const double middle = s.HeightMinimum + (s.HeightMaximum - s.HeightMinimum) * .5;
+    const double derivative = BRep_ImplicitTool::Gradient(face, point(gp_Pnt(0, 0, middle))).Dot(axis);
+    require(std::isfinite(derivative) && std::abs(derivative) > reserve, "axial_sheet_center_tangent");
+    const int direction = derivative > 0 ? 1 : -1;
+    struct Cell { gp_Pnt Low, High; int Depth; };
+    std::vector<Cell> pending {{gp_Pnt(-s.Radius, -s.Radius, s.HeightMinimum),
+                               gp_Pnt(s.Radius, s.Radius, s.HeightMaximum), 0}};
+    double lowerBound = std::numeric_limits<double>::infinity();
+    while (!pending.empty())
+    {
+      checkpoint(s);
+      require(result.Cells < maximumCells, "axial_sheet_cell_budget"); ++result.Cells;
+      const auto cell = pending.back(); pending.pop_back();
+      // Only cells strictly separated from the disk are skipped. Near-boundary
+      // boxes remain, preserving a conservative cover with coordinate reserves.
+      const auto nearest = [](double low, double high) {
+        return low > 0 ? low : (high < 0 ? -high : 0.);
+      };
+      const double radial = std::hypot(nearest(cell.Low.X(), cell.High.X()),
+                                       nearest(cell.Low.Y(), cell.High.Y()));
+      if (radial > s.Radius + precision) continue;
+      const gp_Pnt center((cell.Low.XYZ() + cell.High.XYZ()) * .5);
+      const gp_Vec half(cell.Low, cell.High);
+      const double radius = half.Magnitude() * .5 + precision;
+      const double value = direction * BRep_ImplicitTool::Gradient(face, point(center)).Dot(axis);
+      const double uncertainty = hessian * radius + reserve;
+      require(std::isfinite(value) && std::isfinite(uncertainty), "axial_sheet_nonfinite_cone");
+      const double bound = value - uncertainty;
+      if (bound > 0) { lowerBound = std::min(lowerBound, bound); continue; }
+      require(value + uncertainty > 0, "axial_sheet_direction_changes");
+      require(cell.Depth < maximumDepth, "axial_sheet_depth_budget");
+      int split = 1;
+      for (int a = 2; a <= 3; ++a) if (half.Coord(a) > half.Coord(split)) split = a;
+      const double cut = cell.Low.Coord(split) + half.Coord(split) * .5;
+      require(cut > cell.Low.Coord(split) && cut < cell.High.Coord(split), "axial_sheet_split_precision");
+      auto first = cell, second = cell;
+      first.High.SetCoord(split, cut); second.Low.SetCoord(split, cut);
+      first.Depth = second.Depth = cell.Depth + 1;
+      pending.push_back(second); pending.push_back(first);
+    }
+    require(std::isfinite(lowerBound) && lowerBound > 0, "axial_sheet_missing_cover");
+    result.Direction = direction; result.DerivativeLowerBound = lowerBound;
+    result.MonotonicityVerified = true; result.Reason = "axial_sheet_monotonicity_verified";
+  }
+  catch (const Standard_AbortiveTransaction&) { throw; }
+  catch (const Standard_Failure& error)
+  { result.Reason = error.what() ? error.what() : "axial_sheet_unresolved"; }
+  return result;
+}
