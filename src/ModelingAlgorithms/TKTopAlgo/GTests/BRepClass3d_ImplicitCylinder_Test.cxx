@@ -12,6 +12,7 @@
 #include <GProp_GProps.hxx>
 #include <Geom_ImplicitGyroid.hxx>
 #include <Geom2d_Curve.hxx>
+#include <BRep_TImplicitCylinderPatch.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS_Wire.hxx>
@@ -344,6 +345,106 @@ TEST(BRepClass3dImplicitCylinder, AxialSheetConesBoundEveryFibreAndRefuseUnprove
   ASSERT_GT(calls, 2); --calls;
   s.WorkCheckpoint = [] { if (--calls == 0) throw Standard_AbortiveTransaction("late axial cancellation"); };
   EXPECT_THROW(Ops::CheckAxialSheet(source, s), Standard_AbortiveTransaction);
+}
+
+TEST(BRepClass3dImplicitCylinder, ProjectedRegionsRetainNativeWireMappingWithoutPromotingFieldProof)
+{
+  for (bool winding : {false, true})
+  {
+    auto s = settings();
+    if (winding)
+    { s.AngleMinimum = .27; s.AngleMaximum = .27 + 2 * std::acos(-1.);
+      s.HeightMinimum = -1.7; s.HeightMaximum = 1.3; }
+    const auto source = field();
+    const auto a = Ops::BuildProjectedRegions(source, s, true);
+    const auto b = Ops::BuildProjectedRegions(source, s, false);
+    ASSERT_TRUE(a.ProxyTopologyValidated) << a.Reason;
+    ASSERT_TRUE(b.ProxyTopologyValidated) << b.Reason;
+    EXPECT_FALSE(a.MathematicalCorrespondenceVerified);
+    EXPECT_FALSE(b.MathematicalCorrespondenceVerified);
+    ASSERT_FALSE(a.Faces.empty());
+    EXPECT_NEAR(area(a.Faces), area(b.Faces), 1.e-6);
+    ASSERT_EQ(a.WireRegions.size(), a.Source.Boundary.Wires.size());
+    for (int id : a.WireRegions) { EXPECT_GE(id, 0); EXPECT_LT(size_t(id), a.Faces.size()); }
+    for (const auto& face : a.Faces) EXPECT_TRUE(BRepCheck_Analyzer(face).IsValid());
+    if (winding) EXPECT_NEAR(area(a.Faces), std::acos(-1.) * .25, 1.e-8);
+    for (int i = 0; i <= 20; ++i) for (int j = 0; j <= 20; ++j)
+    {
+      const double x = s.Radius * (2. * i / 20 - 1), y = s.Radius * (2. * j / 20 - 1);
+      if (std::hypot(x, y) >= s.Radius - .05) continue;
+      const double lo = BRep_ImplicitTool::Value(source, gp_Pnt(x, y, s.HeightMinimum));
+      const double hi = BRep_ImplicitTool::Value(source, gp_Pnt(x, y, s.HeightMaximum));
+      if (std::min(std::abs(lo), std::abs(hi)) < .2) continue;
+      int inside = 0;
+      for (const auto& face : a.Faces)
+        inside += BRepClass_FaceClassifier(face, gp_Pnt(x, y, 0), 1.e-7).State() == TopAbs_IN;
+      EXPECT_EQ(inside, lo < 0 && hi > 0 ? 1 : 0);
+    }
+  }
+  const auto empty = Ops::BuildProjectedRegions(field(10), settings());
+  ASSERT_TRUE(empty.ProxyTopologyValidated) << empty.Reason;
+  EXPECT_TRUE(empty.Faces.empty()); EXPECT_TRUE(empty.WireRegions.empty());
+  auto s = settings();
+  const auto failed = Ops::BuildProjectedRegions(field(), s, true, 2000000, 24, 1);
+  EXPECT_FALSE(failed.ProxyTopologyValidated); EXPECT_TRUE(failed.Faces.empty());
+  EXPECT_TRUE(failed.WireRegions.empty()); EXPECT_FALSE(failed.MathematicalCorrespondenceVerified);
+}
+
+TEST(BRepClass3dImplicitCylinder, FullDiskCorrespondenceAttachesActualCylinderRestrictedImplicitFace)
+{
+  auto s = settings(); s.AngleMinimum = .27; s.AngleMaximum = .27 + 2 * std::acos(-1.);
+  s.HeightMinimum = -1.7; s.HeightMaximum = 1.3;
+  const auto source = field();
+  std::stringstream before; BRep_ImplicitIO::Write(source, before);
+  for (bool negative : {false, true})
+  {
+    const auto result = Ops::BuildImplicitFaces(source, s, negative);
+    ASSERT_TRUE(result.FacesAttached) << result.Reason;
+    ASSERT_TRUE(result.Reference.MathematicalCorrespondenceVerified);
+    EXPECT_GT(result.Reference.CorrespondenceCells, 0);
+    ASSERT_EQ(result.Faces.size(), 1);
+    const auto& face = result.Faces.front();
+    EXPECT_FALSE(occ::down_cast<BRep_TImplicitCylinderPatch>(face.TShape()).IsNull());
+    EXPECT_EQ(face.Orientation(), negative ? TopAbs_FORWARD : TopAbs_REVERSED);
+    EXPECT_TRUE(BRep_ImplicitTool::IsInDomain(face, gp_Pnt(0, 0, 0)));
+    EXPECT_FALSE(BRep_ImplicitTool::IsInDomain(face, gp_Pnt(.6, 0, 0)));
+    EXPECT_FALSE(BRep_ImplicitTool::IsInDomain(face, gp_Pnt(0, 0, 2)));
+    for (TopExp_Explorer it(face, TopAbs_EDGE); it.More(); it.Next())
+    {
+      bool shared = false;
+      for (TopExp_Explorer expected(result.Reference.Source.Boundary.Wires.front(), TopAbs_EDGE);
+           expected.More(); expected.Next()) if (it.Current().IsEqual(expected.Current())) shared = true;
+      EXPECT_TRUE(shared);
+    }
+  }
+  gp_Trsf move; move.SetTranslation(gp_Vec(1.2, -.4, 2.1));
+  auto placed = source; placed.Location(TopLoc_Location(move)); s.Frame.Transform(move);
+  const auto translated = Ops::BuildImplicitFaces(placed, s);
+  ASSERT_TRUE(translated.FacesAttached) << translated.Reason;
+  EXPECT_TRUE(BRep_ImplicitTool::IsInDomain(translated.Faces[0], gp_Pnt(1.2, -.4, 2.1)));
+  EXPECT_FALSE(BRep_ImplicitTool::IsInDomain(translated.Faces[0], gp_Pnt(1.8, -.4, 2.1)));
+  const auto partial = Ops::BuildImplicitFaces(source, settings());
+  EXPECT_FALSE(partial.FacesAttached); EXPECT_TRUE(partial.Faces.empty());
+  EXPECT_TRUE(partial.Reference.ProxyTopologyValidated);
+  EXPECT_FALSE(partial.Reference.MathematicalCorrespondenceVerified);
+  auto reversed = settings();
+  reversed.Frame = gp_Ax2(gp_Pnt(), gp_Dir(0, 0, -1), gp_Dir(1, 0, 0));
+  reversed.HeightMinimum = -1.3; reversed.HeightMaximum = 1.7;
+  reversed.AngleMinimum = .27; reversed.AngleMaximum = .27 + 2 * std::acos(-1.);
+  const auto reverse = Ops::BuildImplicitFaces(source, reversed);
+  ASSERT_TRUE(reverse.FacesAttached) << reverse.Reason;
+  EXPECT_EQ(reverse.Reference.Source.Direction, -1);
+  auto cancellable = settings(); cancellable.AngleMinimum = .27;
+  cancellable.AngleMaximum = .27 + 2 * std::acos(-1.);
+  cancellable.HeightMinimum = -1.7; cancellable.HeightMaximum = 1.3;
+  static size_t calls = 0;
+  calls = 0; cancellable.WorkCheckpoint = [] { ++calls; };
+  ASSERT_TRUE(Ops::BuildImplicitFaces(source, cancellable).FacesAttached);
+  ASSERT_GT(calls, 2); --calls;
+  cancellable.WorkCheckpoint = [] { if (--calls == 0) throw Standard_AbortiveTransaction("late face cancellation"); };
+  EXPECT_THROW(Ops::BuildImplicitFaces(source, cancellable), Standard_AbortiveTransaction);
+  std::stringstream after; BRep_ImplicitIO::Write(source, after);
+  EXPECT_EQ(before.str(), after.str());
 }
 
 TEST(BRepClass3dImplicitCylinder, NativeCapsPartitionDiskAndShareSideRootVertices)

@@ -3,13 +3,16 @@
 #include <BRepClass3d_ImplicitCylinder.hxx>
 #include <BRep_ImplicitTool.hxx>
 #include <BRep_TImplicitFace.hxx>
+#include <BRep_TImplicitCylinderPatch.hxx>
 #include <BRep_Tool.hxx>
 #include <BRep_Builder.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepClass_FaceClassifier.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
 #include <Geom_ImplicitGyroid.hxx>
 #include <Geom_Plane.hxx>
+#include <Geom_Circle.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <Geom2d_BSplineCurve.hxx>
 #include <Geom2d_Circle.hxx>
@@ -713,5 +716,280 @@ BRepClass3d_ImplicitCylinder::AxialSheet BRepClass3d_ImplicitCylinder::CheckAxia
   catch (const Standard_AbortiveTransaction&) { throw; }
   catch (const Standard_Failure& error)
   { result.Reason = error.what() ? error.what() : "axial_sheet_unresolved"; }
+  return result;
+}
+
+BRepClass3d_ImplicitCylinder::ProjectedRegions BRepClass3d_ImplicitCylinder::BuildProjectedRegions(
+  const TopoDS_Face& face, const Settings& s, bool negative, size_t maximumNestingTests,
+  int maximumDepth, size_t maximumCells)
+{
+  ProjectedRegions result;
+  result.Source = CheckAxialSheet(face, s, negative, maximumNestingTests, maximumDepth, maximumCells);
+  if (!result.Source.MonotonicityVerified) { result.Reason = result.Source.Reason; return result; }
+  try
+  {
+    const auto& boundary = result.Source.Boundary;
+    const auto& chart = boundary.Source.Boundary.Source.Chart;
+    const occ::handle<Geom_Plane> plane = new Geom_Plane(s.Frame);
+    const occ::handle<Geom_Circle> circle = new Geom_Circle(s.Frame, s.Radius);
+    const gp_Vec x(s.Frame.XDirection()), y(s.Frame.YDirection());
+    const auto uv = [&](const gp_Pnt& p) {
+      const gp_Vec d(s.Frame.Location(), p); return gp_Pnt2d(d.Dot(x), d.Dot(y));
+    };
+    const auto project = [&](const gp_Pnt& p) { const auto q = uv(p); return plane->Value(q.X(), q.Y()); };
+    const double precision = 8192 * std::numeric_limits<double>::epsilon()
+      * (1 + s.Radius + s.Frame.Location().Distance(gp_Pnt()));
+    require(std::isfinite(precision) && precision < s.DistanceTolerance, "projected_coordinate_precision");
+    NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> sideEdges, nativeVertices;
+    for (const auto& edge : boundary.Source.Boundary.FieldEdges) sideEdges.Add(edge);
+    std::vector<TopoDS_Vertex> projectedVertices;
+    BRep_Builder builder;
+    const auto vertex = [&](const TopoDS_Vertex& v) {
+      const int id = nativeVertices.Add(v) - 1;
+      if (size_t(id) == projectedVertices.size())
+      {
+        TopoDS_Vertex q; builder.MakeVertex(q, project(BRep_Tool::Pnt(v)),
+                                           std::max(precision, BRep_Tool::Tolerance(v)));
+        projectedVertices.push_back(q);
+      }
+      return projectedVertices[size_t(id)];
+    };
+    std::vector<Cycle> cycles;
+    double maximumTolerance = precision;
+    const int sense = result.Source.Direction * (negative ? 1 : -1);
+    for (const auto& wire : boundary.Wires)
+    {
+      Cycle cycle; builder.MakeWire(cycle.Wire);
+      double length = 0, tolerance = precision;
+      bool witness = false;
+      for (TopExp_Explorer it(wire, TopAbs_EDGE); it.More(); it.Next())
+      {
+        checkpoint(s);
+        const auto original = TopoDS::Edge(it.Current());
+        TopoDS_Vertex a, b; TopExp::Vertices(original, a, b);
+        auto firstVertex = vertex(a), lastVertex = vertex(b);
+        double first, last, area = 0;
+        TopoDS_Edge edge;
+        int direction = original.Orientation() == TopAbs_REVERSED ? -1 : 1;
+        const double tol = std::max({precision, BRep_Tool::Tolerance(original),
+                                     BRep_Tool::Tolerance(firstVertex), BRep_Tool::Tolerance(lastVertex)});
+        if (sideEdges.Contains(original))
+        {
+          const auto pc = occ::down_cast<Geom2d_BSplineCurve>(BRep_Tool::CurveOnSurface(
+            original, chart.Surface, TopLoc_Location(), first, last));
+          require(!pc.IsNull() && pc->Degree() == 1, "projected_missing_side_correspondence");
+          first = pc->Pole(1).X(); last = pc->Pole(pc->NbPoles()).X();
+          const int angular = last > first ? 1 : -1;
+          require(std::abs(last - first) * s.Radius > precision, "projected_collapsed_side_arc");
+          for (int i = 2; i <= pc->NbPoles(); ++i)
+            require(angular * (pc->Pole(i).X() - pc->Pole(i - 1).X()) * s.Radius > precision,
+                    "projected_nonmonotone_side_arc");
+          if (angular < 0) { std::swap(first, last); std::swap(firstVertex, lastVertex); }
+          direction *= angular;
+          builder.MakeEdge(edge, circle, tol);
+          const occ::handle<Geom2d_Circle> curve2d = new Geom2d_Circle(
+            gp_Ax2d(gp_Pnt2d(0, 0), gp_Dir2d(1, 0)), s.Radius);
+          builder.UpdateEdge(edge, curve2d, plane, TopLoc_Location(), tol);
+          area = .5 * s.Radius * s.Radius * (last - first); length += s.Radius * (last - first);
+        }
+        else
+        {
+          const auto originalCurve = occ::down_cast<Geom_BSplineCurve>(BRep_Tool::Curve(original, first, last));
+          require(!originalCurve.IsNull() && originalCurve->Degree() == 1
+                    && originalCurve->NbKnots() == originalCurve->NbPoles(), "projected_cap_curve_type");
+          const int count = originalCurve->NbPoles();
+          NCollection_Array1<gp_Pnt> poles(1, count);
+          NCollection_Array1<gp_Pnt2d> poles2d(1, count);
+          NCollection_Array1<double> knots(1, count);
+          NCollection_Array1<int> mults(1, count);
+          for (int i = 1; i <= count; ++i)
+          {
+            poles.SetValue(i, project(originalCurve->Pole(i))); poles2d.SetValue(i, uv(originalCurve->Pole(i)));
+            knots.SetValue(i, originalCurve->Knot(i)); mults.SetValue(i, originalCurve->Multiplicity(i));
+            if (i > 1)
+            {
+              const auto p = poles2d.Value(i - 1), q = poles2d.Value(i);
+              area += .5 * (p.X() * q.Y() - q.X() * p.Y()); length += p.Distance(q);
+            }
+          }
+          const occ::handle<Geom_BSplineCurve> geometry = new Geom_BSplineCurve(poles, knots, mults, 1);
+          const occ::handle<Geom2d_BSplineCurve> curve2d = new Geom2d_BSplineCurve(poles2d, knots, mults, 1);
+          builder.MakeEdge(edge, geometry, tol);
+          builder.UpdateEdge(edge, curve2d, plane, TopLoc_Location(), tol);
+        }
+        firstVertex.Orientation(TopAbs_FORWARD); lastVertex.Orientation(TopAbs_REVERSED);
+        builder.Add(edge, firstVertex); builder.Add(edge, lastVertex);
+        builder.UpdateVertex(firstVertex, first, edge, BRep_Tool::Tolerance(firstVertex));
+        builder.UpdateVertex(lastVertex, last, edge, BRep_Tool::Tolerance(lastVertex));
+        builder.Range(edge, first, last); builder.Range(edge, plane, TopLoc_Location(), first, last);
+        builder.SameRange(edge, true); builder.SameParameter(edge, true);
+        if (direction * sense < 0) edge.Reverse();
+        builder.Add(cycle.Wire, edge); cycle.Area += area * direction * sense;
+        tolerance = std::max(tolerance, tol);
+        if (!witness)
+        { cycle.Witness = BRep_Tool::Curve(edge, first, last)->Value(first + (last - first) * .5); witness = true; }
+      }
+      cycle.Wire.Closed(true); cycle.Reserve = (precision + tolerance) * length;
+      maximumTolerance = std::max(maximumTolerance, tolerance);
+      require(witness && std::isfinite(cycle.Area) && std::isfinite(cycle.Reserve)
+                && std::abs(cycle.Area) > cycle.Reserve, "projected_area_unresolved");
+      auto positive = cycle.Wire; if (cycle.Area < 0) positive.Reverse();
+      BRepBuilderAPI_MakeFace maker(plane, positive, true);
+      require(maker.IsDone(), "projected_cycle_construction"); cycle.Interior = maker.Face();
+      require(BRepCheck_Analyzer(cycle.Interior).IsValid(), "projected_invalid_cycle");
+      cycles.push_back(cycle);
+    }
+    size_t tests = 0;
+    for (size_t i = 0; i < cycles.size(); ++i)
+    {
+      double parentArea = std::numeric_limits<double>::infinity();
+      for (size_t j = 0; j < cycles.size(); ++j)
+      {
+        checkpoint(s); require(++tests <= maximumNestingTests, "projected_nesting_budget");
+        if (j > i)
+        {
+          BRepExtrema_DistShapeShape distance(cycles[i].Wire, cycles[j].Wire);
+          require(distance.IsDone() && distance.Value() > 2 * maximumTolerance,
+                  "projected_intersecting_or_uncertain_cycles");
+        }
+        if (i == j || std::abs(cycles[j].Area) <= std::abs(cycles[i].Area)) continue;
+        const auto state = BRepClass_FaceClassifier(cycles[j].Interior, cycles[i].Witness, precision).State();
+        require(state != TopAbs_ON, "projected_touching_cycles");
+        if (state == TopAbs_IN && std::abs(cycles[j].Area) < parentArea)
+        { parentArea = std::abs(cycles[j].Area); cycles[i].Parent = int(j); }
+      }
+      if (cycles[i].Parent < 0) require(cycles[i].Area > 0, "projected_hole_without_outer");
+      else require((cycles[i].Area > 0) != (cycles[size_t(cycles[i].Parent)].Area > 0),
+                    "projected_inconsistent_nesting");
+    }
+    result.WireRegions.assign(cycles.size(), -1);
+    for (size_t i = 0; i < cycles.size(); ++i)
+    {
+      if (cycles[i].Area < 0) continue;
+      const int region = int(result.Faces.size()); result.WireRegions[i] = region;
+      BRepBuilderAPI_MakeFace maker(plane, cycles[i].Wire, true);
+      for (size_t j = 0; j < cycles.size(); ++j)
+        if (cycles[j].Parent == int(i) && cycles[j].Area < 0)
+        { maker.Add(cycles[j].Wire); result.WireRegions[j] = region; }
+      require(maker.IsDone(), "projected_region_construction");
+      require(BRepCheck_Analyzer(maker.Face()).IsValid(), "projected_region_invalid");
+      result.Faces.push_back(maker.Face());
+    }
+    for (int id : result.WireRegions) require(id >= 0, "projected_unassigned_wire");
+    result.ProxyTopologyValidated = true; result.Reason = "projected_proxy_topology_validated";
+  }
+  catch (const Standard_AbortiveTransaction&) { throw; }
+  catch (const Standard_Failure& error)
+  { result.Faces.clear(); result.WireRegions.clear(); result.Reason = error.what() ? error.what() : "projected_proxy_failed"; }
+  return result;
+}
+
+BRepClass3d_ImplicitCylinder::ProjectedRegions BRepClass3d_ImplicitCylinder::CheckProjectedCorrespondence(
+  const TopoDS_Face& face, const Settings& s, bool negative, size_t maximumNestingTests,
+  int maximumDepth, size_t maximumCells)
+{
+  auto result = BuildProjectedRegions(face, s, negative, maximumNestingTests, maximumDepth, maximumCells);
+  if (!result.ProxyTopologyValidated) return result;
+  try
+  {
+    const auto& boundary = result.Source.Boundary;
+    const auto& sides = boundary.Source.Boundary;
+    require(result.Faces.size() == 1 && boundary.Wires.size() == 1
+              && sides.FieldEdges.size() == 1
+              && sides.Source.Regions.FieldEdges[0].empty() && sides.Source.Regions.FieldEdges[1].empty(),
+            "projected_full_disk_not_qualified");
+    const auto data = occ::down_cast<BRep_TImplicitFace>(face.TShape());
+    const auto* field = static_cast<const Geom_ImplicitGyroid*>(data->Field().get());
+    const double scale = std::abs((face.Location() * data->Location()).Transformation().ScaleFactor());
+    const double lipschitz = field->LipschitzBound() / scale;
+    const double precision = 8192 * std::numeric_limits<double>::epsilon()
+      * (1 + s.Radius + std::abs(s.HeightMinimum) + std::abs(s.HeightMaximum)
+         + s.Frame.Location().Distance(gp_Pnt()));
+    const double reserve = precision * (1 + lipschitz)
+      + 8192 * std::numeric_limits<double>::epsilon() * (1 + std::abs(field->IsoValue()));
+    require(std::isfinite(reserve), "projected_endpoint_precision");
+    double first, last;
+    const auto pc = BRep_Tool::CurveOnSurface(sides.FieldEdges.front(), sides.Source.Chart.Surface,
+                                             TopLoc_Location(), first, last);
+    require(!pc.IsNull() && std::abs(std::abs(pc->Value(last).X() - pc->Value(first).X())
+              - 2 * std::acos(-1.)) * s.Radius < precision, "projected_incomplete_circle");
+    struct Cell { double X0, X1, Y0, Y1; int Depth; };
+    std::vector<Cell> pending {{-s.Radius, s.Radius, -s.Radius, s.Radius, 0}};
+    const gp_Vec x(s.Frame.XDirection()), y(s.Frame.YDirection()), axis(s.Frame.Direction());
+    while (!pending.empty())
+    {
+      checkpoint(s);
+      require(result.CorrespondenceCells < maximumCells, "projected_endpoint_cell_budget");
+      ++result.CorrespondenceCells;
+      const auto cell = pending.back(); pending.pop_back();
+      const auto nearest = [](double low, double high) { return low > 0 ? low : (high < 0 ? -high : 0.); };
+      if (std::hypot(nearest(cell.X0, cell.X1), nearest(cell.Y0, cell.Y1)) > s.Radius + precision) continue;
+      const double dx = cell.X1 - cell.X0, dy = cell.Y1 - cell.Y0;
+      const auto center = s.Frame.Location().Translated(x * (cell.X0 + dx * .5) + y * (cell.Y0 + dy * .5));
+      const double lo = result.Source.Direction * BRep_ImplicitTool::Value(face, center.Translated(axis * s.HeightMinimum));
+      const double hi = result.Source.Direction * BRep_ImplicitTool::Value(face, center.Translated(axis * s.HeightMaximum));
+      const double uncertainty = lipschitz * (std::hypot(dx, dy) * .5 + precision) + reserve;
+      require(std::isfinite(lo) && std::isfinite(hi) && std::isfinite(uncertainty), "projected_endpoint_nonfinite");
+      if (lo < -uncertainty && hi > uncertainty) continue;
+      require(lo - uncertainty < 0 && hi + uncertainty > 0, "projected_endpoint_signs_fail");
+      require(cell.Depth < maximumDepth, "projected_endpoint_depth_budget");
+      auto a = cell, b = cell; a.Depth = b.Depth = cell.Depth + 1;
+      if (dx >= dy) { const double cut = cell.X0 + dx * .5; a.X1 = b.X0 = cut; }
+      else { const double cut = cell.Y0 + dy * .5; a.Y1 = b.Y0 = cut; }
+      pending.push_back(b); pending.push_back(a);
+    }
+    result.MathematicalCorrespondenceVerified = true;
+    result.Reason = "projected_full_disk_correspondence_verified";
+  }
+  catch (const Standard_AbortiveTransaction&) { throw; }
+  catch (const Standard_Failure& error)
+  { result.Reason = error.what() ? error.what() : "projected_correspondence_unresolved"; }
+  return result;
+}
+
+BRepClass3d_ImplicitCylinder::NativeFaces BRepClass3d_ImplicitCylinder::BuildImplicitFaces(
+  const TopoDS_Face& source, const Settings& s, bool negative, size_t maximumNestingTests,
+  int maximumDepth, size_t maximumCells)
+{
+  NativeFaces result;
+  result.Reference = CheckProjectedCorrespondence(source, s, negative, maximumNestingTests,
+                                                  maximumDepth, maximumCells);
+  if (!result.Reference.MathematicalCorrespondenceVerified)
+  { result.Reason = result.Reference.Reason; return result; }
+  try
+  {
+    checkpoint(s);
+    const auto data = occ::down_cast<BRep_TImplicitFace>(source.TShape());
+    const auto transform = (source.Location() * data->Location()).Transformation();
+    const auto inverse = transform.Inverted();
+    const double scale = std::abs(transform.ScaleFactor());
+    const gp_Ax2 local(s.Frame.Location().Transformed(inverse),
+      gp_Dir(gp_Vec(s.Frame.Direction()).Transformed(inverse)),
+      gp_Dir(gp_Vec(s.Frame.XDirection()).Transformed(inverse)));
+    auto face = BRep_TImplicitCylinderPatch::Restrict(source, local, s.Radius / scale,
+      s.HeightMinimum / scale, s.HeightMaximum / scale);
+    face.Orientation(TopAbs_FORWARD);
+    BRep_Builder builder;
+    auto wire = result.Reference.Source.Boundary.Wires.front();
+    if (!negative) wire.Reverse(); // Compensate the face orientation below.
+    builder.Add(face, wire);
+    face.Orientation(negative ? TopAbs_FORWARD : TopAbs_REVERSED);
+    NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> expected;
+    for (TopExp_Explorer it(result.Reference.Source.Boundary.Wires.front(), TopAbs_EDGE); it.More(); it.Next())
+      expected.Add(it.Current());
+    size_t count = 0;
+    for (TopExp_Explorer it(face, TopAbs_EDGE); it.More(); it.Next())
+    {
+      checkpoint(s);
+      const int id = expected.FindIndex(it.Current());
+      require(id > 0 && it.Current().IsEqual(expected.FindKey(id)), "implicit_cylinder_trim_incidence"); ++count;
+    }
+    require(count == expected.Size(), "implicit_cylinder_missing_trim_edges");
+    result.Faces.push_back(face); result.FacesAttached = true;
+    result.Reason = "implicit_cylinder_full_disk_face_attached";
+  }
+  catch (const Standard_AbortiveTransaction&) { throw; }
+  catch (const Standard_Failure& error)
+  { result.Faces.clear(); result.Reason = error.what() ? error.what() : "implicit_cylinder_attachment_failed"; }
   return result;
 }

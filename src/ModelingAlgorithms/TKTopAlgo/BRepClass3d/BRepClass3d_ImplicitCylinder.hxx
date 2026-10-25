@@ -96,5 +96,43 @@ public:
     const BRep_ImplicitCylinderSection::Settings&, bool negative = true,
     size_t maximumNestingTests = 2000000, int maximumDepth = 24,
     size_t maximumCells = 200000);
+  struct ProjectedRegions
+  {
+    AxialSheet Source;
+    std::vector<TopoDS_Face> Faces; //!< Conventional planar reference regions.
+    std::vector<int> WireRegions; //!< Native boundary wire -> reference region.
+    bool ProxyTopologyValidated = false;
+    bool MathematicalCorrespondenceVerified = false;
+    size_t CorrespondenceCells = 0;
+    std::string Reason;
+  };
+  //! Project cap seams affinely and side seams as analytic circular arcs after
+  //! checking monotone angular correspondence. Qualifies the projected native
+  //! proxy only; mathematical correspondence requires a separate field gate.
+  Standard_EXPORT static ProjectedRegions BuildProjectedRegions(const TopoDS_Face&,
+    const BRep_ImplicitCylinderSection::Settings&, bool negative = true,
+    size_t maximumNestingTests = 2000000, int maximumDepth = 24,
+    size_t maximumCells = 200000);
+  //! Sufficient full-disk graph correspondence: proves opposite strict signs
+  //! over both end disks and one complete circular side boundary. Partial and
+  //! multi-sheet regions remain unqualified; failure retains proxy diagnostics.
+  Standard_EXPORT static ProjectedRegions CheckProjectedCorrespondence(const TopoDS_Face&,
+    const BRep_ImplicitCylinderSection::Settings&, bool negative = true,
+    size_t maximumNestingTests = 2000000, int maximumDepth = 24,
+    size_t maximumCells = 200000);
+  struct NativeFaces
+  {
+    ProjectedRegions Reference;
+    std::vector<TopoDS_Face> Faces;
+    bool FacesAttached = false;
+    std::string Reason;
+  };
+  //! Actual cylinder-restricted implicit face for qualified full-disk sheets.
+  //! Shared trim incidence is checked; shells/solids and general partial-sheet
+  //! or multi-sheet component attachment remain separate requirements.
+  Standard_EXPORT static NativeFaces BuildImplicitFaces(const TopoDS_Face&,
+    const BRep_ImplicitCylinderSection::Settings&, bool negative = true,
+    size_t maximumNestingTests = 2000000, int maximumDepth = 24,
+    size_t maximumCells = 200000);
 };
 #endif
