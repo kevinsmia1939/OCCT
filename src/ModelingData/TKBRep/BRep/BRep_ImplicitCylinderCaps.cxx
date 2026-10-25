@@ -151,8 +151,14 @@ bool traceDisk(const TopoDS_Face& face, const Section::Settings& s, int cap,
 
 Section::DiskResult Section::TraceEndCapDisks(const TopoDS_Face& face, const Settings& s)
 {
+  return traceEndCapDisks(face, s, TracePeriodicBoundary(face, s));
+}
+
+Section::DiskResult Section::traceEndCapDisks(const TopoDS_Face& face, const Settings& s,
+                                            const BoundaryResult& boundary)
+{
   DiskResult result;
-  result.Boundary = TracePeriodicBoundary(face, s);
+  result.Boundary = boundary;
   if (!result.Boundary.BoundaryIncidenceVerified) return result;
   for (int cap = 0; cap < 2; ++cap)
     if (!traceDisk(face, s, cap, result.Boundary, result.Disks[cap], result.CurveRoots[cap]))

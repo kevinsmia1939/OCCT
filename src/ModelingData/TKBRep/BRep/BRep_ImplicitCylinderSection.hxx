@@ -127,5 +127,15 @@ public:
   };
   //! One tracing snapshot: rings and disk endpoints share actual vertex handles.
   Standard_EXPORT static CapSkeleton BuildCapSkeleton(const TopoDS_Face&, const Settings&);
+  struct ChartCapSkeleton
+  {
+    ChartSkeleton Chart;
+    CapSkeleton Caps;
+    bool Verified = false;
+  };
+  //! Side chart, seamed rings and both cap disks from one boundary snapshot.
+  Standard_EXPORT static ChartCapSkeleton BuildChartCapSkeleton(const TopoDS_Face&, const Settings&);
+private:
+  static DiskResult traceEndCapDisks(const TopoDS_Face&, const Settings&, const BoundaryResult&);
 };
 #endif

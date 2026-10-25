@@ -575,7 +575,8 @@ Section::ChartSkeleton Section::BuildChartSkeleton(const TopoDS_Face& face, cons
     builder.UpdateVertex(a, seam[i - 1].first, edge, BRep_Tool::Tolerance(a));
     builder.UpdateVertex(b, seam[i].first, edge, BRep_Tool::Tolerance(b));
     builder.Range(edge, seam[i - 1].first, seam[i].first);
-    builder.UpdateEdge(edge, low, high, result.Surface, TopLoc_Location(), tolerance);
+    // Forward increasing-height use is the right boundary of the outward chart.
+    builder.UpdateEdge(edge, high, low, result.Surface, TopLoc_Location(), tolerance);
     builder.Range(edge, result.Surface, TopLoc_Location(), seam[i - 1].first, seam[i].first);
     builder.SameRange(edge, true); builder.SameParameter(edge, true);
     result.SeamEdges.push_back(edge);
@@ -591,5 +592,18 @@ Section::CapSkeleton Section::BuildCapSkeleton(const TopoDS_Face& face, const Se
   if (!result.Disks.Verified) return result;
   result.Rings = buildBoundaryRings(face, s, result.Disks.Boundary);
   result.Verified = result.Rings.Verified;
+  return result;
+}
+
+Section::ChartCapSkeleton Section::BuildChartCapSkeleton(const TopoDS_Face& face, const Settings& s)
+{
+  ChartCapSkeleton result;
+  result.Chart = BuildChartSkeleton(face, s);
+  if (!result.Chart.Verified) return result;
+  result.Caps.Disks = traceEndCapDisks(face, s, result.Chart.Graph.Boundary);
+  if (!result.Caps.Disks.Verified) return result;
+  result.Caps.Rings = result.Chart.Rings;
+  result.Caps.Verified = true;
+  result.Verified = true;
   return result;
 }

@@ -225,15 +225,16 @@ void buildCap(const TopoDS_Face& source, const Settings& s, int cap, bool negati
 }
 } // namespace
 
-Caps BRepClass3d_ImplicitCylinder::BuildCaps(const TopoDS_Face& face, const Settings& s, bool negative,
-                                           size_t maximumNestingTests)
+static Caps buildCapsFromSkeleton(const TopoDS_Face& face, const Settings& s, bool negative,
+                                  size_t maximumNestingTests,
+                                  BRep_ImplicitCylinderSection::CapSkeleton skeleton)
 {
   Caps result;
   require(maximumNestingTests > 0 && maximumNestingTests <= 10000000, "invalid_cap_nesting_budget");
   result.MaximumNestingTests = maximumNestingTests;
   result.Field = face; result.Parameters = s; result.Parameters.WorkCheckpoint = nullptr;
   result.Negative = negative;
-  result.Source = BRep_ImplicitCylinderSection::BuildCapSkeleton(face, s);
+  result.Source = std::move(skeleton);
   if (!result.Source.Verified) { result.Reason = "unresolved_cap_skeleton"; return result; }
   result.ContourBound = std::max(result.Source.Disks.Disks[0].GeometricBound,
                                  result.Source.Disks.Disks[1].GeometricBound);
@@ -249,5 +250,24 @@ Caps BRepClass3d_ImplicitCylinder::BuildCaps(const TopoDS_Face& face, const Sett
     result.Reason = error.what() ? error.what() : "cap_construction_failed";
     for (int cap = 0; cap < 2; ++cap) { result.Faces[cap].clear(); result.FieldEdges[cap].clear(); }
   }
+  return result;
+}
+
+Caps BRepClass3d_ImplicitCylinder::BuildCaps(const TopoDS_Face& face, const Settings& s, bool negative,
+                                           size_t maximumNestingTests)
+{
+  require(maximumNestingTests > 0 && maximumNestingTests <= 10000000, "invalid_cap_nesting_budget");
+  return buildCapsFromSkeleton(face, s, negative, maximumNestingTests,
+    BRep_ImplicitCylinderSection::BuildCapSkeleton(face, s));
+}
+
+BRepClass3d_ImplicitCylinder::ChartCaps BRepClass3d_ImplicitCylinder::BuildChartCaps(
+  const TopoDS_Face& face, const Settings& s, bool negative, size_t maximumNestingTests)
+{
+  require(maximumNestingTests > 0 && maximumNestingTests <= 10000000, "invalid_cap_nesting_budget");
+  auto source = BRep_ImplicitCylinderSection::BuildChartCapSkeleton(face, s);
+  ChartCaps result;
+  result.Chart = std::move(source.Chart);
+  result.Regions = buildCapsFromSkeleton(face, s, negative, maximumNestingTests, std::move(source.Caps));
   return result;
 }

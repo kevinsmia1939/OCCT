@@ -29,5 +29,15 @@ public:
   Standard_EXPORT static Caps BuildCaps(const TopoDS_Face&,
     const BRep_ImplicitCylinderSection::Settings&, bool negative = true,
     size_t maximumNestingTests = 2000000);
+  struct ChartCaps
+  {
+    BRep_ImplicitCylinderSection::ChartSkeleton Chart;
+    Caps Regions;
+  };
+  //! Actual planar cap regions reuse the seamed side-chart ring edges and roots.
+  //! Does not construct cylinder-side faces, shells or solids.
+  Standard_EXPORT static ChartCaps BuildChartCaps(const TopoDS_Face&,
+    const BRep_ImplicitCylinderSection::Settings&, bool negative = true,
+    size_t maximumNestingTests = 2000000);
 };
 #endif

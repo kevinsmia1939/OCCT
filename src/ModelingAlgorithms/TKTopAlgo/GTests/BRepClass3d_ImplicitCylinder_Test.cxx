@@ -13,6 +13,7 @@
 #include <Geom_ImplicitGyroid.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopoDS_Wire.hxx>
 #include <Standard_AbortiveTransaction.hxx>
 #include <gtest/gtest.h>
 #include <cmath>
@@ -54,6 +55,69 @@ int wires(const TopoDS_Face& face)
   for (TopExp_Explorer it(face, TopAbs_WIRE); it.More(); it.Next()) ++count;
   return count;
 }
+}
+
+TEST(BRepClass3dImplicitCylinder, SeamedCapsReuseSideChartEdgesAndRootHandles)
+{
+  const auto s = settings();
+  for (double iso : {.21, 10.})
+    for (bool negative : {true, false})
+    {
+      const auto result = Ops::BuildChartCaps(field(iso), s, negative);
+      ASSERT_TRUE(result.Chart.Verified);
+      ASSERT_TRUE(result.Regions.TopologyValidated) << result.Regions.Reason;
+      const auto& graphRoots = result.Chart.Graph.Boundary.Roots;
+      const auto& capRoots = result.Regions.Source.Disks.Boundary.Roots;
+      ASSERT_EQ(graphRoots.size(), capRoots.size());
+      for (size_t i = 0; i < graphRoots.size(); ++i)
+        EXPECT_TRUE(graphRoots[i].Vertex.IsSame(capRoots[i].Vertex));
+      for (int cap = 0; cap < 2; ++cap)
+      {
+        for (const auto& arc : result.Chart.Rings.Rings[cap])
+        {
+          int uses = 0;
+          for (const auto& face : result.Regions.Faces[cap])
+          {
+            EXPECT_TRUE(BRepCheck_Analyzer(face).IsValid());
+            for (TopExp_Explorer edge(face, TopAbs_EDGE); edge.More(); edge.Next())
+              if (edge.Current().IsSame(arc.Edge)) ++uses;
+          }
+          EXPECT_EQ(uses, arc.Negative == negative ? 1 : 0);
+        }
+      }
+    }
+  const auto a = Ops::BuildChartCaps(field(), s, true);
+  const auto b = Ops::BuildChartCaps(field(), s, false);
+  for (int cap = 0; cap < 2; ++cap)
+    EXPECT_NEAR(area(a.Regions.Faces[cap]) + area(b.Regions.Faces[cap]),
+                std::acos(-1.) * s.Radius * s.Radius, 1.e-6);
+  const auto failed = Ops::BuildChartCaps(field(), s, true, 1);
+  EXPECT_FALSE(failed.Regions.TopologyValidated);
+  EXPECT_TRUE(failed.Regions.Faces[0].empty()); EXPECT_TRUE(failed.Regions.Faces[1].empty());
+}
+
+TEST(BRepClass3dImplicitCylinder, ChartSeamBuildsValidOutwardCylinderFace)
+{
+  const auto s = settings();
+  const auto result = Ops::BuildChartCaps(field(10), s);
+  ASSERT_TRUE(result.Regions.TopologyValidated);
+  const auto& chart = result.Chart;
+  ASSERT_EQ(chart.SeamEdges.size(), 1);
+  BRep_Builder builder;
+  TopoDS_Face face; builder.MakeFace(face, chart.Surface, 1.e-7);
+  TopoDS_Wire wire; builder.MakeWire(wire);
+  for (const auto& arc : chart.Rings.Rings[0])
+  { auto edge = arc.Edge; edge.Reverse(); builder.Add(wire, edge); }
+  builder.Add(wire, chart.SeamEdges.front());
+  for (auto arc = chart.Rings.Rings[1].rbegin(); arc != chart.Rings.Rings[1].rend(); ++arc)
+  { auto edge = arc->Edge; edge.Reverse(); builder.Add(wire, edge); }
+  auto seam = chart.SeamEdges.front(); seam.Reverse(); builder.Add(wire, seam);
+  wire.Closed(true); builder.Add(face, wire);
+  EXPECT_TRUE(BRepCheck_Analyzer(face).IsValid());
+  EXPECT_NEAR(area({face}), 2 * std::acos(-1.) * s.Radius
+                          * (s.HeightMaximum - s.HeightMinimum), 1.e-8);
+  EXPECT_EQ(BRepClass_FaceClassifier(face, gp_Pnt(s.Radius, 0, .25), 1.e-7).State(), TopAbs_IN);
+  EXPECT_EQ(BRepClass_FaceClassifier(face, gp_Pnt(s.Radius, 0, 1), 1.e-7).State(), TopAbs_OUT);
 }
 
 TEST(BRepClass3dImplicitCylinder, NativeCapsPartitionDiskAndShareSideRootVertices)
