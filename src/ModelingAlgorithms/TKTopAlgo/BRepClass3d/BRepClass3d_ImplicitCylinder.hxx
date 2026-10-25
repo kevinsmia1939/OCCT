@@ -4,6 +4,7 @@
 #define _BRepClass3d_ImplicitCylinder_HeaderFile
 #include <BRep_ImplicitCylinderSection.hxx>
 #include <string>
+#include <TopoDS_Wire.hxx>
 
 //! Restricted native cap-region assembly; NOT a cylinder Boolean/solid builder.
 class BRepClass3d_ImplicitCylinder
@@ -63,6 +64,20 @@ public:
   //! Retained cylindrical material regions. No implicit-face attachment or
   //! closed-solid qualification follows from ordinary side-face validity.
   Standard_EXPORT static Sides BuildSides(const TopoDS_Face&,
+    const BRep_ImplicitCylinderSection::Settings&, bool negative = true,
+    size_t maximumNestingTests = 2000000);
+  struct TrimBoundary
+  {
+    Sides Source;
+    std::vector<TopoDS_Wire> Wires; //!< Opposite conventional-face incidence.
+    std::vector<int> EdgeWires; //!< Side edges, bottom edges, then top edges.
+    bool IncidenceVerified = false;
+    std::string Reason;
+  };
+  //! Qualify shared conventional-edge incidence and construct oriented field
+  //! boundary wires. Does not assign wires to implicit surface components or
+  //! attach implicit faces; no shell/solid proof follows from this graph.
+  Standard_EXPORT static TrimBoundary BuildTrimBoundary(const TopoDS_Face&,
     const BRep_ImplicitCylinderSection::Settings&, bool negative = true,
     size_t maximumNestingTests = 2000000);
 };

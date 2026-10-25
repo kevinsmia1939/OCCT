@@ -15,6 +15,8 @@
 #include <Geom2d_Circle.hxx>
 #include <NCollection_Array1.hxx>
 #include <TopExp.hxx>
+#include <TopExp_Explorer.hxx>
+#include <TopoDS.hxx>
 #include <NCollection_IndexedMap.hxx>
 #include <TopTools_ShapeMapHasher.hxx>
 #include <TopoDS_Wire.hxx>
@@ -541,5 +543,99 @@ BRepClass3d_ImplicitCylinder::Sides BRepClass3d_ImplicitCylinder::BuildSides(
   catch (const Standard_AbortiveTransaction&) { throw; }
   catch (const Standard_Failure& error)
   { result.Faces.clear(); result.Reason = error.what() ? error.what() : "side_region_failed"; }
+  return result;
+}
+
+BRepClass3d_ImplicitCylinder::TrimBoundary BRepClass3d_ImplicitCylinder::BuildTrimBoundary(
+  const TopoDS_Face& face, const Settings& s, bool negative, size_t maximumNestingTests)
+{
+  TrimBoundary result;
+  result.Source = BuildSides(face, s, negative, maximumNestingTests);
+  if (!result.Source.TopologyValidated) { result.Reason = result.Source.Reason; return result; }
+  try
+  {
+    std::vector<TopoDS_Edge> field = result.Source.Boundary.FieldEdges;
+    for (const auto& cap : result.Source.Boundary.Source.Regions.FieldEdges)
+      field.insert(field.end(), cap.begin(), cap.end());
+    NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> expected, allEdges, vertices;
+    for (const auto& edge : field)
+    {
+      checkpoint(s);
+      require(!expected.Contains(edge), "cylinder_duplicate_field_edge"); expected.Add(edge);
+    }
+    struct Uses { int Forward = 0, Reversed = 0; };
+    std::vector<Uses> uses;
+    std::vector<TopoDS_Face> conventional = result.Source.Faces;
+    for (const auto& cap : result.Source.Boundary.Source.Regions.Faces)
+      conventional.insert(conventional.end(), cap.begin(), cap.end());
+    for (const auto& conventionalFace : conventional)
+      for (TopExp_Explorer it(conventionalFace, TopAbs_EDGE); it.More(); it.Next())
+      {
+        checkpoint(s);
+        const auto& edge = it.Current();
+        const int id = allEdges.Add(edge) - 1;
+        if (size_t(id) >= uses.size()) uses.resize(size_t(id) + 1);
+        require(edge.Orientation() == TopAbs_FORWARD || edge.Orientation() == TopAbs_REVERSED,
+                "cylinder_nonmanifold_edge_orientation");
+        if (edge.Orientation() == TopAbs_FORWARD) ++uses[size_t(id)].Forward;
+        else ++uses[size_t(id)].Reversed;
+      }
+    for (size_t id = 1; id <= allEdges.Size(); ++id)
+    {
+      checkpoint(s);
+      const auto& use = uses[size_t(id - 1)];
+      const int fieldId = expected.FindIndex(allEdges.FindKey(id));
+      if (fieldId)
+      {
+        const bool forward = field[size_t(fieldId - 1)].Orientation() == TopAbs_FORWARD;
+        require(use.Forward == (forward ? 1 : 0) && use.Reversed == (forward ? 0 : 1),
+                "cylinder_field_edge_incidence");
+      }
+      else require(use.Forward == 1 && use.Reversed == 1, "cylinder_unpaired_conventional_edge");
+    }
+    std::vector<int> begin, end;
+    for (auto& edge : field)
+    {
+      require(allEdges.Contains(edge), "cylinder_unused_field_edge");
+      edge.Reverse();
+      TopoDS_Vertex a, b; TopExp::Vertices(edge, a, b, true);
+      require(!a.IsNull() && !b.IsNull(), "cylinder_trim_missing_vertex");
+      begin.push_back(vertices.Add(a) - 1); end.push_back(vertices.Add(b) - 1);
+    }
+    std::vector<int> outgoing(size_t(vertices.Size()), -1), incoming(size_t(vertices.Size()), 0);
+    for (size_t i = 0; i < field.size(); ++i)
+    {
+      require(outgoing[size_t(begin[i])] < 0, "cylinder_trim_branched_vertex");
+      outgoing[size_t(begin[i])] = int(i); ++incoming[size_t(end[i])];
+    }
+    for (size_t i = 0; i < incoming.size(); ++i)
+      require(incoming[i] == 1 && outgoing[i] >= 0, "cylinder_trim_open_vertex");
+    result.EdgeWires.assign(field.size(), -1);
+    BRep_Builder builder;
+    for (size_t first = 0; first < field.size(); ++first)
+    {
+      if (result.EdgeWires[first] >= 0) continue;
+      TopoDS_Wire wire; builder.MakeWire(wire);
+      size_t current = first;
+      do
+      {
+        checkpoint(s);
+        require(result.EdgeWires[current] < 0, "cylinder_trim_joined_foreign_cycle");
+        result.EdgeWires[current] = int(result.Wires.size());
+        builder.Add(wire, field[current]);
+        current = size_t(outgoing[size_t(end[current])]);
+      } while (current != first);
+      wire.Closed(true);
+      require(BRepCheck_Analyzer(wire).IsValid(), "cylinder_trim_invalid_wire");
+      result.Wires.push_back(wire);
+    }
+    result.IncidenceVerified = true; result.Reason = "cylinder_trim_incidence_verified";
+  }
+  catch (const Standard_AbortiveTransaction&) { throw; }
+  catch (const Standard_Failure& error)
+  {
+    result.Wires.clear(); result.EdgeWires.clear();
+    result.Reason = error.what() ? error.what() : "cylinder_trim_incidence_failed";
+  }
   return result;
 }

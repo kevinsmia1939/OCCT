@@ -235,6 +235,62 @@ TEST(BRepClass3dImplicitCylinder, NativeSidesPlacementCancellationAndFailureClea
   EXPECT_THROW(Ops::BuildSides(source, s), Standard_AbortiveTransaction);
 }
 
+TEST(BRepClass3dImplicitCylinder, TrimWiresCloseBySharedIdentityWithOppositeFaceIncidence)
+{
+  for (int fixture = 0; fixture < 4; ++fixture)
+    for (bool negative : {false, true})
+    {
+      auto s = settings();
+      double iso = .21;
+      if (fixture == 1)
+      { s.AngleMinimum = .27; s.AngleMaximum = .27 + 2 * std::acos(-1.);
+        s.HeightMinimum = -1.7; s.HeightMaximum = 1.3; }
+      if (fixture == 2) iso = 10;
+      if (fixture == 3)
+      { iso = 1.3; s.Frame.SetLocation(gp_Pnt(2.5, 1.25, 0)); s.Radius = 1.5;
+        s.HeightMinimum = 0; s.HeightMaximum = .02; }
+      const auto result = Ops::BuildTrimBoundary(field(iso), s, negative);
+      ASSERT_TRUE(result.IncidenceVerified) << fixture << ": " << result.Reason;
+      std::vector<TopoDS_Edge> edges = result.Source.Boundary.FieldEdges;
+      for (const auto& cap : result.Source.Boundary.Source.Regions.FieldEdges)
+        edges.insert(edges.end(), cap.begin(), cap.end());
+      ASSERT_EQ(result.EdgeWires.size(), edges.size());
+      if (fixture == 2) EXPECT_TRUE(result.Wires.empty());
+      else EXPECT_FALSE(result.Wires.empty());
+      if (fixture == 3) EXPECT_EQ(result.Wires.size(), 2);
+      for (size_t i = 0; i < result.Wires.size(); ++i)
+      {
+        const auto& wire = result.Wires[i];
+        EXPECT_TRUE(wire.Closed()); EXPECT_TRUE(BRepCheck_Analyzer(wire).IsValid());
+        size_t count = 0;
+        for (TopExp_Explorer it(wire, TopAbs_EDGE); it.More(); it.Next())
+        {
+          int match = -1;
+          for (size_t e = 0; e < edges.size(); ++e) if (it.Current().IsSame(edges[e])) match = int(e);
+          ASSERT_GE(match, 0);
+          EXPECT_EQ(result.EdgeWires[size_t(match)], int(i));
+          EXPECT_NE(it.Current().Orientation(), edges[size_t(match)].Orientation()); ++count;
+        }
+        EXPECT_GT(count, 0);
+      }
+    }
+  auto s = settings(); s.MaximumCells = 4;
+  const auto failed = Ops::BuildTrimBoundary(field(), s);
+  EXPECT_FALSE(failed.IncidenceVerified); EXPECT_TRUE(failed.Wires.empty());
+  EXPECT_TRUE(failed.EdgeWires.empty());
+  const auto source = field();
+  std::stringstream before; BRep_ImplicitIO::Write(source, before);
+  s = settings();
+  static size_t calls = 0;
+  calls = 0; s.WorkCheckpoint = [] { ++calls; };
+  ASSERT_TRUE(Ops::BuildTrimBoundary(source, s).IncidenceVerified);
+  ASSERT_GT(calls, 2); --calls;
+  s.WorkCheckpoint = [] { if (--calls == 0) throw Standard_AbortiveTransaction("late trim cancellation"); };
+  EXPECT_THROW(Ops::BuildTrimBoundary(source, s), Standard_AbortiveTransaction);
+  std::stringstream after; BRep_ImplicitIO::Write(source, after);
+  EXPECT_EQ(before.str(), after.str());
+}
+
 TEST(BRepClass3dImplicitCylinder, NativeCapsPartitionDiskAndShareSideRootVertices)
 {
   const auto source = field(); const auto s = settings();
