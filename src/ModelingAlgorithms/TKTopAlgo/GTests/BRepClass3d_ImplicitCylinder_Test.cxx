@@ -23,6 +23,7 @@
 #include <gtest/gtest.h>
 #include <cmath>
 #include <sstream>
+#include <limits>
 
 namespace
 {
@@ -585,6 +586,53 @@ TEST(BRepClass3dImplicitCylinder, ShellGeometryRefusesBudgetsAndSupportsPlacemen
   ASSERT_GT(calls, 2); --calls;
   s.WorkCheckpoint = [] { if (--calls == 0) throw Standard_AbortiveTransaction("late geometry cancellation"); };
   EXPECT_THROW(Ops::CheckShellGeometry(placed, s), Standard_AbortiveTransaction);
+}
+
+TEST(BRepClass3dImplicitCylinder, MaterialClassificationUsesSpatialBoundsAndKeepsAmbiguity)
+{
+  auto s = settings(); s.AngleMinimum = .27; s.AngleMaximum = .27 + 2 * std::acos(-1.);
+  s.HeightMinimum = -1.7; s.HeightMaximum = 1.3;
+  const double root = std::asin(.21) * 10 / (2 * std::acos(-1.));
+  const auto source = field();
+  std::stringstream before; BRep_ImplicitIO::Write(source, before);
+  for (bool negative : {false, true})
+  {
+    const auto geometry = Ops::CheckShellGeometry(source, s, negative);
+    ASSERT_TRUE(geometry.BoundaryVerified) << geometry.Reason;
+    const auto classify = [&](const gp_Pnt& p) { return Ops::ClassifyMaterial(geometry, p); };
+    EXPECT_EQ(classify(gp_Pnt(0, 0, -.5)).State, negative ? TopAbs_IN : TopAbs_OUT);
+    EXPECT_EQ(classify(gp_Pnt(0, 0, .8)).State, negative ? TopAbs_OUT : TopAbs_IN);
+    EXPECT_EQ(classify(gp_Pnt(0, 0, root)).State, TopAbs_ON);
+    EXPECT_EQ(classify(gp_Pnt(0, 0, -1.7)).State, negative ? TopAbs_ON : TopAbs_OUT);
+    EXPECT_EQ(classify(gp_Pnt(0, 0, 1.3)).State, negative ? TopAbs_OUT : TopAbs_ON);
+    EXPECT_EQ(classify(gp_Pnt(.5, 0, -.8)).State, negative ? TopAbs_ON : TopAbs_OUT);
+    EXPECT_EQ(classify(gp_Pnt(.5, 0, 1)).State, negative ? TopAbs_OUT : TopAbs_ON);
+    EXPECT_EQ(classify(gp_Pnt(0, 0, root - 1.e-5)).State, negative ? TopAbs_IN : TopAbs_OUT);
+    EXPECT_EQ(classify(gp_Pnt(0, 0, root + 1.e-5)).State, negative ? TopAbs_OUT : TopAbs_IN);
+    const auto far = classify(gp_Pnt(2, 0, 0));
+    EXPECT_EQ(far.State, TopAbs_OUT); EXPECT_TRUE(far.BoundaryAllowanceSeparated);
+    const auto near = classify(gp_Pnt(0, 0, root));
+    EXPECT_FALSE(near.BoundaryAllowanceSeparated); EXPECT_LE(near.DistanceUpperBound, 1.e-7);
+    const auto margin = classify(gp_Pnt(0, 0, root + .05));
+    ASSERT_GT(margin.DistanceUpperBound, margin.DistanceLowerBound);
+    const double tolerance = (margin.DistanceLowerBound + margin.DistanceUpperBound) * .5;
+    EXPECT_EQ(Ops::ClassifyMaterial(geometry, gp_Pnt(0, 0, root + .05), tolerance).State, TopAbs_UNKNOWN);
+    EXPECT_THROW(Ops::ClassifyMaterial(geometry, gp_Pnt(), 0), Standard_DomainError);
+    EXPECT_THROW(Ops::ClassifyMaterial(geometry, gp_Pnt(std::numeric_limits<double>::quiet_NaN(), 0, 0)), Standard_DomainError);
+  }
+  EXPECT_THROW(Ops::ClassifyMaterial(Ops::ShellGeometry(), gp_Pnt()), Standard_DomainError);
+  gp_Trsf move; move.SetTranslation(gp_Vec(1.2, -.4, 2.1));
+  auto placed = source; placed.Location(TopLoc_Location(move));
+  auto reversed = s;
+  reversed.Frame = gp_Ax2(gp_Pnt(), gp_Dir(0, 0, -1), gp_Dir(1, 0, 0));
+  reversed.Frame.Transform(move); reversed.HeightMinimum = -1.3; reversed.HeightMaximum = 1.7;
+  const auto geometry = Ops::CheckShellGeometry(placed, reversed);
+  ASSERT_TRUE(geometry.BoundaryVerified) << geometry.Reason;
+  EXPECT_EQ(Ops::ClassifyMaterial(geometry, gp_Pnt(0, 0, -.5).Transformed(move)).State, TopAbs_IN);
+  EXPECT_EQ(Ops::ClassifyMaterial(geometry, gp_Pnt(0, 0, root).Transformed(move)).State, TopAbs_ON);
+  EXPECT_EQ(Ops::ClassifyMaterial(geometry, gp_Pnt(.5, 0, -.8).Transformed(move)).State, TopAbs_ON);
+  std::stringstream after; BRep_ImplicitIO::Write(source, after);
+  EXPECT_EQ(before.str(), after.str());
 }
 
 TEST(BRepClass3dImplicitCylinder, NativeCapsPartitionDiskAndShareSideRootVertices)

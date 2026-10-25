@@ -31,6 +31,7 @@
 #include <limits>
 #include <map>
 #include <set>
+#include <typeinfo>
 #include <TopoDS_Iterator.hxx>
 
 namespace
@@ -1316,5 +1317,96 @@ BRepClass3d_ImplicitCylinder::ShellGeometry BRepClass3d_ImplicitCylinder::CheckS
   catch (const Standard_AbortiveTransaction&) { throw; }
   catch (const Standard_Failure& error)
   { result.Reason = error.what() ? error.what() : "cylinder_shell_geometry_unresolved"; }
+  return result;
+}
+
+BRepClass3d_ImplicitCylinder::MaterialPoint BRepClass3d_ImplicitCylinder::ClassifyMaterial(
+  const ShellGeometry& geometry, const gp_Pnt& point, double pointTolerance)
+{
+  require(geometry.BoundaryVerified && geometry.Source.ToleranceVerified
+            && geometry.Source.Source.TopologyValidated, "cylinder_material_requires_qualified_geometry");
+  require(std::isfinite(pointTolerance) && pointTolerance > 0, "invalid_cylinder_point_tolerance");
+  for (int a = 1; a <= 3; ++a) require(std::isfinite(point.Coord(a)), "nonfinite_cylinder_material_point");
+  const auto& reference = geometry.Source.Source.Source.Reference;
+  const auto& axial = reference.Source;
+  const auto& recipe = axial.Boundary.Source.Boundary.Source.Regions;
+  const auto& s = recipe.Parameters;
+  require(reference.MathematicalCorrespondenceVerified && axial.MonotonicityVerified
+            && axial.DerivativeLowerBound > 0 && std::isfinite(geometry.BoundaryBound)
+            && geometry.BoundaryBound <= s.DistanceTolerance, "cylinder_material_reference_unqualified");
+  const auto data = occ::down_cast<BRep_TImplicitFace>(recipe.Field.TShape());
+  require(!data.IsNull() && !data->Field().IsNull()
+            && typeid(*data->Field()) == typeid(Geom_ImplicitGyroid), "cylinder_material_field_type");
+  const auto* field = static_cast<const Geom_ImplicitGyroid*>(data->Field().get());
+  const double scale = std::abs((recipe.Field.Location() * data->Location()).Transformation().ScaleFactor());
+  const double lipschitz = field->LipschitzBound() / scale;
+  const gp_Vec delta(s.Frame.Location(), point), x(s.Frame.XDirection()), y(s.Frame.YDirection()), axis(s.Frame.Direction());
+  const double px = delta.Dot(x), py = delta.Dot(y), height = delta.Dot(axis);
+  const double radial = std::hypot(px, py);
+  const double precision = 16384 * std::numeric_limits<double>::epsilon()
+    * (1 + std::abs(point.X()) + std::abs(point.Y()) + std::abs(point.Z())
+       + s.Frame.Location().Distance(gp_Pnt()) + s.Radius + std::abs(s.HeightMinimum) + std::abs(s.HeightMaximum));
+  const double reserve = precision * (1 + lipschitz)
+    + 16384 * std::numeric_limits<double>::epsilon() * (1 + std::abs(field->IsoValue()));
+  require(std::isfinite(radial) && std::isfinite(height) && std::isfinite(reserve), "cylinder_material_precision");
+  const double qx = radial > s.Radius ? px * (s.Radius / radial) : px;
+  const double qy = radial > s.Radius ? py * (s.Radius / radial) : py;
+  const double qz = std::clamp(height, s.HeightMinimum, s.HeightMaximum);
+  const auto projected = s.Frame.Location().Translated(x * qx + y * qy + axis * qz);
+  MaterialPoint result;
+  result.FieldValueAtDomainProjection = BRep_ImplicitTool::Value(recipe.Field, projected);
+  const double selected = (recipe.Negative ? -1 : 1) * result.FieldValueAtDomainProjection;
+  require(std::isfinite(selected), "cylinder_material_nonfinite_value");
+  const bool insideDomain = radial <= s.Radius && height >= s.HeightMinimum && height <= s.HeightMaximum;
+  const double outside = std::hypot(std::max(radial - s.Radius, 0.), std::abs(height - qz));
+  const double fieldLower = std::max(0., (std::abs(selected) - reserve) / lipschitz);
+  double rootUpper = std::min((std::abs(selected) + reserve) / axial.DerivativeLowerBound,
+                              std::max(qz - s.HeightMinimum, s.HeightMaximum - qz));
+  // The global cone can be arbitrarily conservative near a regular query root.
+  // Its initial distance bound encloses the whole query-to-root axial segment,
+  // so a local Hessian cone over that segment can safely sharpen the bound.
+  const double k = 2 * std::acos(-1.) / field->Period() / scale;
+  const double hessian = 4 * k * k;
+  const double gradientReserve = 16384 * std::numeric_limits<double>::epsilon()
+    * (1 + lipschitz + hessian) + (lipschitz + hessian) * precision;
+  const double localLower = axial.Direction * BRep_ImplicitTool::Gradient(recipe.Field, projected).Dot(axis)
+    - hessian * (rootUpper + precision) - gradientReserve;
+  if (std::isfinite(localLower) && localLower > axial.DerivativeLowerBound)
+    rootUpper = std::min(rootUpper, (std::abs(selected) + reserve) / localLower);
+  const bool bottom = recipe.Negative == (axial.Direction > 0);
+  const double cap = bottom ? s.HeightMinimum : s.HeightMaximum;
+  double lower = 0;
+  double upper = std::min(std::hypot(std::max(radial - s.Radius, 0.), height - cap), outside + rootUpper)
+    + 2 * precision;
+  bool definiteInside = false, definiteOutside = false;
+  if (insideDomain)
+  {
+    if (selected > reserve)
+    {
+      const double clearance = std::min({s.Radius - radial, height - s.HeightMinimum, s.HeightMaximum - height});
+      lower = std::min(std::max(0., clearance - precision), fieldLower);
+      definiteInside = clearance > precision;
+      const double sideDistance = s.Radius - radial;
+      if (selected > reserve + lipschitz * (sideDistance + precision))
+        upper = std::min(upper, sideDistance + 2 * precision);
+    }
+    else if (selected < -reserve) { lower = fieldLower; definiteOutside = true; }
+  }
+  else
+  {
+    lower = std::max(0., outside - precision); definiteOutside = outside > precision;
+    if (selected > reserve) upper = std::min(upper, outside + 2 * precision);
+    else if (selected < -reserve) lower = std::max(lower, std::max(0., fieldLower - outside - precision));
+  }
+  require(std::isfinite(lower) && std::isfinite(upper) && lower <= upper + precision,
+          "cylinder_material_distance_bounds");
+  result.DistanceLowerBound = lower; result.DistanceUpperBound = std::max(lower, upper);
+  if (result.DistanceUpperBound <= pointTolerance) result.State = TopAbs_ON;
+  else if (result.DistanceLowerBound > pointTolerance)
+  {
+    if (definiteInside) result.State = TopAbs_IN;
+    else if (definiteOutside) result.State = TopAbs_OUT;
+  }
+  result.BoundaryAllowanceSeparated = result.DistanceLowerBound > geometry.BoundaryBound + pointTolerance;
   return result;
 }

@@ -6,6 +6,7 @@
 #include <string>
 #include <TopoDS_Wire.hxx>
 #include <TopoDS_Shell.hxx>
+#include <TopAbs_State.hxx>
 
 //! Restricted native cap-region assembly; NOT a cylinder Boolean/solid builder.
 class BRepClass3d_ImplicitCylinder
@@ -183,5 +184,18 @@ public:
     size_t maximumNestingTests = 2000000, int maximumDepth = 24,
     size_t maximumCells = 200000, int maximumGeometryDepth = 24,
     size_t maximumGeometryCells = 200000, size_t maximumSegmentTests = 20000000);
+  struct MaterialPoint
+  {
+    TopAbs_State State = TopAbs_UNKNOWN; //!< Mathematical material, with query tolerance.
+    double DistanceLowerBound = 0, DistanceUpperBound = 0;
+    double FieldValueAtDomainProjection = 0;
+    bool BoundaryAllowanceSeparated = false;
+  };
+  //! Classify the unchanged owned full-disk recipe in model-length tolerance.
+  //! Uses spatial distance bounds, not a dimensionless |F| tolerance. UNKNOWN
+  //! remains explicit when bounds do not separate the requested distance band.
+  //! No ordinary OCCT solid-classifier or generic consumer support is implied.
+  Standard_EXPORT static MaterialPoint ClassifyMaterial(const ShellGeometry&,
+    const gp_Pnt&, double pointTolerance = 1.e-7);
 };
 #endif
