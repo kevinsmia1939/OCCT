@@ -15,6 +15,8 @@
 #include <Geom_ImplicitGyroid.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <Geom_Plane.hxx>
+#include <Geom_CylindricalSurface.hxx>
+#include <Geom2d_BSplineCurve.hxx>
 #include <Geom2d_Curve.hxx>
 #include <BRep_TImplicitCylinderPatch.hxx>
 #include <TopExp.hxx>
@@ -796,6 +798,28 @@ TEST(BRepClass3dImplicitCylinder, StoredCylinderSolidPreservesSharedGraphAndDrop
     capPlane->SetLocation(capLocation.Translated(gp_Vec(s.Frame.Direction())*.2));
     EXPECT_FALSE(BRepClass3d_ImplicitCylinderIO::CheckRetainedCap(restored).Verified);
     capPlane->SetLocation(capLocation);
+    const auto retainedSide = BRepClass3d_ImplicitCylinderIO::CheckRetainedSide(restored);
+    EXPECT_TRUE(retainedSide.Verified) << retainedSide.Reason;
+    EXPECT_LE(retainedSide.Bound,s.DistanceTolerance);
+    EXPECT_FALSE(BRepClass3d_ImplicitCylinderIO::CheckRetainedSide(restored,1).Verified);
+    const auto sideSurface = occ::down_cast<Geom_CylindricalSurface>(BRep_Tool::Surface(restored.Faces[1]));
+    const double sideRadius = sideSurface->Radius();
+    sideSurface->SetRadius(sideRadius+.05);
+    EXPECT_FALSE(BRepClass3d_ImplicitCylinderIO::CheckRetainedSide(restored).Verified);
+    sideSurface->SetRadius(sideRadius);
+    TopExp_Explorer fieldEdge(restored.Faces[2],TopAbs_EDGE);
+    ASSERT_TRUE(fieldEdge.More());
+    double pcFirst,pcLast;
+    const auto pcGraph = occ::down_cast<Geom2d_BSplineCurve>(BRep_Tool::CurveOnSurface(
+      TopoDS::Edge(fieldEdge.Current()),restored.Faces[1],pcFirst,pcLast));
+    ASSERT_FALSE(pcGraph.IsNull());
+    std::vector<gp_Pnt2d> savedPoles;
+    for (int i=1;i<=pcGraph->NbPoles();++i) {
+      savedPoles.push_back(pcGraph->Pole(i));
+      auto p=pcGraph->Pole(i); p.SetX(p.X()+2*std::acos(-1.)); pcGraph->SetPole(i,p);
+    }
+    EXPECT_FALSE(BRepClass3d_ImplicitCylinderIO::CheckRetainedSide(restored).Verified);
+    for (int i=1;i<=pcGraph->NbPoles();++i) pcGraph->SetPole(i,savedPoles[size_t(i-1)]);
     EXPECT_FALSE(BRepClass3d_ImplicitCylinderIO::CheckPrimitiveSeam(restored,1).Verified);
     const auto previous = restored.Shape;
     std::vector<std::string> corruptions {record.str().substr(0, record.str().size()/2), record.str()+"trailing"};

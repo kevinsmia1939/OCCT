@@ -665,3 +665,115 @@ IO::CurveCoherence IO::CheckRetainedCap(const StoredSolid& value, size_t maximum
   { result.Reason=error.what() ? error.what() : "cylinder_io_cap_unresolved"; }
   return result;
 }
+
+IO::CurveCoherence IO::CheckRetainedSide(const StoredSolid& value, size_t maximumIntervals)
+{
+  check(maximumIntervals > 0 && maximumIntervals <= 2000000,"cylinder_io_invalid_side_budget");
+  CurveCoherence result;
+  try
+  {
+    const auto prerequisite=[&](const CurveCoherence& report) {
+      result.Intervals+=report.Intervals;
+      check(report.Verified,report.Reason.c_str());
+      check(result.Intervals < maximumIntervals,"cylinder_io_side_budget");
+    };
+    const auto cap=CheckRetainedCap(value,maximumIntervals); prerequisite(cap);
+    const auto curves=CheckCurveCoherence(value,maximumIntervals-result.Intervals); prerequisite(curves);
+    const auto coverage=CheckSeamCoverage(value,maximumIntervals-result.Intervals); prerequisite(coverage);
+    const auto& s=value.Parameters;
+    const auto& side=value.Faces[1];
+    const auto surface=occ::down_cast<Geom_CylindricalSurface>(BRep_Tool::Surface(side));
+    const gp_Vec axis(s.Frame.Direction());
+    const double precision=32768*std::numeric_limits<double>::epsilon()
+      *(1+s.Frame.Location().Distance(gp_Pnt())+s.Radius+std::abs(s.HeightMinimum)+std::abs(s.HeightMaximum));
+    check(!surface.IsNull() && orientation(side) == 0,"cylinder_io_side_surface_orientation");
+    const double extent=std::max(std::abs(s.HeightMinimum),std::abs(s.HeightMaximum));
+    const double alignment=surface->Location().Distance(s.Frame.Location())+std::abs(surface->Radius()-s.Radius)
+      +extent*(gp_Vec(surface->Axis().Direction())-axis).Magnitude()
+      +s.Radius*((gp_Vec(surface->Position().XDirection())-gp_Vec(s.Frame.XDirection())).Magnitude()
+        +(gp_Vec(surface->Position().YDirection())-gp_Vec(s.Frame.YDirection())).Magnitude());
+    check(alignment <= precision,"cylinder_io_side_surface_frame");
+    const auto middle=s.Frame.Location().Translated(axis*((s.HeightMinimum+s.HeightMaximum)*.5));
+    const bool positive=BRep_ImplicitTool::Gradient(value.Primitive,middle).Dot(axis) > 0;
+    const bool bottom=value.Negative == positive;
+    const double retained=bottom ? s.HeightMinimum : s.HeightMaximum;
+    const auto fieldUses=ordered(effectiveWire(value.Faces[2]));
+    check(fieldUses.size() == 1,"cylinder_io_side_field_edge");
+    Map caps; for (const auto& edge:ordered(effectiveWire(value.Faces[0]))) caps.Add(edge);
+    const auto uses=ordered(effectiveWire(side));
+    check(uses.size() == 5,"cylinder_io_side_use_count");
+    std::vector<std::pair<gp_Pnt2d,gp_Pnt2d>> ends;
+    int fieldCount=0,capCount=0,seamCount=0;
+    double capSpan=0;
+    const auto distance=[&](const gp_Pnt2d& a,const gp_Pnt2d& b) {
+      return std::hypot(s.Radius*(a.X()-b.X()),a.Y()-b.Y());
+    };
+    const double angularPrecision=precision/s.Radius;
+    for (const auto& edge:uses)
+    {
+      check(result.Intervals < maximumIntervals,"cylinder_io_side_budget"); ++result.Intervals;
+      double first,last;
+      const auto pc=BRep_Tool::CurveOnSurface(edge,side,first,last);
+      check(!pc.IsNull(),"cylinder_io_side_missing_pcurve");
+      auto start=pc->Value(first),finish=pc->Value(last);
+      if (orientation(edge)) std::swap(start,finish);
+      ends.emplace_back(start,finish);
+      if (edge.IsSame(fieldUses[0]))
+      {
+        ++fieldCount;
+        const auto graph=occ::down_cast<Geom2d_BSplineCurve>(pc);
+        check(!graph.IsNull() && graph->Degree() == 1 && !graph->IsRational()
+          && !graph->IsPeriodic() && first == graph->FirstParameter() && last == graph->LastParameter(),
+          "cylinder_io_side_graph_type");
+        const int direction=graph->Pole(graph->NbPoles()).X() > graph->Pole(1).X() ? 1 : -1;
+        for (int i=1;i<=graph->NbPoles();++i)
+        {
+          check(result.Intervals < maximumIntervals,"cylinder_io_side_budget"); ++result.Intervals;
+          const auto p=graph->Pole(i);
+          check(p.X() >= s.AngleMinimum-angularPrecision && p.X() <= s.AngleMaximum+angularPrecision
+            && p.Y() > s.HeightMinimum+precision && p.Y() < s.HeightMaximum-precision,
+            "cylinder_io_side_graph_domain");
+          if (i > 1) check(direction*(p.X()-graph->Pole(i-1).X()) > angularPrecision,
+            "cylinder_io_side_graph_reversal");
+        }
+        check(std::abs((finish.X()-start.X())*(bottom ? -1. : 1.)-2*std::acos(-1.))*s.Radius <= 8*precision,
+          "cylinder_io_side_graph_material_orientation");
+      }
+      else
+      {
+        check(!occ::down_cast<Geom2d_Line>(pc).IsNull(),"cylinder_io_side_nonlinear_boundary");
+        if (caps.Contains(edge))
+        {
+          ++capCount; capSpan+=finish.X()-start.X();
+          check(std::abs(start.Y()-retained) <= precision && std::abs(finish.Y()-retained) <= precision
+            && (finish.X()-start.X())*(bottom ? 1. : -1.) > angularPrecision,
+            "cylinder_io_side_cap_boundary");
+          check(std::min(start.X(),finish.X()) >= s.AngleMinimum-angularPrecision
+            && std::max(start.X(),finish.X()) <= s.AngleMaximum+angularPrecision,"cylinder_io_side_cap_chart");
+        }
+        else
+        {
+          ++seamCount;
+          check(std::abs(start.X()-finish.X()) <= angularPrecision
+            && std::min(std::abs(start.X()-s.AngleMinimum),std::abs(start.X()-s.AngleMaximum)) <= angularPrecision,
+            "cylinder_io_side_periodic_seam");
+          check(std::min(start.Y(),finish.Y()) >= s.HeightMinimum-precision
+            && std::max(start.Y(),finish.Y()) <= s.HeightMaximum+precision,"cylinder_io_side_seam_height");
+        }
+      }
+    }
+    check(fieldCount == 1 && capCount == 2 && seamCount == 2,"cylinder_io_side_boundary_partition");
+    check(std::abs(capSpan*(bottom ? 1. : -1.)-2*std::acos(-1.))*s.Radius <= 8*precision,
+      "cylinder_io_side_cap_coverage");
+    for (size_t i=0;i<ends.size();++i)
+      check(distance(ends[i].second,ends[(i+1)%ends.size()].first) <= precision,"cylinder_io_side_uv_join");
+    result.Bound=std::max(cap.Bound,coverage.Bound+curves.Bound+alignment+8*precision);
+    check(result.Bound <= s.DistanceTolerance && result.Bound <= BRep_Tool::Tolerance(value.Faces[2])
+      && alignment+8*precision <= BRep_Tool::Tolerance(side),
+      "cylinder_io_side_combined_tolerance");
+    result.Verified=true; result.Reason="cylinder_stored_retained_side_verified";
+  }
+  catch (const Standard_Failure& error)
+  { result.Reason=error.what() ? error.what() : "cylinder_io_side_unresolved"; }
+  return result;
+}

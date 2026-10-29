@@ -59,5 +59,10 @@ public:
   //! regions, whole-boundary geometry, volume or solid validity.
   Standard_EXPORT static CurveCoherence CheckRetainedCap(const StoredSolid&,
     size_t maximumIntervals = 200000);
+  //! Stored cylindrical material region: fresh cap/field prerequisites,
+  //! coherent curves, monotone graph and closed oriented periodic UV polygon.
+  //! Does not promote whole-solid geometry/volume qualification.
+  Standard_EXPORT static CurveCoherence CheckRetainedSide(const StoredSolid&,
+    size_t maximumIntervals = 200000);
 };
 #endif
