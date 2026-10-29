@@ -13,6 +13,7 @@
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <GProp_GProps.hxx>
 #include <Geom_ImplicitGyroid.hxx>
+#include <Geom_BSplineCurve.hxx>
 #include <Geom2d_Curve.hxx>
 #include <BRep_TImplicitCylinderPatch.hxx>
 #include <TopExp.hxx>
@@ -759,6 +760,14 @@ TEST(BRepClass3dImplicitCylinder, StoredCylinderSolidPreservesSharedGraphAndDrop
     for (TopExp_Explorer it(restored.Shape, TopAbs_FACE); it.More(); it.Next())
       implicit += BRep_Tool::IsImplicit(TopoDS::Face(it.Current()));
     EXPECT_EQ(implicit, 1);
+    const auto coherence = BRepClass3d_ImplicitCylinderIO::CheckCurveCoherence(restored);
+    EXPECT_TRUE(coherence.Verified) << coherence.Reason;
+    EXPECT_GT(coherence.Intervals, 0);
+    EXPECT_LE(coherence.Bound, s.DistanceTolerance);
+    const auto exhausted = BRepClass3d_ImplicitCylinderIO::CheckCurveCoherence(restored, 1);
+    EXPECT_FALSE(exhausted.Verified);
+    EXPECT_EQ(exhausted.Reason, "cylinder_io_coherence_budget");
+    EXPECT_FALSE(restored.GeometryVerified);
     const auto previous = restored.Shape;
     std::vector<std::string> corruptions {record.str().substr(0, record.str().size()/2), record.str()+"trailing"};
     const auto replace = [&](const std::string& from, const std::string& to) {
@@ -789,6 +798,19 @@ TEST(BRepClass3dImplicitCylinder, StoredCylinderSolidPreservesSharedGraphAndDrop
     std::ostringstream untouched; untouched << "prefix";
     EXPECT_THROW(BRepClass3d_ImplicitCylinderIO::Write(invalid, untouched), Standard_Failure);
     EXPECT_EQ(untouched.str(), "prefix");
+    bool changed = false;
+    for (TopExp_Explorer it(restored.Shape, TopAbs_EDGE); it.More() && !changed; it.Next())
+    {
+      double first, last;
+      const auto spline = occ::down_cast<Geom_BSplineCurve>(
+        BRep_Tool::Curve(TopoDS::Edge(it.Current()), first, last));
+      if (spline.IsNull() || spline->NbPoles() < 3) continue;
+      const int pole = 1 + spline->NbPoles()/2;
+      spline->SetPole(pole, spline->Pole(pole).Translated(gp_Vec(0,0,1)));
+      changed = true;
+    }
+    ASSERT_TRUE(changed);
+    EXPECT_FALSE(BRepClass3d_ImplicitCylinderIO::CheckCurveCoherence(restored).Verified);
   }
 }
 

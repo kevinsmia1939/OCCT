@@ -281,3 +281,101 @@ void BRepClass3d_ImplicitCylinderIO::Read(Standard_IStream& input, StoredSolid& 
   shell.Closed(true); builder.MakeSolid(value.Shape); builder.Add(value.Shape,shell); value.Shape.Closed(true);
   validate(value); value.TopologyValidated=true; destination=std::move(value);
 }
+
+BRepClass3d_ImplicitCylinderIO::CurveCoherence
+BRepClass3d_ImplicitCylinderIO::CheckCurveCoherence(const StoredSolid& value,
+                                                 size_t maximumIntervals)
+{
+  check(maximumIntervals > 0 && maximumIntervals <= 2000000,
+        "cylinder_io_invalid_coherence_budget");
+  CurveCoherence result;
+  try
+  {
+    validate(value);
+    for (size_t f = 0; f < 2; ++f)
+    {
+      const auto& face = value.Faces[f];
+      const auto surface = BRep_Tool::Surface(face);
+      const auto cylinder = occ::down_cast<Geom_CylindricalSurface>(surface);
+      const double surfaceLipschitz = cylinder.IsNull() ? 1. : std::max(1., cylinder->Radius());
+      for (const auto& edge : ordered(effectiveWire(face)))
+      {
+        TopLoc_Location location;
+        double first, last, pcFirst, pcLast;
+        const auto curve = BRep_Tool::Curve(edge, location, first, last);
+        const auto pc = BRep_Tool::CurveOnSurface(edge, face, pcFirst, pcLast);
+        check(!curve.IsNull() && !pc.IsNull() && location.IsIdentity()
+                && first == pcFirst && last == pcLast, "cylinder_io_coherence_range");
+        const auto spline = occ::down_cast<Geom_BSplineCurve>(curve);
+        const auto pcSpline = occ::down_cast<Geom2d_BSplineCurve>(pc);
+        const auto circle = occ::down_cast<Geom_Circle>(curve);
+        const auto pcCircle = occ::down_cast<Geom2d_Circle>(pc);
+        check((!spline.IsNull() && spline->Degree() == 1 && !spline->IsRational())
+                || !circle.IsNull() || !occ::down_cast<Geom_Line>(curve).IsNull(),
+              "cylinder_io_coherence_curve");
+        check((!pcSpline.IsNull() && pcSpline->Degree() == 1 && !pcSpline->IsRational())
+                || !pcCircle.IsNull() || !occ::down_cast<Geom2d_Line>(pc).IsNull(),
+              "cylinder_io_coherence_pcurve");
+        std::vector<double> breaks {first, last};
+        if (!spline.IsNull()) for (int i = 1; i <= spline->NbKnots(); ++i)
+          if (spline->Knot(i) > first && spline->Knot(i) < last) breaks.push_back(spline->Knot(i));
+        if (!pcSpline.IsNull()) for (int i = 1; i <= pcSpline->NbKnots(); ++i)
+          if (pcSpline->Knot(i) > first && pcSpline->Knot(i) < last) breaks.push_back(pcSpline->Knot(i));
+        std::sort(breaks.begin(), breaks.end());
+        breaks.erase(std::unique(breaks.begin(), breaks.end()), breaks.end());
+        // Each initial interval lies in one affine spline span. Circle and line
+        // speeds are constant. Their sum bounds the difference everywhere.
+        for (size_t i = 1; i < breaks.size(); ++i)
+        {
+          const double a = breaks[i-1], b = breaks[i];
+          const double speed = spline.IsNull() ? (circle.IsNull() ? 1. : circle->Radius())
+            : curve->Value(a).Distance(curve->Value(b)) / (b-a);
+          const double pcSpeed = pcSpline.IsNull() ? (pcCircle.IsNull() ? 1. : pcCircle->Radius())
+            : pc->Value(a).Distance(pc->Value(b)) / (b-a);
+          const double lipschitz = speed + surfaceLipschitz * pcSpeed;
+          const double acceleration = (circle.IsNull() ? 0. : circle->Radius())
+            + (cylinder.IsNull() ? 0. : cylinder->Radius() * pcSpeed * pcSpeed)
+            + surfaceLipschitz * (pcCircle.IsNull() ? 0. : pcCircle->Radius());
+          check(std::isfinite(lipschitz), "cylinder_io_coherence_speed");
+          std::vector<std::pair<double,double>> pending {{a,b}};
+          while (!pending.empty())
+          {
+            check(result.Intervals < maximumIntervals, "cylinder_io_coherence_budget");
+            ++result.Intervals;
+            const auto interval = pending.back(); pending.pop_back();
+            const double middle = interval.first + (interval.second-interval.first)*.5;
+            const auto p = curve->Value(middle);
+            const auto uv = pc->Value(middle);
+            const auto q = surface->Value(uv.X(),uv.Y());
+            const double reserve = 32768 * std::numeric_limits<double>::epsilon()
+              * (1 + p.Distance(gp_Pnt()) + q.Distance(gp_Pnt()) + lipschitz
+                 * (1 + std::abs(interval.first) + std::abs(interval.second)));
+            const double distance = p.Distance(q);
+            const auto residual = [&](double parameter) {
+              const auto uvEnd = pc->Value(parameter);
+              return curve->Value(parameter).Distance(surface->Value(uvEnd.X(),uvEnd.Y()));
+            };
+            const double width = interval.second-interval.first;
+            // Linear interpolation of the residual vector has a whole-interval
+            // remainder <= sup|residual''| * width^2 / 8. No sample-only claim.
+            const double interpolation = std::max(residual(interval.first), residual(interval.second))
+              + acceleration * width * width / 8;
+            const double bound = std::min(distance + lipschitz*width*.5, interpolation) + reserve;
+            const double tolerance = BRep_Tool::Tolerance(edge);
+            check(std::isfinite(bound) && distance <= tolerance,
+                  "cylinder_io_coherence_mismatch");
+            if (bound <= tolerance) { result.Bound = std::max(result.Bound,bound); continue; }
+            check(middle > interval.first && middle < interval.second,
+                  "cylinder_io_coherence_precision");
+            pending.emplace_back(middle,interval.second);
+            pending.emplace_back(interval.first,middle);
+          }
+        }
+      }
+    }
+    result.Verified = true; result.Reason = "cylinder_stored_curve_coherence_verified";
+  }
+  catch (const Standard_Failure& error)
+  { result.Reason = error.what() ? error.what() : "cylinder_io_coherence_unresolved"; }
+  return result;
+}

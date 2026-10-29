@@ -29,5 +29,16 @@ public:
   //! Reject unknown versions, malformed/trailing/oversized records atomically.
   //! Structural topology is checked. Geometry/volume certificates stay false.
   Standard_EXPORT static void Read(Standard_IStream&, StoredSolid&);
+  struct CurveCoherence
+  {
+    bool Verified = false;
+    double Bound = 0;
+    size_t Intervals = 0;
+    std::string Reason;
+  };
+  //! Whole-interval distance bounds between stored 3D curves and conventional
+  //! face p-curves. Does not qualify field correspondence or solid geometry.
+  Standard_EXPORT static CurveCoherence CheckCurveCoherence(const StoredSolid&,
+    size_t maximumIntervals = 200000);
 };
 #endif
