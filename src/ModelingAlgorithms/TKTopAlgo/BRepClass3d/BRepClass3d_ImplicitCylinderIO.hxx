@@ -40,5 +40,14 @@ public:
   //! face p-curves. Does not qualify field correspondence or solid geometry.
   Standard_EXPORT static CurveCoherence CheckCurveCoherence(const StoredSolid&,
     size_t maximumIntervals = 200000);
+  //! One directed spatial bound: every stored implicit-wire point lies near
+  //! an unrestricted primitive gyroid zero. Does not prove cylinder-masked
+  //! correspondence, reverse coverage, material regions or solid validity.
+  Standard_EXPORT static CurveCoherence CheckPrimitiveSeam(const StoredSolid&,
+    size_t maximumIntervals = 200000);
+  //! Directed seam bound with axial zero witnesses inside the stored convex
+  //! cylinder/source mask. Reverse coverage and retained regions stay separate.
+  Standard_EXPORT static CurveCoherence CheckMaskedSeam(const StoredSolid&,
+    size_t maximumIntervals = 200000);
 };
 #endif

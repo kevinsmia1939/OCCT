@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only WITH OCCT-exception-1.0
 #include <BRepClass3d_ImplicitCylinderIO.hxx>
 #include <BRep_ImplicitIO.hxx>
+#include <BRep_ImplicitTool.hxx>
 #include <BRep_TImplicitCylinderPatch.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
@@ -379,3 +380,111 @@ BRepClass3d_ImplicitCylinderIO::CheckCurveCoherence(const StoredSolid& value,
   { result.Reason = error.what() ? error.what() : "cylinder_io_coherence_unresolved"; }
   return result;
 }
+
+namespace
+{
+IO::CurveCoherence checkStoredSeam(const IO::StoredSolid& value,
+                                 size_t maximumIntervals, bool masked)
+{
+  check(maximumIntervals > 0 && maximumIntervals <= 2000000,
+        "cylinder_io_invalid_seam_budget");
+  IO::CurveCoherence result;
+  try
+  {
+    validate(value);
+    const auto data = occ::down_cast<BRep_TImplicitFace>(value.Primitive.TShape());
+    const auto* field = static_cast<const Geom_ImplicitGyroid*>(data->Field().get());
+    const double scale = std::abs((value.Primitive.Location() * data->Location()).Transformation().ScaleFactor());
+    const double k = 2 * std::acos(-1.) / field->Period() / scale;
+    const double hessian = 4 * k * k;
+    check(std::isfinite(hessian) && hessian > 0, "cylinder_io_seam_hessian");
+    for (const auto& edge : ordered(effectiveWire(value.Faces[2])))
+    {
+      TopLoc_Location location;
+      double first,last;
+      const auto curve = occ::down_cast<Geom_BSplineCurve>(BRep_Tool::Curve(edge,location,first,last));
+      check(!curve.IsNull() && location.IsIdentity() && curve->Degree() == 1
+        && !curve->IsRational() && !curve->IsPeriodic()
+        && first == curve->FirstParameter() && last == curve->LastParameter(),
+        "cylinder_io_seam_curve");
+      const double tolerance = std::min(value.Parameters.DistanceTolerance, BRep_Tool::Tolerance(value.Faces[2]));
+      for (int i = 2; i <= curve->NbPoles(); ++i)
+      {
+        std::vector<std::pair<gp_Pnt,gp_Pnt>> pending {{curve->Pole(i-1),curve->Pole(i)}};
+        while (!pending.empty())
+        {
+          check(result.Intervals < maximumIntervals, "cylinder_io_seam_budget");
+          ++result.Intervals;
+          const auto segment = pending.back(); pending.pop_back();
+          const gp_Pnt originalMiddle((segment.first.XYZ()+segment.second.XYZ())*.5);
+          const double originalRadius = segment.first.Distance(segment.second)*.5;
+          const double reserve = 32768 * std::numeric_limits<double>::epsilon()
+            * (1 + originalMiddle.Distance(gp_Pnt()) + originalRadius + tolerance)
+            * (1 + k + hessian + std::abs(field->IsoValue()));
+          auto start = segment.first, finish = segment.second;
+          double displacement = 0;
+          const gp_Vec axis(value.Parameters.Frame.Direction());
+          if (masked)
+          {
+            const auto& frame = value.Parameters.Frame;
+            const auto radial = [&](const gp_Pnt& p) {
+              const gp_Vec delta(frame.Location(),p);
+              return delta-axis*delta.Dot(axis);
+            };
+            const double maximumRadius = std::max(radial(start).Magnitude(),radial(finish).Magnitude());
+            check(value.Parameters.Radius > reserve, "cylinder_io_masked_seam_precision");
+            const double factor = std::min(1., (value.Parameters.Radius-reserve)/(maximumRadius+reserve));
+            displacement = (1-factor)*maximumRadius + reserve;
+            start.Translate(radial(start)*(factor-1));
+            finish.Translate(radial(finish)*(factor-1));
+          }
+          const gp_Pnt middle((start.XYZ()+finish.XYZ())*.5);
+          const double radius = start.Distance(finish)*.5;
+          const double reach = tolerance-displacement;
+          check(reach > reserve, "cylinder_io_masked_seam_displacement");
+          if (masked)
+          {
+            // The source box and finite cylinder are convex. Four endpoints
+            // enclose every axial witness segment for the whole affine span.
+            for (const auto& p : {start,finish}) for (double sign : {-1.,1.})
+              check(BRep_ImplicitTool::IsInDomain(value.Faces[2],p.Translated(axis*(sign*reach))),
+                    "cylinder_io_masked_seam_domain");
+          }
+          const double a = BRep_ImplicitTool::Value(value.Primitive,start);
+          const double b = BRep_ImplicitTool::Value(value.Primitive,finish);
+          const auto gradient = BRep_ImplicitTool::Gradient(value.Primitive,middle);
+          // The fixed direction is the cylinder axis for masked witnesses,
+          // otherwise the midpoint gradient. Its signed derivative is >= lower
+          // in every segment point's +/- reach neighbourhood.
+          // Taylor's endpoint interpolation bounds F over the complete segment.
+          const double derivative = masked ? std::abs(gradient.Dot(axis)) : gradient.Magnitude();
+          const double lower = derivative - hessian*(radius+reach) - reserve;
+          const double residual = std::max(std::abs(a),std::abs(b)) + hessian*radius*radius*.5 + reserve;
+          const double bound = lower > 0 ? displacement+residual/lower : std::numeric_limits<double>::infinity();
+          check(std::isfinite(a) && std::isfinite(b) && std::isfinite(residual)
+            && std::isfinite(gradient.Magnitude()), "cylinder_io_seam_nonfinite");
+          check(std::max(std::abs(a),std::abs(b)) <= field->LipschitzBound()/scale*tolerance + reserve,
+                "cylinder_io_seam_outside_tolerance");
+          if (bound <= tolerance)
+          { result.Bound = std::max(result.Bound,bound); continue; }
+          check(originalRadius > reserve && originalMiddle.Distance(segment.first) > 0
+            && originalMiddle.Distance(segment.second) > 0, "cylinder_io_seam_unresolved");
+          pending.emplace_back(originalMiddle,segment.second);
+          pending.emplace_back(segment.first,originalMiddle);
+        }
+      }
+    }
+    result.Verified = true;
+    result.Reason = masked ? "cylinder_stored_masked_seam_verified" : "cylinder_stored_primitive_seam_verified";
+  }
+  catch (const Standard_Failure& error)
+  { result.Reason = error.what() ? error.what() : "cylinder_io_seam_unresolved"; }
+  return result;
+}
+}
+
+IO::CurveCoherence IO::CheckPrimitiveSeam(const StoredSolid& value, size_t maximumIntervals)
+{ return checkStoredSeam(value,maximumIntervals,false); }
+
+IO::CurveCoherence IO::CheckMaskedSeam(const StoredSolid& value, size_t maximumIntervals)
+{ return checkStoredSeam(value,maximumIntervals,true); }
