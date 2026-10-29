@@ -64,5 +64,16 @@ public:
   //! Does not promote whole-solid geometry/volume qualification.
   Standard_EXPORT static CurveCoherence CheckRetainedSide(const StoredSolid&,
     size_t maximumIntervals = 200000);
+  struct Geometry
+  {
+    StoredSolid Source; //!< Original shared graph/provenance; never reconstructed.
+    BRep_ImplicitCylinderSection::Settings Parameters; //!< Actual mask in world space.
+    CurveCoherence Boundary;
+    bool Verified = false; //!< Geometry only; no volume or solid qualification.
+  };
+  //! Combine fresh stored-region, domain, topology and declared-tolerance gates.
+  //! The original loaded owner and its flags remain unchanged.
+  Standard_EXPORT static Geometry CheckGeometry(const StoredSolid&,
+    size_t maximumIntervals = 200000);
 };
 #endif

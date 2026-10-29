@@ -777,3 +777,68 @@ IO::CurveCoherence IO::CheckRetainedSide(const StoredSolid& value, size_t maximu
   { result.Reason=error.what() ? error.what() : "cylinder_io_side_unresolved"; }
   return result;
 }
+
+IO::Geometry IO::CheckGeometry(const StoredSolid& value, size_t maximumIntervals)
+{
+  check(maximumIntervals > 0 && maximumIntervals <= 2000000,"cylinder_io_invalid_geometry_budget");
+  Geometry result;
+  result.Source=value;
+  try
+  {
+    validate(value);
+    const auto patch=occ::down_cast<BRep_TImplicitCylinderPatch>(value.Faces[2].TShape());
+    const auto transform=(value.Faces[2].Location()*patch->Location()).Transformation();
+    const double scale=std::abs(transform.ScaleFactor());
+    // Derive the mathematical domain from the actual native mask. Source
+    // recipe settings remain provenance; no approximate equality substitutes
+    // for proving the boundary against the geometry that is really stored.
+    auto canonical=value;
+    auto& s=canonical.Parameters;
+    s.WorkCheckpoint=nullptr;
+    s.Frame=gp_Ax2(patch->Frame().Location().Transformed(transform),
+      gp_Dir(gp_Vec(patch->Frame().Direction()).Transformed(transform)),
+      gp_Dir(gp_Vec(patch->Frame().XDirection()).Transformed(transform)));
+    s.Radius=patch->Radius()*scale;
+    s.HeightMinimum=patch->HeightMinimum()*scale;
+    s.HeightMaximum=patch->HeightMaximum()*scale;
+    result.Parameters=s;
+    result.Boundary=CheckRetainedSide(canonical,maximumIntervals);
+    check(result.Boundary.Verified,result.Boundary.Reason.c_str());
+    const double reserve=32768*std::numeric_limits<double>::epsilon()
+      *(1+s.Frame.Location().Distance(gp_Pnt())+s.Radius+std::abs(s.HeightMinimum)+std::abs(s.HeightMaximum));
+    for (TopAbs_ShapeEnum kind : {TopAbs_FACE,TopAbs_EDGE,TopAbs_VERTEX})
+    {
+      Map shapes; TopExp::MapShapes(value.Shape,kind,shapes);
+      for (const auto& shape:shapes)
+      {
+        check(result.Boundary.Intervals < maximumIntervals,"cylinder_io_geometry_budget");
+        ++result.Boundary.Intervals;
+        const double tolerance=kind == TopAbs_FACE ? BRep_Tool::Tolerance(TopoDS::Face(shape))
+          : kind == TopAbs_EDGE ? BRep_Tool::Tolerance(TopoDS::Edge(shape))
+          : BRep_Tool::Tolerance(TopoDS::Vertex(shape));
+        check(std::isfinite(tolerance) && tolerance > 0 && tolerance <= s.DistanceTolerance,
+          "cylinder_io_geometry_declared_tolerance");
+        if (kind != TopAbs_EDGE) continue;
+        const auto edge=TopoDS::Edge(shape.Oriented(TopAbs_FORWARD));
+        double first,last; const auto curve=BRep_Tool::Curve(edge,first,last);
+        check(!curve.IsNull(),"cylinder_io_geometry_curve");
+        TopoDS_Vertex a,b; TopExp::Vertices(edge,a,b);
+        check(curve->Value(first).Distance(BRep_Tool::Pnt(a))+reserve <= BRep_Tool::Tolerance(a)
+          && curve->Value(last).Distance(BRep_Tool::Pnt(b))+reserve <= BRep_Tool::Tolerance(b),
+          "cylinder_io_geometry_vertex_tolerance");
+      }
+    }
+    check(result.Boundary.Bound+reserve <= s.DistanceTolerance
+      && result.Boundary.Bound+reserve <= BRep_Tool::Tolerance(value.Faces[2]),
+      "cylinder_io_geometry_combined_tolerance");
+    result.Boundary.Bound+=reserve;
+    result.Boundary.Reason="cylinder_stored_boundary_geometry_verified";
+    result.Verified=true;
+  }
+  catch (const Standard_Failure& error)
+  {
+    result.Boundary.Verified=false;
+    result.Boundary.Reason=error.what() ? error.what() : "cylinder_io_geometry_unresolved";
+  }
+  return result;
+}
