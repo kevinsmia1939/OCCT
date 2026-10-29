@@ -49,5 +49,10 @@ public:
   //! cylinder/source mask. Reverse coverage and retained regions stay separate.
   Standard_EXPORT static CurveCoherence CheckMaskedSeam(const StoredSolid&,
     size_t maximumIntervals = 200000);
+  //! Reverse coverage of the full recipe-cylinder side intersection by the
+  //! stored seam. Fresh axial uniqueness, angular winding and arc residual
+  //! cones; no retracing. Does not qualify caps, retained regions or solids.
+  Standard_EXPORT static CurveCoherence CheckSeamCoverage(const StoredSolid&,
+    size_t maximumIntervals = 200000);
 };
 #endif

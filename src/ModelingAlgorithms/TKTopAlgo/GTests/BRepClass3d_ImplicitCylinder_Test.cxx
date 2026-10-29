@@ -775,6 +775,14 @@ TEST(BRepClass3dImplicitCylinder, StoredCylinderSolidPreservesSharedGraphAndDrop
     EXPECT_TRUE(maskedSeam.Verified) << maskedSeam.Reason;
     EXPECT_LE(maskedSeam.Bound, s.DistanceTolerance);
     EXPECT_FALSE(BRepClass3d_ImplicitCylinderIO::CheckMaskedSeam(restored,1).Verified);
+    const auto coverage = BRepClass3d_ImplicitCylinderIO::CheckSeamCoverage(restored);
+    EXPECT_TRUE(coverage.Verified) << coverage.Reason;
+    EXPECT_LE(coverage.Bound,s.DistanceTolerance);
+    EXPECT_FALSE(BRepClass3d_ImplicitCylinderIO::CheckSeamCoverage(restored,1).Verified);
+    const auto axial = Ops::CheckAxialField(restored.Primitive,restored.Parameters);
+    EXPECT_TRUE(axial.MonotonicityVerified) << axial.Reason;
+    EXPECT_TRUE(axial.Boundary.Wires.empty());
+    EXPECT_FALSE(axial.Boundary.IncidenceVerified);
     EXPECT_FALSE(BRepClass3d_ImplicitCylinderIO::CheckPrimitiveSeam(restored,1).Verified);
     const auto previous = restored.Shape;
     std::vector<std::string> corruptions {record.str().substr(0, record.str().size()/2), record.str()+"trailing"};
@@ -821,6 +829,7 @@ TEST(BRepClass3dImplicitCylinder, StoredCylinderSolidPreservesSharedGraphAndDrop
     EXPECT_FALSE(BRepClass3d_ImplicitCylinderIO::CheckCurveCoherence(restored).Verified);
     EXPECT_FALSE(BRepClass3d_ImplicitCylinderIO::CheckPrimitiveSeam(restored).Verified);
     EXPECT_FALSE(BRepClass3d_ImplicitCylinderIO::CheckMaskedSeam(restored).Verified);
+    EXPECT_FALSE(BRepClass3d_ImplicitCylinderIO::CheckSeamCoverage(restored).Verified);
   }
 }
 

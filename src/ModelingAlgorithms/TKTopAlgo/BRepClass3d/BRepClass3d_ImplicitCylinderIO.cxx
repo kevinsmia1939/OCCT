@@ -488,3 +488,78 @@ IO::CurveCoherence IO::CheckPrimitiveSeam(const StoredSolid& value, size_t maxim
 
 IO::CurveCoherence IO::CheckMaskedSeam(const StoredSolid& value, size_t maximumIntervals)
 { return checkStoredSeam(value,maximumIntervals,true); }
+
+IO::CurveCoherence IO::CheckSeamCoverage(const StoredSolid& value, size_t maximumIntervals)
+{
+  check(maximumIntervals > 0 && maximumIntervals <= 2000000,
+        "cylinder_io_invalid_coverage_budget");
+  CurveCoherence result;
+  try
+  {
+    validate(value);
+    const auto& s = value.Parameters;
+    const auto axial = BRepClass3d_ImplicitCylinder::CheckAxialField(value.Primitive,s,24,maximumIntervals);
+    check(axial.MonotonicityVerified, axial.Reason.c_str());
+    result.Intervals = axial.Cells;
+    const auto data = occ::down_cast<BRep_TImplicitFace>(value.Primitive.TShape());
+    const auto* field = static_cast<const Geom_ImplicitGyroid*>(data->Field().get());
+    const double scale = std::abs((value.Primitive.Location()*data->Location()).Transformation().ScaleFactor());
+    const double k = 2*std::acos(-1.)/field->Period()/scale;
+    const double hessian = 4*k*k, lipschitz = field->LipschitzBound()/scale;
+    const gp_Vec x(s.Frame.XDirection()), y(s.Frame.YDirection()), axis(s.Frame.Direction());
+    const double reserve = 32768*std::numeric_limits<double>::epsilon()
+      * (1+s.Frame.Location().Distance(gp_Pnt())+s.Radius+std::abs(s.HeightMinimum)+std::abs(s.HeightMaximum))
+      * (1+hessian+lipschitz+std::abs(field->IsoValue()));
+    double winding = 0;
+    int sense = 0;
+    const auto uses = ordered(effectiveWire(value.Faces[2]));
+    check(uses.size() == 1, "cylinder_io_coverage_wire");
+    double first,last;
+    const auto curve = occ::down_cast<Geom_BSplineCurve>(BRep_Tool::Curve(uses[0],first,last));
+    check(!curve.IsNull() && curve->Degree() == 1 && !curve->IsRational() && !curve->IsPeriodic()
+      && first == curve->FirstParameter() && last == curve->LastParameter()
+      && curve->Pole(1).IsEqual(curve->Pole(curve->NbPoles()),0.), "cylinder_io_coverage_closed_curve");
+    for (int i = 2; i <= curve->NbPoles(); ++i)
+    {
+      check(result.Intervals < maximumIntervals, "cylinder_io_coverage_budget"); ++result.Intervals;
+      const gp_Vec a(s.Frame.Location(),curve->Pole(i-1)), b(s.Frame.Location(),curve->Pole(i));
+      const double ax=a.Dot(x), ay=a.Dot(y), bx=b.Dot(x), by=b.Dot(y);
+      const double ra=std::hypot(ax,ay), rb=std::hypot(bx,by);
+      check(ra > reserve && rb > reserve, "cylinder_io_coverage_axis");
+      const double angle=std::atan2(ax*by-ay*bx,ax*bx+ay*by);
+      check(std::abs(angle)*s.Radius > reserve && std::abs(angle) < std::acos(-1.)*.5,
+            "cylinder_io_coverage_angular_span");
+      const int direction=angle > 0 ? 1 : -1;
+      if (!sense) sense=direction;
+      check(sense == direction,"cylinder_io_coverage_angular_reversal");
+      winding+=angle;
+      const double za=a.Dot(axis), zb=b.Dot(axis), theta=std::atan2(ay,ax);
+      const auto point = [&](double fraction) {
+        const double t=theta+angle*fraction, z=za+(zb-za)*fraction;
+        return s.Frame.Location().Translated(x*(s.Radius*std::cos(t))
+          +y*(s.Radius*std::sin(t))+axis*z);
+      };
+      const double deviation=std::max(std::abs(ra-s.Radius),std::abs(rb-s.Radius))
+        +s.Radius*angle*angle/8+reserve;
+      const double acceleration=hessian*(s.Radius*s.Radius*angle*angle+(zb-za)*(zb-za))
+        +lipschitz*s.Radius*angle*angle;
+      const double residual=std::max(std::abs(BRep_ImplicitTool::Value(value.Primitive,point(0))),
+        std::abs(BRep_ImplicitTool::Value(value.Primitive,point(1))))+acceleration/8+reserve;
+      const double halfLength=.5*std::hypot(s.Radius*angle,zb-za);
+      const double localLower=axial.Direction*BRep_ImplicitTool::Gradient(value.Primitive,point(.5)).Dot(axis)
+        -hessian*(halfLength+s.DistanceTolerance)-reserve;
+      const double root=residual/std::max(axial.DerivativeLowerBound,localLower);
+      check(std::isfinite(root) && std::min(za,zb)-root >= s.HeightMinimum+reserve
+        && std::max(za,zb)+root <= s.HeightMaximum-reserve, "cylinder_io_coverage_height_bracket");
+      const double bound=deviation+root+reserve;
+      check(bound <= s.DistanceTolerance,"cylinder_io_coverage_distance");
+      result.Bound=std::max(result.Bound,bound);
+    }
+    check(std::abs(std::abs(winding)-2*std::acos(-1.))*s.Radius <= reserve*curve->NbPoles(),
+          "cylinder_io_coverage_winding");
+    result.Verified=true; result.Reason="cylinder_stored_seam_reverse_coverage_verified";
+  }
+  catch (const Standard_Failure& error)
+  { result.Reason=error.what() ? error.what() : "cylinder_io_coverage_unresolved"; }
+  return result;
+}

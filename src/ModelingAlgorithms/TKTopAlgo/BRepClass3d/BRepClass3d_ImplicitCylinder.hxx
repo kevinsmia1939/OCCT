@@ -99,6 +99,11 @@ public:
     const BRep_ImplicitCylinderSection::Settings&, bool negative = true,
     size_t maximumNestingTests = 2000000, int maximumDepth = 24,
     size_t maximumCells = 200000);
+  //! Pure field/domain derivative cover; no topology is traced or constructed.
+  //! Boundary is empty. Proves uniqueness only, not root existence or regions.
+  Standard_EXPORT static AxialSheet CheckAxialField(const TopoDS_Face&,
+    const BRep_ImplicitCylinderSection::Settings&, int maximumDepth = 24,
+    size_t maximumCells = 200000);
   struct ProjectedRegions
   {
     AxialSheet Source;

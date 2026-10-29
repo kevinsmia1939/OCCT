@@ -657,9 +657,26 @@ BRepClass3d_ImplicitCylinder::AxialSheet BRepClass3d_ImplicitCylinder::CheckAxia
   AxialSheet result;
   result.Boundary = BuildTrimBoundary(face, s, negative, maximumNestingTests);
   if (!result.Boundary.IncidenceVerified) { result.Reason = result.Boundary.Reason; return result; }
+  auto boundary = std::move(result.Boundary);
+  result = CheckAxialField(face, s, maximumDepth, maximumCells);
+  result.Boundary = std::move(boundary);
+  return result;
+}
+
+BRepClass3d_ImplicitCylinder::AxialSheet BRepClass3d_ImplicitCylinder::CheckAxialField(
+  const TopoDS_Face& face, const Settings& s, int maximumDepth, size_t maximumCells)
+{
+  require(maximumDepth >= 0 && maximumDepth <= 32 && maximumCells > 0 && maximumCells <= 2000000,
+          "invalid_axial_sheet_budget");
+  AxialSheet result;
   try
   {
     const auto data = occ::down_cast<BRep_TImplicitFace>(face.TShape());
+    require(!data.IsNull() && typeid(*data) == typeid(BRep_TImplicitFace)
+      && !data->Field().IsNull() && typeid(*data->Field()) == typeid(Geom_ImplicitGyroid)
+      && data->ExcludedDomains().empty() && !TopoDS_Iterator(face).More(), "axial_field_primitive");
+    require(std::isfinite(s.Radius) && s.Radius > 0 && std::isfinite(s.HeightMinimum)
+      && std::isfinite(s.HeightMaximum) && s.HeightMaximum > s.HeightMinimum, "axial_field_domain");
     const auto* field = static_cast<const Geom_ImplicitGyroid*>(data->Field().get());
     const double scale = std::abs((face.Location() * data->Location()).Transformation().ScaleFactor());
     const double k = 2 * std::acos(-1.) / field->Period() / scale;
@@ -674,6 +691,11 @@ BRepClass3d_ImplicitCylinder::AxialSheet BRepClass3d_ImplicitCylinder::CheckAxia
     const auto point = [&](const gp_Pnt& local) {
       return s.Frame.Location().Translated(x * local.X() + y * local.Y() + axis * local.Z());
     };
+    // The native primitive's box is convex; these corners contain the full
+    // cylinder and every derivative-cover sample without field extrapolation.
+    for (double px : {-s.Radius,s.Radius}) for (double py : {-s.Radius,s.Radius})
+      for (double pz : {s.HeightMinimum,s.HeightMaximum})
+        require(BRep_ImplicitTool::IsInDomain(face,point(gp_Pnt(px,py,pz))), "axial_field_source_domain");
     const double middle = s.HeightMinimum + (s.HeightMaximum - s.HeightMinimum) * .5;
     const double derivative = BRep_ImplicitTool::Gradient(face, point(gp_Pnt(0, 0, middle))).Dot(axis);
     require(std::isfinite(derivative) && std::abs(derivative) > reserve, "axial_sheet_center_tangent");
