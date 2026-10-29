@@ -7,6 +7,7 @@
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepClass_FaceClassifier.hxx>
 #include <Geom_ImplicitGyroid.hxx>
 #include <Geom_Plane.hxx>
 #include <Geom_CylindricalSurface.hxx>
@@ -561,5 +562,106 @@ IO::CurveCoherence IO::CheckSeamCoverage(const StoredSolid& value, size_t maximu
   }
   catch (const Standard_Failure& error)
   { result.Reason=error.what() ? error.what() : "cylinder_io_coverage_unresolved"; }
+  return result;
+}
+
+IO::CurveCoherence IO::CheckRetainedCap(const StoredSolid& value, size_t maximumIntervals)
+{
+  check(maximumIntervals > 0 && maximumIntervals <= 2000000,
+        "cylinder_io_invalid_cap_budget");
+  CurveCoherence result;
+  try
+  {
+    validate(value);
+    const auto& s = value.Parameters;
+    const auto axial = BRepClass3d_ImplicitCylinder::CheckAxialField(value.Primitive,s,24,maximumIntervals);
+    check(axial.MonotonicityVerified,axial.Reason.c_str());
+    result.Intervals=axial.Cells;
+    const auto data=occ::down_cast<BRep_TImplicitFace>(value.Primitive.TShape());
+    const auto* field=static_cast<const Geom_ImplicitGyroid*>(data->Field().get());
+    const double scale=std::abs((value.Primitive.Location()*data->Location()).Transformation().ScaleFactor());
+    const double lipschitz=field->LipschitzBound()/scale;
+    const double precision=32768*std::numeric_limits<double>::epsilon()
+      *(1+s.Frame.Location().Distance(gp_Pnt())+s.Radius+std::abs(s.HeightMinimum)+std::abs(s.HeightMaximum));
+    const double reserve=precision*(1+lipschitz+std::abs(field->IsoValue()));
+    check(std::isfinite(reserve) && precision < s.DistanceTolerance,"cylinder_io_cap_precision");
+    const gp_Vec x(s.Frame.XDirection()),y(s.Frame.YDirection()),axis(s.Frame.Direction());
+    struct Cell { double X0,X1,Y0,Y1; int Depth; };
+    std::vector<Cell> pending {{-s.Radius,s.Radius,-s.Radius,s.Radius,0}};
+    while (!pending.empty())
+    {
+      check(result.Intervals < maximumIntervals,"cylinder_io_cap_budget"); ++result.Intervals;
+      const auto cell=pending.back(); pending.pop_back();
+      const auto nearest=[](double a,double b) { return a > 0 ? a : b < 0 ? -b : 0.; };
+      if (std::hypot(nearest(cell.X0,cell.X1),nearest(cell.Y0,cell.Y1)) > s.Radius+precision) continue;
+      const double dx=cell.X1-cell.X0,dy=cell.Y1-cell.Y0;
+      const auto p=s.Frame.Location().Translated(x*(cell.X0+dx*.5)+y*(cell.Y0+dy*.5));
+      const double low=axial.Direction*BRep_ImplicitTool::Value(value.Primitive,p.Translated(axis*s.HeightMinimum));
+      const double high=axial.Direction*BRep_ImplicitTool::Value(value.Primitive,p.Translated(axis*s.HeightMaximum));
+      const double uncertainty=lipschitz*(std::hypot(dx,dy)*.5+precision)+reserve;
+      check(std::isfinite(low) && std::isfinite(high) && std::isfinite(uncertainty),"cylinder_io_cap_nonfinite");
+      if (low < -uncertainty && high > uncertainty) continue;
+      check(low-uncertainty < 0 && high+uncertainty > 0,"cylinder_io_cap_endpoint_signs");
+      check(cell.Depth < 24,"cylinder_io_cap_depth");
+      auto a=cell,b=cell; a.Depth=b.Depth=cell.Depth+1;
+      if (dx >= dy) { const double cut=cell.X0+dx*.5;
+        check(cut > cell.X0 && cut < cell.X1,"cylinder_io_cap_split"); a.X1=b.X0=cut; }
+      else { const double cut=cell.Y0+dy*.5;
+        check(cut > cell.Y0 && cut < cell.Y1,"cylinder_io_cap_split"); a.Y1=b.Y0=cut; }
+      pending.push_back(b); pending.push_back(a);
+    }
+    const bool bottom=value.Negative == (axial.Direction > 0);
+    const double height=bottom ? s.HeightMinimum : s.HeightMaximum;
+    const auto center=s.Frame.Location().Translated(axis*height);
+    const auto& cap=value.Faces[0];
+    const auto plane=occ::down_cast<Geom_Plane>(BRep_Tool::Surface(cap));
+    const double outward=bottom ? -1. : 1.;
+    check(!plane.IsNull() && plane->Location().Distance(center) <= precision
+      && gp_Vec(plane->Axis().Direction()).Crossed(axis).Magnitude()*s.Radius <= precision
+      && plane->Axis().Direction().Dot(s.Frame.Direction())*(orientation(cap) ? -1. : 1.)*outward > 1-1.e-12,
+      "cylinder_io_cap_surface_orientation");
+    const auto uses=ordered(effectiveWire(cap));
+    check(uses.size() == 2,"cylinder_io_cap_arc_count");
+    double winding=0;
+    for (const auto& edge:uses)
+    {
+      double first,last; TopLoc_Location location;
+      const auto circle=occ::down_cast<Geom_Circle>(BRep_Tool::Curve(edge,location,first,last));
+      check(!circle.IsNull() && location.IsIdentity()
+        && circle->Location().Distance(center) <= precision
+        && std::abs(circle->Radius()-s.Radius) <= precision
+        && gp_Vec(circle->Axis().Direction()).Crossed(axis).Magnitude()*s.Radius <= precision
+        && std::abs(circle->Axis().Direction().Dot(s.Frame.Direction())) > 1-1.e-12
+        && last > first && last-first <= 2*std::acos(-1.)+precision/s.Radius,
+        "cylinder_io_cap_circle");
+      const double direction=circle->Axis().Direction().Dot(s.Frame.Direction()) > 0 ? 1. : -1.;
+      const double span=(last-first)*direction*(orientation(edge) ? -1. : 1.);
+      check(span*outward > 0,"cylinder_io_cap_arc_orientation");
+      winding+=span;
+      TopoDS_Vertex a,b; TopExp::Vertices(TopoDS::Edge(edge.Oriented(TopAbs_FORWARD)),a,b);
+      check(circle->Value(first).Distance(BRep_Tool::Pnt(a)) <= precision
+        && circle->Value(last).Distance(BRep_Tool::Pnt(b)) <= precision,"cylinder_io_cap_arc_endpoints");
+      double pcFirst,pcLast;
+      const auto pc=occ::down_cast<Geom2d_Circle>(BRep_Tool::CurveOnSurface(edge,cap,pcFirst,pcLast));
+      check(!pc.IsNull() && pcFirst == first && pcLast == last,"cylinder_io_cap_pcurve");
+      const auto mapped=[&](const gp_Dir2d& d) {
+        return gp_Vec(plane->Position().XDirection())*d.X()+gp_Vec(plane->Position().YDirection())*d.Y();
+      };
+      const double coefficients=plane->Value(pc->Location().X(),pc->Location().Y()).Distance(circle->Location())
+        +(mapped(pc->XAxis().Direction())*pc->Radius()-gp_Vec(circle->Position().XDirection())*circle->Radius()).Magnitude()
+        +(mapped(pc->YAxis().Direction())*pc->Radius()-gp_Vec(circle->Position().YDirection())*circle->Radius()).Magnitude();
+      check(coefficients <= precision,"cylinder_io_cap_pcurve_coefficients");
+    }
+    check(std::abs(winding*outward-2*std::acos(-1.))*s.Radius <= 8*precision,
+      "cylinder_io_cap_circle_coverage");
+    check(BRepClass_FaceClassifier(cap,center,precision).State() == TopAbs_IN,
+      "cylinder_io_cap_complement");
+    result.Bound=8*precision;
+    check(result.Bound <= s.DistanceTolerance && result.Bound <= BRep_Tool::Tolerance(cap),
+      "cylinder_io_cap_tolerance");
+    result.Verified=true; result.Reason="cylinder_stored_retained_cap_verified";
+  }
+  catch (const Standard_Failure& error)
+  { result.Reason=error.what() ? error.what() : "cylinder_io_cap_unresolved"; }
   return result;
 }

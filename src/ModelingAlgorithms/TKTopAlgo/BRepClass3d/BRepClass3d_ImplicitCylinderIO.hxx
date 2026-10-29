@@ -54,5 +54,10 @@ public:
   //! cones; no retracing. Does not qualify caps, retained regions or solids.
   Standard_EXPORT static CurveCoherence CheckSeamCoverage(const StoredSolid&,
     size_t maximumIntervals = 200000);
+  //! Fresh whole-end-disk signs, axial uniqueness and the actual stored cap's
+  //! plane/circular trim/material orientation. Does not qualify retained side
+  //! regions, whole-boundary geometry, volume or solid validity.
+  Standard_EXPORT static CurveCoherence CheckRetainedCap(const StoredSolid&,
+    size_t maximumIntervals = 200000);
 };
 #endif

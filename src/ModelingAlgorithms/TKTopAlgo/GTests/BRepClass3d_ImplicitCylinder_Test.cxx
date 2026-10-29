@@ -14,6 +14,7 @@
 #include <GProp_GProps.hxx>
 #include <Geom_ImplicitGyroid.hxx>
 #include <Geom_BSplineCurve.hxx>
+#include <Geom_Plane.hxx>
 #include <Geom2d_Curve.hxx>
 #include <BRep_TImplicitCylinderPatch.hxx>
 #include <TopExp.hxx>
@@ -783,6 +784,18 @@ TEST(BRepClass3dImplicitCylinder, StoredCylinderSolidPreservesSharedGraphAndDrop
     EXPECT_TRUE(axial.MonotonicityVerified) << axial.Reason;
     EXPECT_TRUE(axial.Boundary.Wires.empty());
     EXPECT_FALSE(axial.Boundary.IncidenceVerified);
+    const auto retainedCap = BRepClass3d_ImplicitCylinderIO::CheckRetainedCap(restored);
+    EXPECT_TRUE(retainedCap.Verified) << retainedCap.Reason;
+    EXPECT_LE(retainedCap.Bound,s.DistanceTolerance);
+    EXPECT_FALSE(BRepClass3d_ImplicitCylinderIO::CheckRetainedCap(restored,1).Verified);
+    auto provenance = restored;
+    provenance.StoredAxialDirection *= -1;
+    EXPECT_TRUE(BRepClass3d_ImplicitCylinderIO::CheckRetainedCap(provenance).Verified);
+    const auto capPlane = occ::down_cast<Geom_Plane>(BRep_Tool::Surface(restored.Faces[0]));
+    const auto capLocation = capPlane->Location();
+    capPlane->SetLocation(capLocation.Translated(gp_Vec(s.Frame.Direction())*.2));
+    EXPECT_FALSE(BRepClass3d_ImplicitCylinderIO::CheckRetainedCap(restored).Verified);
+    capPlane->SetLocation(capLocation);
     EXPECT_FALSE(BRepClass3d_ImplicitCylinderIO::CheckPrimitiveSeam(restored,1).Verified);
     const auto previous = restored.Shape;
     std::vector<std::string> corruptions {record.str().substr(0, record.str().size()/2), record.str()+"trailing"};
