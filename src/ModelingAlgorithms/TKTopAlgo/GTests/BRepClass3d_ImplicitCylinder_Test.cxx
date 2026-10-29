@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Kavin Teenakul
 // SPDX-License-Identifier: LGPL-2.1-only WITH OCCT-exception-1.0
 #include <BRepClass3d_ImplicitCylinder.hxx>
+#include <BRepClass3d_ImplicitCylinderIO.hxx>
 #include <BRep_ImplicitIO.hxx>
 #include <BRep_ImplicitTool.hxx>
 #include <BRep_Builder.hxx>
@@ -728,6 +729,67 @@ TEST(BRepClass3dImplicitCylinder, SolidVolumeRefusesBudgetsPreservesSourceAndHan
   EXPECT_THROW(Ops::BuildNativeSolid(geometry, limits), Standard_AbortiveTransaction);
   std::stringstream after; BRep_ImplicitIO::Write(source, after);
   EXPECT_EQ(before.str(), after.str());
+}
+
+TEST(BRepClass3dImplicitCylinder, StoredCylinderSolidPreservesSharedGraphAndDropsCertificates)
+{
+  auto s = settings(); s.AngleMinimum = .27; s.AngleMaximum = .27 + 2 * std::acos(-1.);
+  s.HeightMinimum = -1.7; s.HeightMaximum = 1.3;
+  for (bool negative : {false, true})
+  {
+    auto source = field();
+    if (negative)
+    { gp_Trsf move; move.SetTranslation(gp_Vec(1.2, -.4, 2.1)); source.Location(TopLoc_Location(move)); s.Frame.Transform(move); }
+    const auto geometry = Ops::CheckShellGeometry(source, s, negative);
+    ASSERT_TRUE(geometry.BoundaryVerified) << geometry.Reason;
+    const auto solid = Ops::BuildNativeSolid(geometry, Ops::VolumeSettings());
+    ASSERT_TRUE(solid.SolidValidated) << solid.Reason;
+    std::ostringstream record; BRepClass3d_ImplicitCylinderIO::Write(solid, record);
+    BRepClass3d_ImplicitCylinderIO::StoredSolid restored;
+    std::istringstream input(record.str()); BRepClass3d_ImplicitCylinderIO::Read(input, restored);
+    ASSERT_TRUE(restored.TopologyValidated); EXPECT_EQ(restored.Shape.ShapeType(), TopAbs_SOLID);
+    EXPECT_TRUE(restored.Shape.Closed()); EXPECT_EQ(restored.Faces.size(), 3);
+    EXPECT_FALSE(restored.GeometryVerified); EXPECT_FALSE(restored.VolumeVerified); EXPECT_FALSE(restored.SolidValidated);
+    EXPECT_EQ(restored.Negative, negative);
+    EXPECT_EQ(restored.StoredBoundaryBound, geometry.BoundaryBound);
+    EXPECT_EQ(restored.StoredVolumeLower, solid.Volume.Lower); EXPECT_EQ(restored.StoredVolumeUpper, solid.Volume.Upper);
+    std::ostringstream a,b; BRep_ImplicitIO::Write(source,a); BRep_ImplicitIO::Write(restored.Primitive,b);
+    EXPECT_EQ(a.str(), b.str());
+    int implicit = 0;
+    for (TopExp_Explorer it(restored.Shape, TopAbs_FACE); it.More(); it.Next())
+      implicit += BRep_Tool::IsImplicit(TopoDS::Face(it.Current()));
+    EXPECT_EQ(implicit, 1);
+    const auto previous = restored.Shape;
+    std::vector<std::string> corruptions {record.str().substr(0, record.str().size()/2), record.str()+"trailing"};
+    const auto replace = [&](const std::string& from, const std::string& to) {
+      auto bad = record.str(); const auto at = bad.find(from);
+      EXPECT_NE(at, std::string::npos); if (at != std::string::npos) bad.replace(at, from.size(), to);
+      corruptions.push_back(std::move(bad));
+    };
+    replace("OCCT_IMPLICIT_CYLINDER_SOLID 1 ", "OCCT_IMPLICIT_CYLINDER_SOLID 9 ");
+    replace("VERTICES 3\n", "VERTICES 4\n");
+    replace("EDGES 4\n", "EDGES 1000000\n");
+    auto poles = record.str(); const auto at = poles.find(" B ");
+    ASSERT_NE(at, std::string::npos); const auto end = poles.find(' ', at + 3);
+    ASSERT_NE(end, std::string::npos); poles.replace(at + 3, end - at - 3, "65537");
+    corruptions.push_back(std::move(poles));
+    for (const auto& bad : corruptions)
+    {
+      std::istringstream corrupt(bad);
+      EXPECT_THROW(BRepClass3d_ImplicitCylinderIO::Read(corrupt, restored), Standard_Failure);
+      EXPECT_TRUE(restored.Shape.IsSame(previous));
+    }
+    if (negative)
+    {
+      std::istringstream oversized(std::string(16 * 1024 * 1024 + 1, 'x'));
+      EXPECT_THROW(BRepClass3d_ImplicitCylinderIO::Read(oversized, restored), Standard_Failure);
+      EXPECT_TRUE(restored.Shape.IsSame(previous));
+    }
+    auto invalid = solid; invalid.SolidValidated = false;
+    std::ostringstream untouched; untouched << "prefix";
+    EXPECT_THROW(BRepClass3d_ImplicitCylinderIO::Write(invalid, untouched), Standard_Failure);
+    EXPECT_EQ(untouched.str(), "prefix");
+  }
 }
 
 TEST(BRepClass3dImplicitCylinder, NativeCapsPartitionDiskAndShareSideRootVertices)

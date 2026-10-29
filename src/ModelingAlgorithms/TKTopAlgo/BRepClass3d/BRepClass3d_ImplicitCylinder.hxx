@@ -227,5 +227,8 @@ public:
   //! positive material volume qualify. Validity is the explicit implicit-aware
   //! contract, not generic OCCT consumer/serialization support.
   Standard_EXPORT static NativeSolid BuildNativeSolid(const ShellGeometry&, const VolumeSettings&);
+  //! Structural shared-topology validation only. Does not restore certificates.
+  Standard_EXPORT static void ValidateStoredShellTopology(const TopoDS_Shell&,
+    const std::vector<TopoDS_Face>&);
 };
 #endif
