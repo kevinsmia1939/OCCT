@@ -105,6 +105,12 @@ public:
   Standard_EXPORT static AxialSheet CheckAxialField(const TopoDS_Face&,
     const BRep_ImplicitCylinderSection::Settings&, int maximumDepth = 24,
     size_t maximumCells = 200000);
+  //! Refine the same entire-cylinder cover until its derivative lower bound
+  //! exceeds minimumDerivative. An insufficient budget or unattainable bound
+  //! remains unverified. The original overload retains its ABI and behavior.
+  Standard_EXPORT static AxialSheet CheckAxialField(const TopoDS_Face&,
+    const BRep_ImplicitCylinderSection::Settings&, int maximumDepth,
+    size_t maximumCells, double minimumDerivative);
   struct ProjectedRegions
   {
     AxialSheet Source;

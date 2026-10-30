@@ -301,6 +301,24 @@ TEST(BRepClass3dImplicitCylinder, TrimWiresCloseBySharedIdentityWithOppositeFace
   EXPECT_EQ(before.str(), after.str());
 }
 
+TEST(BRepClass3dImplicitCylinder, RequestedAxialDerivativeBoundRefinesAndRefuses)
+{
+  const auto source = field();
+  const auto s = settings();
+  const auto result = Ops::CheckAxialField(source, s, 24, 200000, .1);
+  ASSERT_TRUE(result.MonotonicityVerified) << result.Reason;
+  EXPECT_GT(result.DerivativeLowerBound, .1);
+  EXPECT_TRUE(result.Boundary.Wires.empty());
+  EXPECT_FALSE(Ops::CheckAxialField(source, s, 0, 1, .1).MonotonicityVerified);
+  EXPECT_FALSE(Ops::CheckAxialField(source, s, 24, 200000, 100.).MonotonicityVerified);
+  EXPECT_THROW(Ops::CheckAxialField(source, s, 24, 200000, -1.), Standard_DomainError);
+  EXPECT_THROW(Ops::CheckAxialField(source, s, 24, 200000,
+    std::numeric_limits<double>::quiet_NaN()), Standard_DomainError);
+  EXPECT_THROW(Ops::CheckAxialField(source, s, 24, 200000,
+    std::numeric_limits<double>::infinity()), Standard_DomainError);
+  EXPECT_TRUE(Ops::CheckAxialField(source, s).MonotonicityVerified);
+}
+
 TEST(BRepClass3dImplicitCylinder, AxialSheetConesBoundEveryFibreAndRefuseUnprovedCases)
 {
   const auto source = field();

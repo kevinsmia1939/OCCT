@@ -666,8 +666,17 @@ BRepClass3d_ImplicitCylinder::AxialSheet BRepClass3d_ImplicitCylinder::CheckAxia
 BRepClass3d_ImplicitCylinder::AxialSheet BRepClass3d_ImplicitCylinder::CheckAxialField(
   const TopoDS_Face& face, const Settings& s, int maximumDepth, size_t maximumCells)
 {
+  return CheckAxialField(face, s, maximumDepth, maximumCells, 0.);
+}
+
+BRepClass3d_ImplicitCylinder::AxialSheet BRepClass3d_ImplicitCylinder::CheckAxialField(
+  const TopoDS_Face& face, const Settings& s, int maximumDepth, size_t maximumCells,
+  double minimumDerivative)
+{
   require(maximumDepth >= 0 && maximumDepth <= 32 && maximumCells > 0 && maximumCells <= 2000000,
           "invalid_axial_sheet_budget");
+  require(std::isfinite(minimumDerivative) && minimumDerivative >= 0,
+          "invalid_axial_sheet_minimum_derivative");
   AxialSheet result;
   try
   {
@@ -724,8 +733,9 @@ BRepClass3d_ImplicitCylinder::AxialSheet BRepClass3d_ImplicitCylinder::CheckAxia
       const double uncertainty = hessian * radius + reserve;
       require(std::isfinite(value) && std::isfinite(uncertainty), "axial_sheet_nonfinite_cone");
       const double bound = value - uncertainty;
-      if (bound > 0) { lowerBound = std::min(lowerBound, bound); continue; }
+      if (bound > minimumDerivative) { lowerBound = std::min(lowerBound, bound); continue; }
       require(value + uncertainty > 0, "axial_sheet_direction_changes");
+      require(value + uncertainty > minimumDerivative, "axial_sheet_minimum_derivative_unattainable");
       require(cell.Depth < maximumDepth, "axial_sheet_depth_budget");
       int split = 1;
       for (int a = 2; a <= 3; ++a) if (half.Coord(a) > half.Coord(split)) split = a;
