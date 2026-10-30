@@ -811,6 +811,46 @@ TEST(BRepClass3dImplicitCylinder, StoredCylinderSolidPreservesSharedGraphAndDrop
     EXPECT_FALSE(storedGeometry.Source.VolumeVerified);
     EXPECT_FALSE(storedGeometry.Source.SolidValidated);
     EXPECT_FALSE(BRepClass3d_ImplicitCylinderIO::CheckGeometry(restored,1).Verified);
+    auto volumeGeometry = storedGeometry;
+    volumeGeometry.Source.StoredVolumeLower=100;
+    volumeGeometry.Source.StoredVolumeUpper=101;
+    volumeGeometry.Source.StoredVolumeTolerance=2;
+    const auto restoredSolid = BRepClass3d_ImplicitCylinderIO::QualifySolid(volumeGeometry,Ops::VolumeSettings());
+    EXPECT_TRUE(restoredSolid.Verified) << restoredSolid.Reason;
+    EXPECT_TRUE(restoredSolid.Volume.Verified);
+    EXPECT_TRUE(restoredSolid.Shape.IsSame(restored.Shape));
+    EXPECT_LT(restoredSolid.Volume.Upper,10);
+    EXPECT_LE(restoredSolid.Volume.Lower,solid.Volume.Upper);
+    EXPECT_GE(restoredSolid.Volume.Upper,solid.Volume.Lower);
+    EXPECT_FALSE(restored.SolidValidated);
+    std::ostringstream freshRecord;
+    BRepClass3d_ImplicitCylinderIO::Write(restoredSolid,freshRecord);
+    BRepClass3d_ImplicitCylinderIO::StoredSolid again;
+    std::istringstream freshInput(freshRecord.str());
+    BRepClass3d_ImplicitCylinderIO::Read(freshInput,again);
+    EXPECT_TRUE(again.TopologyValidated);
+    EXPECT_FALSE(again.GeometryVerified); EXPECT_FALSE(again.VolumeVerified); EXPECT_FALSE(again.SolidValidated);
+    EXPECT_EQ(again.StoredVolumeLower,restoredSolid.Volume.Lower);
+    EXPECT_EQ(again.StoredVolumeUpper,restoredSolid.Volume.Upper);
+    auto volumeBudget=Ops::VolumeSettings(); volumeBudget.MaximumCells=1;
+    const auto refusedSolid=BRepClass3d_ImplicitCylinderIO::QualifySolid(storedGeometry,volumeBudget);
+    EXPECT_FALSE(refusedSolid.Verified); EXPECT_TRUE(refusedSolid.Shape.IsNull());
+    volumeBudget=Ops::VolumeSettings(); volumeBudget.AbsoluteTolerance=100;
+    const auto coarseSolid=BRepClass3d_ImplicitCylinderIO::QualifySolid(storedGeometry,volumeBudget);
+    EXPECT_TRUE(coarseSolid.Volume.Verified); EXPECT_FALSE(coarseSolid.Verified);
+    EXPECT_TRUE(coarseSolid.Shape.IsNull());
+    if (negative)
+    {
+      static size_t callbacks=0;
+      volumeBudget=Ops::VolumeSettings(); volumeBudget.WorkCheckpoint=[] { ++callbacks; };
+      callbacks=0;
+      ASSERT_TRUE(BRepClass3d_ImplicitCylinderIO::BoundVolume(storedGeometry,volumeBudget).Verified);
+      ASSERT_GT(callbacks,0);
+      ++callbacks;
+      volumeBudget.WorkCheckpoint=[] { if (--callbacks == 0) throw Standard_AbortiveTransaction("late restored solid cancellation"); };
+      EXPECT_THROW(BRepClass3d_ImplicitCylinderIO::QualifySolid(storedGeometry,volumeBudget),Standard_AbortiveTransaction);
+      EXPECT_FALSE(restored.SolidValidated);
+    }
     const auto sideSurface = occ::down_cast<Geom_CylindricalSurface>(BRep_Tool::Surface(restored.Faces[1]));
     const double sideRadius = sideSurface->Radius();
     sideSurface->SetRadius(sideRadius+.05);

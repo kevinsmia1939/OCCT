@@ -1461,27 +1461,34 @@ BRepClass3d_ImplicitCylinder::MaterialPoint BRepClass3d_ImplicitCylinder::Classi
 BRepClass3d_ImplicitCylinder::VolumeBounds BRepClass3d_ImplicitCylinder::BoundMaterialVolume(
   const ShellGeometry& geometry, const VolumeSettings& settings)
 {
+  require(geometry.BoundaryVerified && geometry.Source.Source.TopologyValidated
+            && geometry.Source.ToleranceVerified, "cylinder_volume_requires_qualified_geometry");
+  const auto& reference = geometry.Source.Source.Source.Reference;
+  const auto& recipe = reference.Source.Boundary.Source.Boundary.Source.Regions;
+  require(reference.MathematicalCorrespondenceVerified && reference.Source.MonotonicityVerified,
+          "cylinder_volume_reference_missing");
+  return BoundVerifiedFieldVolume(recipe.Field,recipe.Parameters,recipe.Negative,reference.Source.Direction,settings);
+}
+
+BRepClass3d_ImplicitCylinder::VolumeBounds BRepClass3d_ImplicitCylinder::BoundVerifiedFieldVolume(
+  const TopoDS_Face& primitive, const Settings& s, bool negative, int direction,
+  const VolumeSettings& settings)
+{
   require(std::isfinite(settings.AbsoluteTolerance) && settings.AbsoluteTolerance > 0
             && settings.MaximumDepth >= 0 && settings.MaximumDepth <= 32
             && settings.MaximumCells > 0 && settings.MaximumCells <= 2000000
             && settings.MaximumRootTests > 0 && settings.MaximumRootTests <= 50000000,
           "invalid_cylinder_volume_budget");
-  require(geometry.BoundaryVerified && geometry.Source.Source.TopologyValidated
-            && geometry.Source.ToleranceVerified, "cylinder_volume_requires_qualified_geometry");
+  require(direction == 1 || direction == -1,"cylinder_volume_axial_direction");
   VolumeBounds result; result.AbsoluteTolerance = settings.AbsoluteTolerance;
   const auto work = [&] { if (settings.WorkCheckpoint) settings.WorkCheckpoint(); };
   try
   {
-    const auto& reference = geometry.Source.Source.Source.Reference;
-    const auto& recipe = reference.Source.Boundary.Source.Boundary.Source.Regions;
-    const auto& s = recipe.Parameters;
-    require(reference.MathematicalCorrespondenceVerified && reference.Source.MonotonicityVerified,
-            "cylinder_volume_reference_missing");
-    const auto data = occ::down_cast<BRep_TImplicitFace>(recipe.Field.TShape());
+    const auto data = occ::down_cast<BRep_TImplicitFace>(primitive.TShape());
     require(!data.IsNull() && !data->Field().IsNull()
               && typeid(*data->Field()) == typeid(Geom_ImplicitGyroid), "cylinder_volume_field_type");
     const auto* field = static_cast<const Geom_ImplicitGyroid*>(data->Field().get());
-    const double scale = std::abs((recipe.Field.Location() * data->Location()).Transformation().ScaleFactor());
+    const double scale = std::abs((primitive.Location() * data->Location()).Transformation().ScaleFactor());
     const double k = 2 * std::acos(-1.) / field->Period() / scale;
     const double hessian = 4 * k * k, lipschitz = field->LipschitzBound() / scale;
     const double area = std::acos(-1.) * s.Radius * s.Radius;
@@ -1499,7 +1506,7 @@ BRepClass3d_ImplicitCylinder::VolumeBounds BRepClass3d_ImplicitCylinder::BoundMa
               && std::isfinite(scalarReserve) && s.Radius > 2 * precision
               && std::isfinite(heightResolution) && heightResolution > precision,
             "cylinder_volume_precision");
-    const bool bottom = recipe.Negative == (reference.Source.Direction > 0);
+    const bool bottom = negative == (direction > 0);
     const gp_Vec x(s.Frame.XDirection()), y(s.Frame.YDirection()), axis(s.Frame.Direction());
     struct Cell { double X0, X1, Y0, Y1, Lower = 0, Upper = 0; int Depth = 0; size_t Order = 0; };
     struct Priority { bool operator()(const Cell& a, const Cell& b) const {
@@ -1525,8 +1532,8 @@ BRepClass3d_ImplicitCylinder::VolumeBounds BRepClass3d_ImplicitCylinder::BoundMa
         if ((result.RootTests % 64) == 0) work();
         require(result.RootTests < settings.MaximumRootTests, "cylinder_volume_root_budget"); ++result.RootTests;
         const auto p = s.Frame.Location().Translated(x * qx + y * qy + axis * height);
-        const auto gradient = BRep_ImplicitTool::Gradient(recipe.Field, p);
-        const double f = reference.Source.Direction * BRep_ImplicitTool::Value(recipe.Field, p);
+        const auto gradient = BRep_ImplicitTool::Gradient(primitive, p);
+        const double f = direction * BRep_ImplicitTool::Value(primitive, p);
         const double error = std::abs(gradient.Dot(x)) * rx + std::abs(gradient.Dot(y)) * ry + remainder;
         require(std::isfinite(f) && std::isfinite(error), "cylinder_volume_root_nonfinite");
         return std::make_pair(f, error);

@@ -75,5 +75,22 @@ public:
   //! The original loaded owner and its flags remain unchanged.
   Standard_EXPORT static Geometry CheckGeometry(const StoredSolid&,
     size_t maximumIntervals = 200000);
+  Standard_EXPORT static BRepClass3d_ImplicitCylinder::VolumeBounds BoundVolume(
+    const Geometry&, const BRepClass3d_ImplicitCylinder::VolumeSettings&);
+  struct Solid
+  {
+    Geometry Source;
+    BRepClass3d_ImplicitCylinder::VolumeBounds Volume;
+    TopoDS_Solid Shape; //!< Same stored graph, only after successful qualification.
+    bool Verified = false;
+    std::string Reason;
+  };
+  //! Fresh positive/partial material-volume gate. Reuses the actual stored
+  //! solid rather than constructing a replacement; generic consumers unsupported.
+  Standard_EXPORT static Solid QualifySolid(const Geometry&,
+    const BRepClass3d_ImplicitCylinder::VolumeSettings&);
+  //! Re-export the qualified restored graph with fresh numeric provenance.
+  //! Reading it again still clears geometry/volume/solid certificates.
+  Standard_EXPORT static void Write(const Solid&, Standard_OStream&);
 };
 #endif

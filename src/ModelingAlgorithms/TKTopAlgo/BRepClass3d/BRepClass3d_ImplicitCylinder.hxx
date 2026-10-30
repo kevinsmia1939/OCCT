@@ -9,7 +9,8 @@
 #include <TopoDS_Solid.hxx>
 #include <TopAbs_State.hxx>
 
-//! Restricted native cap-region assembly; NOT a cylinder Boolean/solid builder.
+class BRepClass3d_ImplicitCylinderIO;
+//! Native gyroid/cylinder topology and explicit implicit-aware qualification.
 class BRepClass3d_ImplicitCylinder
 {
 public:
@@ -235,5 +236,11 @@ public:
   //! Structural shared-topology validation only. Does not restore certificates.
   Standard_EXPORT static void ValidateStoredShellTopology(const TopoDS_Shell&,
     const std::vector<TopoDS_Face>&);
+private:
+  friend class BRepClass3d_ImplicitCylinderIO;
+  //! Shared integrator, reachable only through fresh qualified geometry paths.
+  Standard_EXPORT static VolumeBounds BoundVerifiedFieldVolume(const TopoDS_Face&,
+    const BRep_ImplicitCylinderSection::Settings&, bool negative, int direction,
+    const VolumeSettings&);
 };
 #endif

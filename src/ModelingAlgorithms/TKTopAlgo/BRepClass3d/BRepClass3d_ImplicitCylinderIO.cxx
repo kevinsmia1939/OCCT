@@ -25,6 +25,7 @@
 #include <NCollection_IndexedMap.hxx>
 #include <TopTools_ShapeMapHasher.hxx>
 #include <Standard_DomainError.hxx>
+#include <Standard_AbortiveTransaction.hxx>
 #include <algorithm>
 #include <cmath>
 #include <iomanip>
@@ -36,6 +37,7 @@
 namespace
 {
 using IO = BRepClass3d_ImplicitCylinderIO;
+void writeStoredRecord(const IO::StoredSolid&, Standard_OStream&);
 using Map = NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher>;
 constexpr size_t MaxBytes = 16 * 1024 * 1024, MaxMath = 65536, MaxPoles = 65536;
 void check(bool ok, const char* reason) { if (!ok) throw Standard_DomainError(reason); }
@@ -161,6 +163,13 @@ void BRepClass3d_ImplicitCylinderIO::Write(const BRepClass3d_ImplicitCylinder::N
   value.StoredAxialDirection = shell.Source.Reference.Source.Direction;
   value.StoredBoundaryBound = solid.Source.BoundaryBound; value.StoredVolumeLower = solid.Volume.Lower;
   value.StoredVolumeUpper = solid.Volume.Upper; value.StoredVolumeTolerance = solid.Volume.AbsoluteTolerance;
+  writeStoredRecord(value,output);
+}
+
+namespace
+{
+void writeStoredRecord(const IO::StoredSolid& value, Standard_OStream& output)
+{
   validate(value);
   std::ostringstream primitive, math; BRep_ImplicitIO::Write(value.Primitive, primitive);
   auto bare = value.Faces[2]; bare.TShape(bare.TShape()->EmptyCopy()); BRep_ImplicitIO::Write(bare, math);
@@ -210,6 +219,7 @@ void BRepClass3d_ImplicitCylinderIO::Write(const BRepClass3d_ImplicitCylinder::N
   }
   out << "END\n"; const auto text = out.str(); check(bool(out) && text.size() <= MaxBytes, "cylinder_io_record_size");
   output.write(text.data(), std::streamsize(text.size())); check(bool(output), "cylinder_io_output");
+}
 }
 
 void BRepClass3d_ImplicitCylinderIO::Read(Standard_IStream& input, StoredSolid& destination)
@@ -841,4 +851,54 @@ IO::Geometry IO::CheckGeometry(const StoredSolid& value, size_t maximumIntervals
     result.Boundary.Reason=error.what() ? error.what() : "cylinder_io_geometry_unresolved";
   }
   return result;
+}
+
+BRepClass3d_ImplicitCylinder::VolumeBounds IO::BoundVolume(const Geometry& geometry,
+  const BRepClass3d_ImplicitCylinder::VolumeSettings& settings)
+{
+  check(geometry.Verified && geometry.Boundary.Verified,"cylinder_io_volume_requires_geometry");
+  const auto& s=geometry.Parameters;
+  const gp_Vec axis(s.Frame.Direction());
+  const auto middle=s.Frame.Location().Translated(axis*((s.HeightMinimum+s.HeightMaximum)*.5));
+  const double derivative=BRep_ImplicitTool::Gradient(geometry.Source.Primitive,middle).Dot(axis);
+  check(std::isfinite(derivative) && derivative != 0,"cylinder_io_volume_derivative");
+  return BRepClass3d_ImplicitCylinder::BoundVerifiedFieldVolume(geometry.Source.Primitive,s,
+    geometry.Source.Negative,derivative > 0 ? 1 : -1,settings);
+}
+
+IO::Solid IO::QualifySolid(const Geometry& geometry,
+  const BRepClass3d_ImplicitCylinder::VolumeSettings& settings)
+{
+  Solid result; result.Source=geometry; result.Volume=BoundVolume(geometry,settings);
+  if (!result.Volume.Verified) { result.Reason=result.Volume.Reason; return result; }
+  try
+  {
+    check(result.Volume.Lower > 0 && result.Volume.Upper < result.Volume.CylinderVolume,
+      "cylinder_io_solid_positive_partial_volume_unproved");
+    check(!geometry.Source.Shape.IsNull() && geometry.Source.Shape.Closed(),"cylinder_io_solid_not_closed");
+    if (settings.WorkCheckpoint) settings.WorkCheckpoint();
+    result.Shape=geometry.Source.Shape;
+    result.Verified=true; result.Reason="stored_cylinder_material_solid_validated";
+  }
+  catch (const Standard_AbortiveTransaction&) { throw; }
+  catch (const Standard_Failure& error)
+  { result.Reason=error.what() ? error.what() : "cylinder_io_solid_unresolved"; }
+  return result;
+}
+
+void IO::Write(const Solid& solid, Standard_OStream& output)
+{
+  check(solid.Verified && solid.Volume.Verified && solid.Source.Verified,
+    "cylinder_io_requires_qualified_restored_solid");
+  auto value=solid.Source.Source;
+  value.Shape=solid.Shape;
+  value.Parameters=solid.Source.Parameters;
+  value.StoredBoundaryBound=solid.Source.Boundary.Bound;
+  value.StoredVolumeLower=solid.Volume.Lower; value.StoredVolumeUpper=solid.Volume.Upper;
+  value.StoredVolumeTolerance=solid.Volume.AbsoluteTolerance;
+  const gp_Vec axis(value.Parameters.Frame.Direction());
+  const auto middle=value.Parameters.Frame.Location().Translated(axis*
+    ((value.Parameters.HeightMinimum+value.Parameters.HeightMaximum)*.5));
+  value.StoredAxialDirection=BRep_ImplicitTool::Gradient(value.Primitive,middle).Dot(axis) > 0 ? 1 : -1;
+  writeStoredRecord(value,output);
 }
