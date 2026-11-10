@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Kavin Teenakul
 // SPDX-License-Identifier: LGPL-2.1-only WITH OCCT-exception-1.0
 #include <BRepClass3d_ImplicitCylinder.hxx>
+#include <BRepClass3d_ImplicitWork.hxx>
 #include <BRep_ImplicitTool.hxx>
 #include <BRep_TImplicitFace.hxx>
 #include <BRep_TImplicitCylinderPatch.hxx>
@@ -40,7 +41,8 @@ namespace
 using Settings = BRep_ImplicitCylinderSection::Settings;
 using Caps = BRepClass3d_ImplicitCylinder::Caps;
 void require(bool value, const char* reason) { if (!value) throw Standard_DomainError(reason); }
-void checkpoint(const Settings& s) { if (s.WorkCheckpoint) s.WorkCheckpoint(); }
+void checkpoint(const Settings& s)
+{ BRepClass3d_ImplicitWork::Checkpoint(); if (s.WorkCheckpoint) s.WorkCheckpoint(); }
 struct Link { TopoDS_Edge Edge; double Area = 0, Length = 0, Tolerance = 0; };
 struct Cycle
 {
@@ -1398,6 +1400,7 @@ BRepClass3d_ImplicitCylinder::MaterialPoint BRepClass3d_ImplicitCylinder::Classi
   const TopoDS_Face& primitive, const Settings& s, bool negative, const AxialSheet& axial,
   double boundaryBound, const gp_Pnt& point, double pointTolerance)
 {
+  BRepClass3d_ImplicitWork::Checkpoint();
   require(axial.MonotonicityVerified && axial.DerivativeLowerBound > 0
             && std::isfinite(boundaryBound) && boundaryBound <= s.DistanceTolerance,
           "cylinder_material_reference_unqualified");
@@ -1503,7 +1506,8 @@ BRepClass3d_ImplicitCylinder::VolumeBounds BRepClass3d_ImplicitCylinder::BoundVe
           "invalid_cylinder_volume_budget");
   require(direction == 1 || direction == -1,"cylinder_volume_axial_direction");
   VolumeBounds result; result.AbsoluteTolerance = settings.AbsoluteTolerance;
-  const auto work = [&] { if (settings.WorkCheckpoint) settings.WorkCheckpoint(); };
+  const auto work = [&] { BRepClass3d_ImplicitWork::Checkpoint();
+    if (settings.WorkCheckpoint) settings.WorkCheckpoint(); };
   try
   {
     const auto data = occ::down_cast<BRep_TImplicitFace>(primitive.TShape());
@@ -1641,6 +1645,7 @@ BRepClass3d_ImplicitCylinder::NativeSolid BRepClass3d_ImplicitCylinder::BuildNat
             "cylinder_solid_positive_partial_volume_unproved");
     require(!geometry.Source.Source.Shell.IsNull() && geometry.Source.Source.Shell.Closed(),
             "cylinder_solid_missing_closed_shell");
+    BRepClass3d_ImplicitWork::Checkpoint();
     if (settings.WorkCheckpoint) settings.WorkCheckpoint();
     BRep_Builder builder; builder.MakeSolid(result.Solid); builder.Add(result.Solid, geometry.Source.Source.Shell);
     result.Solid.Closed(true); result.SolidValidated = true; result.Reason = "native_cylinder_material_solid_validated";

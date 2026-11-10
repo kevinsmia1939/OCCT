@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Kavin Teenakul
 // SPDX-License-Identifier: LGPL-2.1-only WITH OCCT-exception-1.0
 #include <BRepClass3d_ImplicitCylinderIO.hxx>
+#include <BRepClass3d_ImplicitWork.hxx>
 #include <BRep_ImplicitIO.hxx>
 #include <BRep_ImplicitTool.hxx>
 #include <BRep_TImplicitCylinderPatch.hxx>
@@ -40,7 +41,8 @@ using IO = BRepClass3d_ImplicitCylinderIO;
 void writeStoredRecord(const IO::StoredSolid&, Standard_OStream&);
 using Map = NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher>;
 constexpr size_t MaxBytes = 16 * 1024 * 1024, MaxMath = 65536, MaxPoles = 65536;
-void check(bool ok, const char* reason) { if (!ok) throw Standard_DomainError(reason); }
+void check(bool ok, const char* reason)
+{ BRepClass3d_ImplicitWork::Checkpoint(); if (!ok) throw Standard_DomainError(reason); }
 double real(std::istream& in) { double v; check(bool(in >> v) && std::isfinite(v), "cylinder_io_real"); return v; }
 int integer(std::istream& in, int low, int high)
 { int v; check(bool(in >> v) && v >= low && v <= high, "cylinder_io_integer"); return v; }
@@ -291,7 +293,8 @@ void BRepClass3d_ImplicitCylinderIO::Read(Standard_IStream& input, StoredSolid& 
   word(in,"END"); in>>std::ws; check(in.eof(),"cylinder_io_trailing_data");
   TopoDS_Shell shell; builder.MakeShell(shell); for(const auto& face:value.Faces)builder.Add(shell,face);
   shell.Closed(true); builder.MakeSolid(value.Shape); builder.Add(value.Shape,shell); value.Shape.Closed(true);
-  validate(value); value.TopologyValidated=true; destination=std::move(value);
+  validate(value); BRepClass3d_ImplicitWork::Checkpoint();
+  value.TopologyValidated=true; destination=std::move(value);
 }
 
 BRepClass3d_ImplicitCylinderIO::CurveCoherence
@@ -387,6 +390,7 @@ BRepClass3d_ImplicitCylinderIO::CheckCurveCoherence(const StoredSolid& value,
     }
     result.Verified = true; result.Reason = "cylinder_stored_curve_coherence_verified";
   }
+  catch (const Standard_AbortiveTransaction&) { throw; }
   catch (const Standard_Failure& error)
   { result.Reason = error.what() ? error.what() : "cylinder_io_coherence_unresolved"; }
   return result;
@@ -488,6 +492,7 @@ IO::CurveCoherence checkStoredSeam(const IO::StoredSolid& value,
     result.Verified = true;
     result.Reason = masked ? "cylinder_stored_masked_seam_verified" : "cylinder_stored_primitive_seam_verified";
   }
+  catch (const Standard_AbortiveTransaction&) { throw; }
   catch (const Standard_Failure& error)
   { result.Reason = error.what() ? error.what() : "cylinder_io_seam_unresolved"; }
   return result;
@@ -570,6 +575,7 @@ IO::CurveCoherence IO::CheckSeamCoverage(const StoredSolid& value, size_t maximu
           "cylinder_io_coverage_winding");
     result.Verified=true; result.Reason="cylinder_stored_seam_reverse_coverage_verified";
   }
+  catch (const Standard_AbortiveTransaction&) { throw; }
   catch (const Standard_Failure& error)
   { result.Reason=error.what() ? error.what() : "cylinder_io_coverage_unresolved"; }
   return result;
@@ -671,6 +677,7 @@ IO::CurveCoherence IO::CheckRetainedCap(const StoredSolid& value, size_t maximum
       "cylinder_io_cap_tolerance");
     result.Verified=true; result.Reason="cylinder_stored_retained_cap_verified";
   }
+  catch (const Standard_AbortiveTransaction&) { throw; }
   catch (const Standard_Failure& error)
   { result.Reason=error.what() ? error.what() : "cylinder_io_cap_unresolved"; }
   return result;
@@ -783,6 +790,7 @@ IO::CurveCoherence IO::CheckRetainedSide(const StoredSolid& value, size_t maximu
       "cylinder_io_side_combined_tolerance");
     result.Verified=true; result.Reason="cylinder_stored_retained_side_verified";
   }
+  catch (const Standard_AbortiveTransaction&) { throw; }
   catch (const Standard_Failure& error)
   { result.Reason=error.what() ? error.what() : "cylinder_io_side_unresolved"; }
   return result;
@@ -845,6 +853,7 @@ IO::Geometry IO::CheckGeometry(const StoredSolid& value, size_t maximumIntervals
     result.Boundary.Reason="cylinder_stored_boundary_geometry_verified";
     result.Verified=true;
   }
+  catch (const Standard_AbortiveTransaction&) { throw; }
   catch (const Standard_Failure& error)
   {
     result.Boundary.Verified=false;
@@ -886,6 +895,7 @@ IO::Solid IO::QualifySolid(const Geometry& geometry,
     check(result.Volume.Lower > 0 && result.Volume.Upper < result.Volume.CylinderVolume,
       "cylinder_io_solid_positive_partial_volume_unproved");
     check(!geometry.Source.Shape.IsNull() && geometry.Source.Shape.Closed(),"cylinder_io_solid_not_closed");
+    BRepClass3d_ImplicitWork::Checkpoint();
     if (settings.WorkCheckpoint) settings.WorkCheckpoint();
     result.Shape=geometry.Source.Shape;
     result.Verified=true; result.Reason="stored_cylinder_material_solid_validated";
