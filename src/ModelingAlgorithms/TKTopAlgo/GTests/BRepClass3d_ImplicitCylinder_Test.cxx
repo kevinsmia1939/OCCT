@@ -828,6 +828,31 @@ TEST(BRepClass3dImplicitCylinder, StoredCylinderSolidPreservesSharedGraphAndDrop
     EXPECT_FALSE(storedGeometry.Source.GeometryVerified);
     EXPECT_FALSE(storedGeometry.Source.VolumeVerified);
     EXPECT_FALSE(storedGeometry.Source.SolidValidated);
+    const double root = std::asin(.21) * 10 / (2 * std::acos(-1.));
+    const auto queryPoint=[&](const gp_Pnt& p) {
+      return s.Frame.Location().Translated(gp_Vec(s.Frame.XDirection())*p.X()
+        +gp_Vec(s.Frame.YDirection())*p.Y()+gp_Vec(s.Frame.Direction())*p.Z());
+    };
+    for (const auto& point : {gp_Pnt(0,0,-.5),gp_Pnt(0,0,.8),gp_Pnt(0,0,root),
+                             gp_Pnt(0,0,-1.7),gp_Pnt(0,0,1.3),gp_Pnt(.5,0,-.8),gp_Pnt(2,0,0)})
+    {
+      const auto actual=BRepClass3d_ImplicitCylinderIO::ClassifyMaterial(storedGeometry,queryPoint(point));
+      const auto expected=Ops::ClassifyMaterial(geometry,queryPoint(point));
+      EXPECT_EQ(actual.State,expected.State);
+      EXPECT_NEAR(actual.DistanceLowerBound,expected.DistanceLowerBound,1.e-10);
+      EXPECT_NEAR(actual.DistanceUpperBound,expected.DistanceUpperBound,1.e-10);
+    }
+    const auto margin=BRepClass3d_ImplicitCylinderIO::ClassifyMaterial(storedGeometry,queryPoint(gp_Pnt(0,0,root+.05)));
+    EXPECT_EQ(BRepClass3d_ImplicitCylinderIO::ClassifyMaterial(storedGeometry,queryPoint(gp_Pnt(0,0,root+.05)),
+      (margin.DistanceLowerBound+margin.DistanceUpperBound)*.5).State,TopAbs_UNKNOWN);
+    EXPECT_THROW(BRepClass3d_ImplicitCylinderIO::ClassifyMaterial(
+      BRepClass3d_ImplicitCylinderIO::Geometry(),gp_Pnt()),Standard_DomainError);
+    EXPECT_THROW(BRepClass3d_ImplicitCylinderIO::ClassifyMaterial(storedGeometry,gp_Pnt(),0),Standard_DomainError);
+    EXPECT_THROW(BRepClass3d_ImplicitCylinderIO::ClassifyMaterial(storedGeometry,
+      gp_Pnt(std::numeric_limits<double>::quiet_NaN(),0,0)),Standard_DomainError);
+    auto cancelledMaterial=storedGeometry;
+    cancelledMaterial.Parameters.WorkCheckpoint=[] { throw Standard_AbortiveTransaction("material cancelled"); };
+    EXPECT_THROW(BRepClass3d_ImplicitCylinderIO::ClassifyMaterial(cancelledMaterial,gp_Pnt()),Standard_AbortiveTransaction);
     EXPECT_FALSE(BRepClass3d_ImplicitCylinderIO::CheckGeometry(restored,1).Verified);
     auto volumeGeometry = storedGeometry;
     volumeGeometry.Source.StoredVolumeLower=100;

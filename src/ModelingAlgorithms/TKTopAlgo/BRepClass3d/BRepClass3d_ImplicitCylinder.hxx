@@ -244,6 +244,10 @@ public:
     const std::vector<TopoDS_Face>&);
 private:
   friend class BRepClass3d_ImplicitCylinderIO;
+  //! Shared spatial classifier, reachable only from qualified geometry paths.
+  Standard_EXPORT static MaterialPoint ClassifyVerifiedField(const TopoDS_Face&,
+    const BRep_ImplicitCylinderSection::Settings&, bool negative, const AxialSheet&,
+    double boundaryBound, const gp_Pnt&, double pointTolerance);
   //! Shared integrator, reachable only through fresh qualified geometry paths.
   Standard_EXPORT static VolumeBounds BoundVerifiedFieldVolume(const TopoDS_Face&,
     const BRep_ImplicitCylinderSection::Settings&, bool negative, int direction,

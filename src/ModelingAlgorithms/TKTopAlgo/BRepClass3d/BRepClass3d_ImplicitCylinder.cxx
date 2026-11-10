@@ -1391,11 +1391,23 @@ BRepClass3d_ImplicitCylinder::MaterialPoint BRepClass3d_ImplicitCylinder::Classi
   require(reference.MathematicalCorrespondenceVerified && axial.MonotonicityVerified
             && axial.DerivativeLowerBound > 0 && std::isfinite(geometry.BoundaryBound)
             && geometry.BoundaryBound <= s.DistanceTolerance, "cylinder_material_reference_unqualified");
-  const auto data = occ::down_cast<BRep_TImplicitFace>(recipe.Field.TShape());
+  return ClassifyVerifiedField(recipe.Field,s,recipe.Negative,axial,geometry.BoundaryBound,point,pointTolerance);
+}
+
+BRepClass3d_ImplicitCylinder::MaterialPoint BRepClass3d_ImplicitCylinder::ClassifyVerifiedField(
+  const TopoDS_Face& primitive, const Settings& s, bool negative, const AxialSheet& axial,
+  double boundaryBound, const gp_Pnt& point, double pointTolerance)
+{
+  require(axial.MonotonicityVerified && axial.DerivativeLowerBound > 0
+            && std::isfinite(boundaryBound) && boundaryBound <= s.DistanceTolerance,
+          "cylinder_material_reference_unqualified");
+  require(std::isfinite(pointTolerance) && pointTolerance > 0, "invalid_cylinder_point_tolerance");
+  for (int a = 1; a <= 3; ++a) require(std::isfinite(point.Coord(a)), "nonfinite_cylinder_material_point");
+  const auto data = occ::down_cast<BRep_TImplicitFace>(primitive.TShape());
   require(!data.IsNull() && !data->Field().IsNull()
             && typeid(*data->Field()) == typeid(Geom_ImplicitGyroid), "cylinder_material_field_type");
   const auto* field = static_cast<const Geom_ImplicitGyroid*>(data->Field().get());
-  const double scale = std::abs((recipe.Field.Location() * data->Location()).Transformation().ScaleFactor());
+  const double scale = std::abs((primitive.Location() * data->Location()).Transformation().ScaleFactor());
   const double lipschitz = field->LipschitzBound() / scale;
   const gp_Vec delta(s.Frame.Location(), point), x(s.Frame.XDirection()), y(s.Frame.YDirection()), axis(s.Frame.Direction());
   const double px = delta.Dot(x), py = delta.Dot(y), height = delta.Dot(axis);
@@ -1411,8 +1423,8 @@ BRepClass3d_ImplicitCylinder::MaterialPoint BRepClass3d_ImplicitCylinder::Classi
   const double qz = std::clamp(height, s.HeightMinimum, s.HeightMaximum);
   const auto projected = s.Frame.Location().Translated(x * qx + y * qy + axis * qz);
   MaterialPoint result;
-  result.FieldValueAtDomainProjection = BRep_ImplicitTool::Value(recipe.Field, projected);
-  const double selected = (recipe.Negative ? -1 : 1) * result.FieldValueAtDomainProjection;
+  result.FieldValueAtDomainProjection = BRep_ImplicitTool::Value(primitive, projected);
+  const double selected = (negative ? -1 : 1) * result.FieldValueAtDomainProjection;
   require(std::isfinite(selected), "cylinder_material_nonfinite_value");
   const bool insideDomain = radial <= s.Radius && height >= s.HeightMinimum && height <= s.HeightMaximum;
   const double outside = std::hypot(std::max(radial - s.Radius, 0.), std::abs(height - qz));
@@ -1426,11 +1438,11 @@ BRepClass3d_ImplicitCylinder::MaterialPoint BRepClass3d_ImplicitCylinder::Classi
   const double hessian = 4 * k * k;
   const double gradientReserve = 16384 * std::numeric_limits<double>::epsilon()
     * (1 + lipschitz + hessian) + (lipschitz + hessian) * precision;
-  const double localLower = axial.Direction * BRep_ImplicitTool::Gradient(recipe.Field, projected).Dot(axis)
+  const double localLower = axial.Direction * BRep_ImplicitTool::Gradient(primitive, projected).Dot(axis)
     - hessian * (rootUpper + precision) - gradientReserve;
   if (std::isfinite(localLower) && localLower > axial.DerivativeLowerBound)
     rootUpper = std::min(rootUpper, (std::abs(selected) + reserve) / localLower);
-  const bool bottom = recipe.Negative == (axial.Direction > 0);
+  const bool bottom = negative == (axial.Direction > 0);
   const double cap = bottom ? s.HeightMinimum : s.HeightMaximum;
   double lower = 0;
   double upper = std::min(std::hypot(std::max(radial - s.Radius, 0.), height - cap), outside + rootUpper)
@@ -1464,7 +1476,7 @@ BRepClass3d_ImplicitCylinder::MaterialPoint BRepClass3d_ImplicitCylinder::Classi
     if (definiteInside) result.State = TopAbs_IN;
     else if (definiteOutside) result.State = TopAbs_OUT;
   }
-  result.BoundaryAllowanceSeparated = result.DistanceLowerBound > geometry.BoundaryBound + pointTolerance;
+  result.BoundaryAllowanceSeparated = result.DistanceLowerBound > boundaryBound + pointTolerance;
   return result;
 }
 

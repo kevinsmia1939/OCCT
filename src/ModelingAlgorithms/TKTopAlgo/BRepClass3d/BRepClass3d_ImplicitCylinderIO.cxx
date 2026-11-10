@@ -853,6 +853,16 @@ IO::Geometry IO::CheckGeometry(const StoredSolid& value, size_t maximumIntervals
   return result;
 }
 
+BRepClass3d_ImplicitCylinder::MaterialPoint IO::ClassifyMaterial(const Geometry& geometry,
+  const gp_Pnt& point, double pointTolerance)
+{
+  check(geometry.Verified && geometry.Boundary.Verified,"cylinder_io_material_requires_geometry");
+  const auto axial=BRepClass3d_ImplicitCylinder::CheckAxialField(geometry.Source.Primitive,geometry.Parameters);
+  check(axial.MonotonicityVerified,"cylinder_io_material_axial_unresolved");
+  return BRepClass3d_ImplicitCylinder::ClassifyVerifiedField(geometry.Source.Primitive,
+    geometry.Parameters,geometry.Source.Negative,axial,geometry.Boundary.Bound,point,pointTolerance);
+}
+
 BRepClass3d_ImplicitCylinder::VolumeBounds IO::BoundVolume(const Geometry& geometry,
   const BRepClass3d_ImplicitCylinder::VolumeSettings& settings)
 {

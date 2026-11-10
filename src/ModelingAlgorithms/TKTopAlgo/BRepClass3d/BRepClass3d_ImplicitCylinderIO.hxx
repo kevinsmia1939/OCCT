@@ -75,6 +75,11 @@ public:
   //! The original loaded owner and its flags remain unchanged.
   Standard_EXPORT static Geometry CheckGeometry(const StoredSolid&,
     size_t maximumIntervals = 200000);
+  //! Mathematical material query on the unchanged, freshly qualified stored
+  //! graph. Recomputes axial bounds; raw restoration flags are insufficient.
+  //! UNKNOWN remains explicit, and generic OCCT classifiers are unsupported.
+  Standard_EXPORT static BRepClass3d_ImplicitCylinder::MaterialPoint ClassifyMaterial(
+    const Geometry&, const gp_Pnt&, double pointTolerance = 1.e-7);
   Standard_EXPORT static BRepClass3d_ImplicitCylinder::VolumeBounds BoundVolume(
     const Geometry&, const BRepClass3d_ImplicitCylinder::VolumeSettings&);
   struct Solid
